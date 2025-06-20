@@ -1,12 +1,13 @@
 mod config;
 mod connection;
-mod keypair;
 mod lure;
+mod router;
 mod utils;
+pub(crate) mod packet;
 
 use anyhow::anyhow;
+use std::env;
 use std::error::Error;
-use std::{env};
 
 use config::LureConfig;
 use lure::Lure;
@@ -15,9 +16,13 @@ use crate::config::LureConfigLoadError;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    femme::start();
+    
     let current_dir = env::current_dir()?;
     let config_file = current_dir.join("settings.toml");
-    let config_file_path = config_file.to_str().ok_or(anyhow!("Failed to get config file path"))?;
+    let config_file_path = config_file
+        .to_str()
+        .ok_or(anyhow!("Failed to get config file path"))?;
 
     println!("{}", config_file_path);
 
@@ -26,7 +31,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             // Save config to fill missing fields
             let _ = config.save(config_file_path);
             Ok(config)
-        },
+        }
         Err(error) => {
             match error {
                 LureConfigLoadError::Io(_) => {
@@ -35,13 +40,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     // Save the config to disk
                     let _ = default_config.save(config_file_path);
                     Ok(default_config)
-                },
-                LureConfigLoadError::Parse(parse_error) => Err(parse_error)
+                }
+                LureConfigLoadError::Parse(parse_error) => Err(parse_error),
             }
-        },
+        }
     };
 
-    let mut lure = Lure::new(config?);
+    let lure = Box::leak(Box::new(Lure::new(config?)));
     lure.start().await?;
     Ok(())
 }

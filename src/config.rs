@@ -1,6 +1,6 @@
-use std::{fs, collections::HashMap};
 use std::fs::File;
 use std::io::prelude::*;
+use std::{collections::HashMap, fs};
 
 use serde::{Deserialize, Serialize};
 
@@ -69,7 +69,7 @@ impl Default for LureConfig {
             proxy: Default::default(),
             hosts: Self::default_hosts(),
             servers: Self::default_servers(),
-            other_fields: Default::default()
+            other_fields: Default::default(),
         }
     }
 }
@@ -87,18 +87,21 @@ impl LureConfig {
         servers
     }
 
-    pub fn load (path: &str) -> anyhow::Result<Self, LureConfigLoadError> {
+    pub fn load(path: &str) -> anyhow::Result<Self, LureConfigLoadError> {
         let raw = fs::read_to_string(path).map_err(|err| LureConfigLoadError::Io(err))?;
         let config: Self = toml::from_str(&raw).map_err(|err| LureConfigLoadError::Parse(err))?;
 
         for field in &config.other_fields {
-            println!("Unknown configuration '{}' with value {:?}", field.0, field.1);
+            println!(
+                "Unknown configuration '{}' with value {:?}",
+                field.0, field.1
+            );
         }
 
         Ok(config)
     }
 
-    pub fn save (&self, path: &str) -> anyhow::Result<()>{
+    pub fn save(&self, path: &str) -> anyhow::Result<()> {
         let config_str = toml::to_string(&self)?;
         let mut file = File::create(path)?;
         file.write_all(config_str.as_bytes())?;
@@ -108,5 +111,5 @@ impl LureConfig {
 
 pub enum LureConfigLoadError {
     Io(std::io::Error),
-    Parse(toml::de::Error)
+    Parse(toml::de::Error),
 }

@@ -3,60 +3,47 @@
 <p>
 
 <h1 align=center>Lure</h1>
-<p align=center>The true next-gen L7 minecraft proxy and load balancer. Built in Rust, Tokio and Valence.</p>
+<p align=center>The true next-gen <strike>L7</strike> L4 minecraft proxy and load balancer. Built in Rust, Tokio and Valence.</p>
+
+## Purpose
+
+Route to Minecraft server with basic HAProxy protocol
 
 ## Why?
 
-Rust is a powerful programming language and a great development environment with a large and growing ecosystem. The efficiency of the applications built in it is such that several companies are moving their products to this technology.
+This fork is meant to strip down the "L7" of the proxy to left with a "L4" proxy that only route to server. It support match routing, ping-passthrough (with ability to overrides too), placeholder, proxy-proto and so more. Also make core dependencies like valence up-to-date
 
-Proxies built in Java store too much player data in memory. They have unneeded functions and complex API systems that in the end make a simple proxy whose job is to carry packets from one point to another become an entire server.
+This project (fork) is meant to "replace" [Gate](https://gate.minekube.com/). Turns out, Gate is sucks at actually applying config live.
 
-Lure came along to fix that.
+~~Rust is a powerful programming language and a great development environment with a large and growing ecosystem. The efficiency of the applications built in it is such that several companies are moving their products to this technology.~~ I used to love this 🥷 language
+
+~~Proxies built in Java store too much player data in memory. They have unneeded functions and complex API systems that in the end make a simple proxy whose job is to carry packets from one point to another become an entire server.~~ No you want to use some proxy like Velocity. You need it to compatible with plugins that actually in one ecosystem. This project doesn't affect your stack.
+
+~~Lure came along to fix that.~~
 
 ## 📝 To Do
 
-- [X] Configuration system.
-- [X] MoTD.
-- [X] Favicon.
+- [ ] Configuration system. (redo)
+- [X] ~~MoTD.~~
+- [X] ~~Favicon.~~
 - [X] Proxy client to a server.
 - [X] Multiple servers.
 - [X] Multiple hosts.
-- [X] Compression.
-- [X] Online mode.
-- [ ] Player limit.
-- [X] IP Forwarding.
-- [ ] Switch between servers.
-- [ ] Plugin channels.
-- [ ] Internal Commands.
-- [ ] Addon API.
+- [X] ~~Compression.~~
+- [X] ~~Online mode.~~ *Basically not effective*
+- [ ] ~~Player limit.~~
+- [ ] IP Forwarding.
+- [ ] ~~Switch between servers.~~
+- [ ] ~~Plugin channels.~~
+- [ ] ~~Internal Commands.~~
+- [ ] ~~Addon API.~~ Route store control API
+- [ ] Metrics
+- [ ] Ping fallback/override (free stuff comes with ads, who doesn't love that)
+- [ ] `LoginHello` snooping (valence's `LoginHelloC2S` decoder currently working improperly)
+- [ ] Socket ratelimit
+- [ ] Anomaly tracking
+- [ ] Be evil
 
-## ⚙️ Development
+## Credits
 
-1. Clone this repository.
-2. Install Rust and Cargo.
-
-### 🧪 Debug mode
-
-3. Run `cargo run` in your terminal.
-
-### 📦 Build
-
-3. Run `cargo build --release` in your terminal.
-
-## 🤝 Contributing
-
-Contributions, issues and feature requests are welcome!
-Feel free to check [issues page](https://github.com/sammwyy/lure/issues).
-
-## ❤️ Show your support
-
-Give a ⭐️ if this project helped you!
-
-Or buy me a coffee-latte 🙌🏾
-
-[Ko-fi](https://ko-fi.com/sammwy) | [Patreon](https://patreon.com/sammwy)
-
-## 📝 License
-
-Copyright © 2023 [Sammwy](https://github.com/sammwyy).
-This project is [MIT](LICENSE) licensed.
+Original implementor [sammwyy](https://github.com/sammwyy)
