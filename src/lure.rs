@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use anyhow::bail;
 use log::__private_api::loc;
+use opentelemetry::global;
+use opentelemetry::metrics::Meter;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 
@@ -10,7 +12,8 @@ use tokio::task::JoinHandle;
 use valence::prelude::*;
 
 use crate::config::LureConfig;
-use crate::connection::connection::Connection;
+use crate::connection::connection::{Connection, SocketIntent};
+use crate::packet::{OwnedHandshake, OwnedPacket};
 use crate::router::status::{QueryResponseKind, StatusBouncer};
 use crate::router::{Route, RouterInstance, Session};
 use valence_protocol::packets::handshaking::handshake_c2s::HandshakeNextState;
@@ -18,25 +21,25 @@ use valence_protocol::packets::handshaking::HandshakeC2s;
 use valence_protocol::packets::status::{
     QueryPingC2s, QueryPongS2c, QueryRequestC2s, QueryResponseS2c,
 };
-use valence_protocol::{Bounded, VarInt};
-use valence_protocol::packets::login::LoginHelloC2s;
-use crate::packet::{OwnedHandshake, OwnedLoginHello, OwnedPacket};
 
 #[derive(Clone, Debug)]
 pub struct Lure {
     config: LureConfig,
     router: Arc<RouterInstance>,
     status: Arc<StatusBouncer>,
+    meter: Meter,
 }
 
 impl Lure {
     pub fn new(config: LureConfig) -> Lure {
-        let router = Arc::new(RouterInstance::new());
-        let status = Arc::new(StatusBouncer::new(router.clone()));
+        let meter = global::meter("alure");
+        let router = Arc::new(RouterInstance::new(&meter));
+        let status = Arc::new(StatusBouncer::new(router.clone(), &meter));
         Lure {
             config,
             router,
             status,
+            meter,
         }
     }
 
@@ -60,7 +63,6 @@ impl Lure {
         // Start server.
         let listener = TcpListener::bind(address).await?;
         let semaphore = Arc::new(Semaphore::new(max_connections));
-
 
         loop {
             // Accept connection first
@@ -92,14 +94,13 @@ impl Lure {
 
                         drop(permit);
                     });
-                },
+                }
                 Err(_) => {
                     // Too many connections, reject immediately
                     drop(client);
                 }
             }
         }
-
 
         // while let Ok(permit) = semaphore.clone().acquire_owned().await {
         // // loop {
@@ -134,7 +135,7 @@ impl Lure {
         // Client state
         let (client_read, client_write) = client_socket.into_split();
 
-        let connection = Connection::new(address, client_read, client_write);
+        let connection = Connection::new(address, client_read, client_write, SocketIntent::GreetToProxy);
 
         self.handle_handshake(connection).await?;
         Ok(())
@@ -185,11 +186,13 @@ impl Lure {
             .create_session(&handshake.server_address, address)
             .await
         {
-            if let Err(_e) = self.handle_proxy_session(
-                client, handshake,
-                // &login,
-                &session
-            ).await {
+            if let Err(_e) = self
+                .handle_proxy_session(
+                    client, handshake, // &login,
+                    &session,
+                )
+                .await
+            {
             } else {
             }
             self.router.terminate_session(&address).await;
@@ -229,7 +232,7 @@ impl Lure {
 
         let (server_read, server_write) = server_stream.into_split();
 
-        let mut server = Connection::new(server_address, server_read, server_write);
+        let mut server = Connection::new(server_address, server_read, server_write, SocketIntent::GreetToBackend);
 
         // Replay necessary packets
         server.send(&handshake.as_packet()).await?;
@@ -241,9 +244,9 @@ impl Lure {
 
     async fn passthrough_now(&self, client: Connection, server: Connection) -> anyhow::Result<()> {
         let mut client_to_server =
-            Connection::new(client.address.clone(), client.read, server.write);
+            Connection::new(client.address.clone(), client.read, server.write, SocketIntent::PassthroughServerBound);
         let mut server_to_client =
-            Connection::new(server.address.clone(), server.read, client.write);
+            Connection::new(server.address.clone(), server.read, client.write, SocketIntent::PassthroughClientBound);
 
         let c2s_fut: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
             loop {

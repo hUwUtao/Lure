@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use opentelemetry::metrics::Meter;
 use tokio::sync::RwLock;
 use tokio::time::timeout;
 use valence_protocol::packets::handshaking::handshake_c2s::HandshakeNextState;
@@ -29,7 +30,7 @@ pub struct StatusBouncer {
 
 impl StatusBouncer {
     /// Create a new StatusBouncer with default cache duration of 30 seconds
-    pub fn new(router: Arc<RouterInstance>) -> Self {
+    pub fn new(router: Arc<RouterInstance>, meter: &Meter) -> Self {
         StatusBouncer {
             cache: RwLock::new(HashMap::new()),
             router,

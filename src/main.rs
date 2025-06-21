@@ -1,9 +1,10 @@
 mod config;
 mod connection;
 mod lure;
-mod router;
-mod utils;
 pub(crate) mod packet;
+mod router;
+pub(crate) mod telemetry;
+mod utils;
 
 use anyhow::anyhow;
 use std::env;
@@ -13,11 +14,13 @@ use config::LureConfig;
 use lure::Lure;
 
 use crate::config::LureConfigLoadError;
+use crate::telemetry::init_meter_provider;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     femme::start();
-    
+    let meter_provider = init_meter_provider()?;
+
     let current_dir = env::current_dir()?;
     let config_file = current_dir.join("settings.toml");
     let config_file_path = config_file
@@ -48,5 +51,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let lure = Box::leak(Box::new(Lure::new(config?)));
     lure.start().await?;
+    meter_provider.shutdown()?;
     Ok(())
 }

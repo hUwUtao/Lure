@@ -1,9 +1,13 @@
+use crate::connection::connection::SocketIntent::{Generic, GreetToBackend, GreetToProxy, PassthroughClientBound, PassthroughServerBound};
 use bytes::BytesMut;
+use log::{debug, info};
+use opentelemetry::metrics::{Counter, Meter};
+use opentelemetry::{global, KeyValue};
+use opentelemetry_sdk::metrics::data::Metric;
 use std::io;
 use std::io::ErrorKind;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::time::Duration;
-use log::{debug, info};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::time::timeout;
@@ -11,6 +15,7 @@ use valence_protocol::decode::PacketFrame;
 use valence_protocol::packets::login::LoginDisconnectS2c;
 use valence_protocol::{Decode, Encode, Packet, Text};
 use valence_protocol::{PacketDecoder, PacketEncoder};
+
 pub struct Connection {
     pub address: SocketAddr,
     pub enc: PacketEncoder,
@@ -18,12 +23,54 @@ pub struct Connection {
     pub read: OwnedReadHalf,
     pub write: OwnedWriteHalf,
     pub frame: PacketFrame,
+    metric: ConnectionMetric,
+    intent: KeyValue,
+}
+
+pub enum SocketIntent {
+    GreetToProxy,
+    GreetToBackend,
+    PassthroughClientBound,
+    PassthroughServerBound,
+    Generic,
+}
+
+impl SocketIntent {
+    fn as_attr(&self) -> KeyValue {
+        // recv+pipe/send
+        let a= match (self) {
+            GreetToProxy => "frontbound",
+            GreetToBackend => "backbound",
+            PassthroughClientBound => "s2c",
+            PassthroughServerBound => "c2s",
+            Generic => "generic",
+        };
+        KeyValue::new("intent", a)
+    }
+}
+
+struct ConnectionMetric {
+    packet_count: Counter<u64>,
+}
+
+impl ConnectionMetric {
+    fn new(metric: &Meter) -> Self {
+        Self {
+            packet_count: metric.u64_counter("packet_count").build(),
+        }
+    }
 }
 
 const MAX_CHUNK_SIZE: usize = 1024;
 
 impl<'o> Connection {
-    pub fn new(address: SocketAddr, read: OwnedReadHalf, write: OwnedWriteHalf) -> Self {
+    pub fn new(
+        address: SocketAddr,
+        read: OwnedReadHalf,
+        write: OwnedWriteHalf,
+        intent: SocketIntent,
+    ) -> Self {
+        let metric = global::meter("alure-conn");
         Self {
             address,
             enc: PacketEncoder::new(),
@@ -34,10 +81,18 @@ impl<'o> Connection {
                 id: 0,
                 body: BytesMut::new(),
             },
+            metric: ConnectionMetric::new(&metric),
+            intent: intent.as_attr(),
         }
     }
+    
+    fn packet_record(&self) {
+        self.metric.packet_count.add(1, &[self.intent.clone()]);
+    } 
+    
     pub async fn create_conn(addr: SocketAddr) -> anyhow::Result<Connection> {
         let (r, w) = tokio::net::TcpStream::connect(addr).await?.into_split();
+        let metric = global::meter("alure-conn");
         let connection = Connection {
             address: addr,
             enc: PacketEncoder::new(),
@@ -48,6 +103,8 @@ impl<'o> Connection {
                 id: 0,
                 body: BytesMut::new(),
             },
+            metric: ConnectionMetric::new(&metric),
+            intent: Generic.as_attr(),
         };
         Ok(connection)
     }
@@ -71,10 +128,10 @@ impl<'o> Connection {
     where
         P: Packet + Decode<'a>,
     {
+        self.packet_record();
         loop {
             if let Some(frame) = self.dec.try_next_packet()? {
                 self.frame = frame;
-
                 return self.frame.decode();
             }
 
@@ -93,6 +150,7 @@ impl<'o> Connection {
     where
         P: Encode + Packet,
     {
+        self.packet_record();
         self.enc.append_packet::<P>(pkt)?;
         let bytes = self.enc.take();
         // timeout(Duration::from_millis(5000), self.write.write_all(&bytes)).await??;
@@ -101,8 +159,9 @@ impl<'o> Connection {
     }
 
     pub async fn raw_pipe<'a>(&'a mut self) -> anyhow::Result<()> {
+        self.packet_record();
         let mut buf = vec![0u8; MAX_CHUNK_SIZE];
-
+        
         loop {
             let bytes_read = self.read.read(&mut buf).await?;
             if bytes_read == 0 {
@@ -112,6 +171,7 @@ impl<'o> Connection {
         }
 
         self.write.flush().await?;
+        
         Ok(())
     }
 }

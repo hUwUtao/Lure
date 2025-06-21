@@ -1,5 +1,6 @@
 pub(crate) mod status;
 
+use opentelemetry::metrics::{Counter, Gauge, Meter};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::sync::RwLock;
 
@@ -28,6 +29,27 @@ pub struct Session {
     pub route_id: u64,
 }
 
+#[derive(Debug)]
+struct RouterMetrics {
+    pub routes_active: Gauge<u64>,
+    pub routes_resolve: Counter<u64>,
+    pub sessions_active: Gauge<u64>,
+    pub session_create: Counter<u64>,
+    pub session_destroy: Counter<u64>,
+}
+
+impl RouterMetrics {
+    fn new(meter: &Meter) -> Self {
+        Self {
+            routes_active: meter.u64_gauge("routes_active").build(),
+            routes_resolve: meter.u64_counter("routes_resolve").build(),
+            sessions_active: meter.u64_gauge("sessions_active").build(),
+            session_create: meter.u64_counter("session_create").build(),
+            session_destroy: meter.u64_counter("session_destroy").build(),
+        }
+    }
+}
+
 /// High-performance router with optimized storage and fast domain resolution
 #[derive(Debug)]
 pub struct RouterInstance {
@@ -37,14 +59,17 @@ pub struct RouterInstance {
     active_sessions: RwLock<HashMap<SocketAddr, Arc<Session>>>,
     /// Domain to sorted route IDs mapping for fast resolution
     domain_index: RwLock<HashMap<String, Vec<u64>>>,
+    /// Metrics
+    metrics: RouterMetrics,
 }
 
 impl RouterInstance {
-    pub fn new() -> Self {
+    pub fn new(meter: &Meter) -> Self {
         RouterInstance {
             active_routes: RwLock::new(HashMap::new()),
             active_sessions: RwLock::new(HashMap::new()),
             domain_index: RwLock::new(HashMap::new()),
+            metrics: RouterMetrics::new(meter),
         }
     }
 
@@ -72,6 +97,9 @@ impl RouterInstance {
             let mut routes = self.active_routes.write().await;
             routes.insert(route_id, route);
         }
+        self.metrics
+            .routes_active
+            .record(self.routes_count().await as u64, &[]);
     }
 
     /// Add route to domain index with priority-based sorting
@@ -159,10 +187,14 @@ impl RouterInstance {
                 }
             }
         }
+        self.metrics
+            .routes_active
+            .record(self.routes_count().await as u64, &[]);
     }
 
     /// Resolve hostname to endpoint and route pair
     pub async fn resolve(&self, hostname: &str) -> Option<(SocketAddr, Route)> {
+        self.metrics.routes_resolve.add(1, &[]);
         // Get route IDs for hostname
         let route_ids = {
             let domain_index = self.domain_index.read().await;
@@ -186,6 +218,7 @@ impl RouterInstance {
         hostname: &str,
         client_addr: SocketAddr,
     ) -> Option<Arc<Session>> {
+        self.metrics.session_create.add(1, &[]);
         let (destination_addr, route) = self.resolve(hostname).await?;
 
         let session = Arc::new(Session {
@@ -198,25 +231,36 @@ impl RouterInstance {
         {
             let mut sessions = self.active_sessions.write().await;
             sessions.insert(client_addr, session.clone());
+            drop(sessions);
         }
 
+        self.metrics
+            .sessions_active
+            .record(self.session_count().await as u64, &[]);
         Some(session)
     }
 
     /// Terminate a session
     pub async fn terminate_session(&self, addr: &SocketAddr) {
+        self.metrics.session_destroy.add(1, &[]);
         let mut sessions = self.active_sessions.write().await;
         sessions.remove(addr);
+        drop(sessions);
+        self.metrics
+            .sessions_active
+            .record(self.session_count().await as u64, &[]);
     }
 
     /// Get active session count for monitoring
     pub async fn session_count(&self) -> usize {
         let sessions = self.active_sessions.read().await;
-        sessions.len()
+        let count = sessions.len();
+        drop(sessions);
+        count
     }
 
     /// Get active route count for monitoring
-    pub async fn route_count(&self) -> usize {
+    pub async fn routes_count(&self) -> usize {
         let routes = self.active_routes.read().await;
         routes.len()
     }
@@ -225,11 +269,5 @@ impl RouterInstance {
     pub async fn get_session(&self, client_addr: &SocketAddr) -> Option<Arc<Session>> {
         let sessions = self.active_sessions.read().await;
         sessions.get(client_addr).cloned()
-    }
-}
-
-impl Default for RouterInstance {
-    fn default() -> Self {
-        Self::new()
     }
 }
