@@ -15,6 +15,8 @@ use valence_protocol::decode::PacketFrame;
 use valence_protocol::packets::login::LoginDisconnectS2c;
 use valence_protocol::{Decode, Encode, Packet, Text};
 use valence_protocol::{PacketDecoder, PacketEncoder};
+use crate::packet::create_proxy_protocol_header;
+use crate::telemetry::get_meter;
 
 pub struct Connection {
     pub address: SocketAddr,
@@ -70,7 +72,7 @@ impl<'o> Connection {
         write: OwnedWriteHalf,
         intent: SocketIntent,
     ) -> Self {
-        let metric = global::meter("alure-conn");
+        let metric = get_meter();
         Self {
             address,
             enc: PacketEncoder::new(),
@@ -155,6 +157,15 @@ impl<'o> Connection {
         let bytes = self.enc.take();
         // timeout(Duration::from_millis(5000), self.write.write_all(&bytes)).await??;
         self.write.write_all(&bytes).await?;
+        self.flush().await?;
+        Ok(())
+    }
+    
+    pub async fn send_raw(&mut self, pkt: &[u8]) -> anyhow::Result<()>
+    {
+        self.packet_record();
+        self.write.write_all(&pkt).await?;
+        self.flush().await?;
         Ok(())
     }
 
@@ -168,10 +179,13 @@ impl<'o> Connection {
                 break;
             }
             self.write.write_all(&buf[..bytes_read]).await?;
+            self.flush().await?;
         }
+        Ok(())
+    }
 
+    async fn flush(&mut self) -> anyhow::Result<()> {
         self.write.flush().await?;
-        
         Ok(())
     }
 }

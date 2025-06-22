@@ -2,7 +2,23 @@ pub(crate) mod status;
 
 use opentelemetry::metrics::{Counter, Gauge, Meter};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::time::Duration;
+use anyhow::bail;
 use tokio::sync::RwLock;
+use tokio::time::timeout;
+use crate::telemetry::get_meter;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum HandshakeOption {
+    Vanilla,
+    HAProxy
+}
+
+impl Default for HandshakeOption {
+    fn default() -> Self {
+        Self::Vanilla
+    }
+}
 
 /// Routing rule with matchers and endpoints, ordered by priority
 #[derive(Debug, Clone)]
@@ -16,6 +32,9 @@ pub struct Route {
     pub disabled: bool,
     /// Route priority (higher values take precedence)
     pub priority: u32,
+    /// IP Fowarding
+    pub handshake: HandshakeOption
+
 }
 
 /// Client session tracking source, destination, and associated route
@@ -54,7 +73,7 @@ impl RouterMetrics {
 #[derive(Debug)]
 pub struct RouterInstance {
     /// Active routes indexed by route ID for O(1) access
-    active_routes: RwLock<HashMap<u64, Route>>,
+    active_routes: RwLock<HashMap<u64, Arc<Route>>>,
     /// Active sessions indexed by client address for O(1) lookup
     active_sessions: RwLock<HashMap<SocketAddr, Arc<Session>>>,
     /// Domain to sorted route IDs mapping for fast resolution
@@ -64,12 +83,12 @@ pub struct RouterInstance {
 }
 
 impl RouterInstance {
-    pub fn new(meter: &Meter) -> Self {
+    pub fn new() -> Self {
         RouterInstance {
             active_routes: RwLock::new(HashMap::new()),
             active_sessions: RwLock::new(HashMap::new()),
             domain_index: RwLock::new(HashMap::new()),
-            metrics: RouterMetrics::new(meter),
+            metrics: RouterMetrics::new(&get_meter()),
         }
     }
 
@@ -95,7 +114,7 @@ impl RouterInstance {
         // Store the route
         {
             let mut routes = self.active_routes.write().await;
-            routes.insert(route_id, route);
+            routes.insert(route_id, Arc::new(route));
         }
         self.metrics
             .routes_active
@@ -193,7 +212,7 @@ impl RouterInstance {
     }
 
     /// Resolve hostname to endpoint and route pair
-    pub async fn resolve(&self, hostname: &str) -> Option<(SocketAddr, Route)> {
+    pub async fn resolve(&self, hostname: &str) -> Option<(SocketAddr, Arc<Route>)> {
         self.metrics.routes_resolve.add(1, &[]);
         // Get route IDs for hostname
         let route_ids = {
@@ -217,9 +236,9 @@ impl RouterInstance {
         &self,
         hostname: &str,
         client_addr: SocketAddr,
-    ) -> Option<Arc<Session>> {
+    ) -> anyhow::Result<(Arc<Session>, Arc<Route>)> {
         self.metrics.session_create.add(1, &[]);
-        let (destination_addr, route) = self.resolve(hostname).await?;
+        let (destination_addr, route) = self.resolve(hostname).await.ok_or(anyhow::anyhow!("Resolve failed"))?;
 
         let session = Arc::new(Session {
             client_addr,
@@ -236,27 +255,28 @@ impl RouterInstance {
 
         self.metrics
             .sessions_active
-            .record(self.session_count().await as u64, &[]);
-        Some(session)
+            .record(self.session_count().await? as u64, &[]);
+        Ok((session, route))
     }
 
     /// Terminate a session
-    pub async fn terminate_session(&self, addr: &SocketAddr) {
+    pub async fn terminate_session(&self, addr: &SocketAddr) -> anyhow::Result<()> {
         self.metrics.session_destroy.add(1, &[]);
         let mut sessions = self.active_sessions.write().await;
         sessions.remove(addr);
         drop(sessions);
         self.metrics
             .sessions_active
-            .record(self.session_count().await as u64, &[]);
+            .record(self.session_count().await? as u64, &[]);
+        Ok(())
     }
 
     /// Get active session count for monitoring
-    pub async fn session_count(&self) -> usize {
-        let sessions = self.active_sessions.read().await;
+    pub async fn session_count(&self) -> anyhow::Result<usize> {
+        let sessions = timeout(Duration::from_millis(500),self.active_sessions.read()).await?;
         let count = sessions.len();
         drop(sessions);
-        count
+        Ok(count)
     }
 
     /// Get active route count for monitoring

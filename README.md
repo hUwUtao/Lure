@@ -32,12 +32,13 @@ This project (fork) is meant to "replace" [Gate](https://gate.minekube.com/). Tu
 - [X] ~~Compression.~~
 - [X] ~~Online mode.~~ *Basically not effective*
 - [ ] ~~Player limit.~~
-- [ ] IP Forwarding.
+- [x] Query Forwarding with debounce cache
+- [x] IP Forwarding. (Proxy protocol is now supported. Paper derivatives, Velocity, Bungeecord has built in support)
 - [ ] ~~Switch between servers.~~
 - [ ] ~~Plugin channels.~~
 - [ ] ~~Internal Commands.~~
 - [ ] ~~Addon API.~~ Route store control API
-- [ ] Metrics
+- [x] Metrics
 - [ ] Ping fallback/override (free stuff comes with ads, who doesn't love that)
 - [ ] `LoginHello` snooping (valence's `LoginHelloC2S` decoder currently working improperly)
 - [ ] Socket ratelimit

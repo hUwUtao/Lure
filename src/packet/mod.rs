@@ -1,4 +1,9 @@
+use std::io::Write;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::sync::Arc;
+use bytes::BytesMut;
+use proxy_protocol::ProxyHeader;
+use proxy_protocol::version2::{ProxyAddresses, ProxyCommand, ProxyTransportProtocol};
 use valence::uuid::Uuid;
 use valence_protocol::packets::handshaking::handshake_c2s::HandshakeNextState;
 use valence_protocol::packets::handshaking::HandshakeC2s;
@@ -78,3 +83,24 @@ impl<'a> OwnedPacket<'a, LoginHelloC2s<'a>> for OwnedLoginHello {
         }
     }
 }
+
+pub fn create_proxy_protocol_header(socket: SocketAddr) -> anyhow::Result<BytesMut>
+{
+    let proxy_header = ProxyHeader::Version2 {
+        command: ProxyCommand::Proxy,
+        transport_protocol: ProxyTransportProtocol::Stream,
+        addresses: match socket {
+            SocketAddr::V4(addr) => ProxyAddresses::Ipv4 {
+                source: addr,
+                destination: SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0),
+            },
+            SocketAddr::V6(addr) => ProxyAddresses::Ipv6 {
+                source: addr,
+                destination: SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0),
+            },
+        },
+    };
+    Ok(proxy_protocol::encode(proxy_header)?)
+}
+
+pub const NULL_SOCKET: SocketAddr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0));

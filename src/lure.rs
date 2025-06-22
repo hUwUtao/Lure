@@ -1,10 +1,11 @@
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::sync::Arc;
 
 use anyhow::bail;
-use log::__private_api::loc;
-use opentelemetry::global;
-use opentelemetry::metrics::Meter;
+use log::error;
+use proxy_protocol::version2::ProxyAddresses;
+use proxy_protocol::ProxyHeader;
+use proxy_protocol::version2::{ProxyCommand, ProxyTransportProtocol};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 
@@ -13,9 +14,9 @@ use valence::prelude::*;
 
 use crate::config::LureConfig;
 use crate::connection::connection::{Connection, SocketIntent};
-use crate::packet::{OwnedHandshake, OwnedPacket};
+use crate::packet::{create_proxy_protocol_header, OwnedHandshake, OwnedPacket};
 use crate::router::status::{QueryResponseKind, StatusBouncer};
-use crate::router::{Route, RouterInstance, Session};
+use crate::router::{HandshakeOption, Route, RouterInstance, Session};
 use valence_protocol::packets::handshaking::handshake_c2s::HandshakeNextState;
 use valence_protocol::packets::handshaking::HandshakeC2s;
 use valence_protocol::packets::status::{
@@ -27,19 +28,16 @@ pub struct Lure {
     config: LureConfig,
     router: Arc<RouterInstance>,
     status: Arc<StatusBouncer>,
-    meter: Meter,
 }
 
 impl Lure {
     pub fn new(config: LureConfig) -> Lure {
-        let meter = global::meter("alure");
-        let router = Arc::new(RouterInstance::new(&meter));
-        let status = Arc::new(StatusBouncer::new(router.clone(), &meter));
+        let router = Arc::new(RouterInstance::new());
+        let status = Arc::new(StatusBouncer::new(router.clone()));
         Lure {
             config,
             router,
             status,
-            meter,
         }
     }
 
@@ -57,6 +55,7 @@ impl Lure {
                 endpoints: vec![SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 25565)],
                 disabled: false,
                 priority: 0,
+                handshake: HandshakeOption::HAProxy,
             })
             .await;
 
@@ -90,8 +89,9 @@ impl Lure {
                     let lure = self.clone();
                     tokio::spawn(async move {
                         // Apply timeout to connection handling
-                        if let Err(_) = lure.handle_connection(client, addr).await {}
-
+                        if let Err(e) = lure.handle_connection(client, addr).await {
+                            error!("connection closed: {e}")
+                        }
                         drop(permit);
                     });
                 }
@@ -135,7 +135,12 @@ impl Lure {
         // Client state
         let (client_read, client_write) = client_socket.into_split();
 
-        let connection = Connection::new(address, client_read, client_write, SocketIntent::GreetToProxy);
+        let connection = Connection::new(
+            address,
+            client_read,
+            client_write,
+            SocketIntent::GreetToProxy,
+        );
 
         self.handle_handshake(connection).await?;
         Ok(())
@@ -181,21 +186,23 @@ impl Lure {
         handshake: &OwnedHandshake,
     ) -> anyhow::Result<()> {
         let address = client.address;
-        if let Some(session) = self
+        if let Ok((session, route)) = self
             .router
             .create_session(&handshake.server_address, address)
             .await
         {
             if let Err(_e) = self
                 .handle_proxy_session(
-                    client, handshake, // &login,
+                    client,
+                    handshake, // &login,
+                    &route.handshake,
                     &session,
                 )
                 .await
             {
             } else {
             }
-            self.router.terminate_session(&address).await;
+            self.router.terminate_session(&address).await?;
             Ok(())
         } else {
             client
@@ -210,6 +217,7 @@ impl Lure {
         mut client: Connection,
         handshake: &OwnedHandshake,
         // login: &OwnedLoginHello,
+        handshake_option: &HandshakeOption,
         session: &Arc<Session>,
     ) -> anyhow::Result<()> {
         let server_address = session.destination_addr;
@@ -232,9 +240,21 @@ impl Lure {
 
         let (server_read, server_write) = server_stream.into_split();
 
-        let mut server = Connection::new(server_address, server_read, server_write, SocketIntent::GreetToBackend);
+        let mut server = Connection::new(
+            server_address,
+            server_read,
+            server_write,
+            SocketIntent::GreetToBackend,
+        );
 
         // Replay necessary packets
+        match handshake_option {
+            HandshakeOption::HAProxy => {
+                let pkt = create_proxy_protocol_header(client.address)?;
+                server.send_raw(&pkt).await?;
+            }
+            _ => {}
+        }
         server.send(&handshake.as_packet()).await?;
         // server.send(&login.as_packet()).await?;
 
@@ -243,10 +263,18 @@ impl Lure {
     }
 
     async fn passthrough_now(&self, client: Connection, server: Connection) -> anyhow::Result<()> {
-        let mut client_to_server =
-            Connection::new(client.address.clone(), client.read, server.write, SocketIntent::PassthroughServerBound);
-        let mut server_to_client =
-            Connection::new(server.address.clone(), server.read, client.write, SocketIntent::PassthroughClientBound);
+        let mut client_to_server = Connection::new(
+            client.address.clone(),
+            client.read,
+            server.write,
+            SocketIntent::PassthroughServerBound,
+        );
+        let mut server_to_client = Connection::new(
+            server.address.clone(),
+            server.read,
+            client.write,
+            SocketIntent::PassthroughClientBound,
+        );
 
         let c2s_fut: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
             loop {
