@@ -1,15 +1,14 @@
-use std::io::Write;
+use bytes::BytesMut;
+use proxy_protocol::version2::{ProxyAddresses, ProxyCommand, ProxyTransportProtocol};
+use proxy_protocol::ProxyHeader;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::sync::Arc;
-use bytes::BytesMut;
-use proxy_protocol::ProxyHeader;
-use proxy_protocol::version2::{ProxyAddresses, ProxyCommand, ProxyTransportProtocol};
 use valence::uuid::Uuid;
 use valence_protocol::packets::handshaking::handshake_c2s::HandshakeNextState;
 use valence_protocol::packets::handshaking::HandshakeC2s;
-use valence_protocol::{Bounded, Decode, Encode, Packet, VarInt};
 use valence_protocol::packets::login::LoginHelloC2s;
 use valence_protocol::packets::status::QueryResponseS2c;
+use valence_protocol::{Bounded, Decode, Encode, Packet, VarInt};
 
 pub trait OwnedPacket<'a, P: Packet + Decode<'a> + Encode> {
     fn from_packet(packet: P) -> Self;
@@ -72,20 +71,19 @@ impl<'a> OwnedPacket<'a, LoginHelloC2s<'a>> for OwnedLoginHello {
     fn from_packet(packet: LoginHelloC2s<'a>) -> Self {
         Self {
             username: packet.username.0.to_string(),
-            profile_id: packet.profile_id
+            profile_id: packet.profile_id,
         }
     }
 
     fn as_packet(&'a self) -> LoginHelloC2s<'a> {
         LoginHelloC2s {
             username: Bounded(&self.username),
-            profile_id: self.profile_id
+            profile_id: self.profile_id,
         }
     }
 }
 
-pub fn create_proxy_protocol_header(socket: SocketAddr) -> anyhow::Result<BytesMut>
-{
+pub fn create_proxy_protocol_header(socket: SocketAddr) -> anyhow::Result<BytesMut> {
     let proxy_header = ProxyHeader::Version2 {
         command: ProxyCommand::Proxy,
         transport_protocol: ProxyTransportProtocol::Stream,

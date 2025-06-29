@@ -1,11 +1,8 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use anyhow::bail;
 use log::error;
-use proxy_protocol::version2::ProxyAddresses;
-use proxy_protocol::ProxyHeader;
-use proxy_protocol::version2::{ProxyCommand, ProxyTransportProtocol};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 
@@ -43,10 +40,10 @@ impl Lure {
 
     pub async fn start(&'static mut self) -> anyhow::Result<()> {
         // Listener config.
-        let listener_cfg = self.config.listener.to_owned();
-        println!("Preparing socket {}", listener_cfg.bind);
-        let address: SocketAddr = listener_cfg.bind.parse()?;
-        let max_connections = listener_cfg.max_connections;
+        let listener_cfg = self.config.bind.to_owned();
+        println!("Preparing socket {}", listener_cfg);
+        let address: SocketAddr = listener_cfg.parse()?;
+        let max_connections = self.config.semaphore.acceptable as usize;
 
         self.router
             .apply_route(Route {
@@ -255,6 +252,7 @@ impl Lure {
             }
             _ => {}
         }
+
         server.send(&handshake.as_packet()).await?;
         // server.send(&login.as_packet()).await?;
 
@@ -278,13 +276,13 @@ impl Lure {
 
         let c2s_fut: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
             loop {
-                client_to_server.raw_pipe().await?;
+                client_to_server.copy().await?;
             }
         });
 
         let s2c_fut = async move {
             loop {
-                server_to_client.raw_pipe().await?;
+                server_to_client.copy().await?;
             }
         };
 

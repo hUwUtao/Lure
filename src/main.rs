@@ -4,6 +4,7 @@ mod lure;
 pub(crate) mod packet;
 mod router;
 pub(crate) mod telemetry;
+mod threat;
 mod utils;
 
 use anyhow::anyhow;

@@ -1,22 +1,19 @@
-use crate::connection::connection::SocketIntent::{Generic, GreetToBackend, GreetToProxy, PassthroughClientBound, PassthroughServerBound};
+use crate::connection::connection::SocketIntent::{
+    Generic, GreetToBackend, GreetToProxy, PassthroughClientBound, PassthroughServerBound,
+};
+use crate::telemetry::get_meter;
 use bytes::BytesMut;
-use log::{debug, info};
 use opentelemetry::metrics::{Counter, Meter};
 use opentelemetry::{global, KeyValue};
-use opentelemetry_sdk::metrics::data::Metric;
 use std::io;
 use std::io::ErrorKind;
-use std::net::{SocketAddr, ToSocketAddrs};
-use std::time::Duration;
+use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::time::timeout;
 use valence_protocol::decode::PacketFrame;
 use valence_protocol::packets::login::LoginDisconnectS2c;
 use valence_protocol::{Decode, Encode, Packet, Text};
 use valence_protocol::{PacketDecoder, PacketEncoder};
-use crate::packet::create_proxy_protocol_header;
-use crate::telemetry::get_meter;
 
 pub struct Connection {
     pub address: SocketAddr,
@@ -40,7 +37,7 @@ pub enum SocketIntent {
 impl SocketIntent {
     fn as_attr(&self) -> KeyValue {
         // recv+pipe/send
-        let a= match (self) {
+        let a = match self {
             GreetToProxy => "frontbound",
             GreetToBackend => "backbound",
             PassthroughClientBound => "s2c",
@@ -53,12 +50,14 @@ impl SocketIntent {
 
 struct ConnectionMetric {
     packet_count: Counter<u64>,
+    transport_volume: Counter<u64>,
 }
 
 impl ConnectionMetric {
     fn new(metric: &Meter) -> Self {
         Self {
             packet_count: metric.u64_counter("packet_count").build(),
+            transport_volume: metric.u64_counter("transport_volume").build(),
         }
     }
 }
@@ -87,11 +86,18 @@ impl<'o> Connection {
             intent: intent.as_attr(),
         }
     }
-    
+
     fn packet_record(&self) {
         self.metric.packet_count.add(1, &[self.intent.clone()]);
-    } 
-    
+    }
+
+    fn transport_record(&self, volume: usize) {
+        self.packet_record();
+        self.metric
+            .transport_volume
+            .add(volume as u64, &[self.intent.clone()]);
+    }
+
     pub async fn create_conn(addr: SocketAddr) -> anyhow::Result<Connection> {
         let (r, w) = tokio::net::TcpStream::connect(addr).await?.into_split();
         let metric = global::meter("alure-conn");
@@ -160,28 +166,31 @@ impl<'o> Connection {
         self.flush().await?;
         Ok(())
     }
-    
-    pub async fn send_raw(&mut self, pkt: &[u8]) -> anyhow::Result<()>
-    {
+
+    pub async fn send_raw(&mut self, pkt: &[u8]) -> anyhow::Result<()> {
         self.packet_record();
         self.write.write_all(&pkt).await?;
         self.flush().await?;
         Ok(())
     }
 
-    pub async fn raw_pipe<'a>(&'a mut self) -> anyhow::Result<()> {
-        self.packet_record();
-        let mut buf = vec![0u8; MAX_CHUNK_SIZE];
-        
+    pub async fn copy<'a>(&'a mut self) -> anyhow::Result<usize> {
+        let mut buf = [0u8; MAX_CHUNK_SIZE];
+        let mut volume = 0usize;
+
         loop {
             let bytes_read = self.read.read(&mut buf).await?;
+            volume += bytes_read;
             if bytes_read == 0 {
                 break;
             }
             self.write.write_all(&buf[..bytes_read]).await?;
             self.flush().await?;
         }
-        Ok(())
+
+        // tokio::io::copy(&mut self.read, &mut self.write).await?;
+        self.transport_record(volume);
+        Ok(volume)
     }
 
     async fn flush(&mut self) -> anyhow::Result<()> {

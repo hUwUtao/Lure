@@ -1,18 +1,17 @@
 use crate::connection::connection::Connection;
+use crate::packet::{create_proxy_protocol_header, OwnedPacket, OwnedQueryResponse, NULL_SOCKET};
 use crate::router::{HandshakeOption, Route, RouterInstance};
 use anyhow::bail;
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use opentelemetry::metrics::Meter;
 use tokio::sync::RwLock;
 use tokio::time::timeout;
 use valence_protocol::packets::handshaking::handshake_c2s::HandshakeNextState;
 use valence_protocol::packets::handshaking::HandshakeC2s;
 use valence_protocol::packets::status::{QueryRequestC2s, QueryResponseS2c};
 use valence_protocol::{Bounded, VarInt};
-use crate::packet::{create_proxy_protocol_header, OwnedPacket, OwnedQueryResponse, NULL_SOCKET};
 
 #[derive(Debug, Clone)]
 pub enum QueryResponseKind {
@@ -40,7 +39,11 @@ impl StatusBouncer {
         }
     }
 
-    async fn request(&self, hostname: &str, resolved: &Resolved) -> anyhow::Result<QueryResponseKind> {
+    async fn request(
+        &self,
+        hostname: &str,
+        resolved: &Resolved,
+    ) -> anyhow::Result<QueryResponseKind> {
         if let Ok(mut conn) = Connection::create_conn(resolved.0).await {
             match resolved.1.handshake {
                 HandshakeOption::HAProxy => {

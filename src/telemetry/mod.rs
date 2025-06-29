@@ -1,3 +1,5 @@
+mod event;
+
 use opentelemetry::global;
 use opentelemetry::metrics::Meter;
 use opentelemetry_otlp::{Protocol, WithExportConfig};

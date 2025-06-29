@@ -1,17 +1,16 @@
 pub(crate) mod status;
 
+use crate::telemetry::get_meter;
 use opentelemetry::metrics::{Counter, Gauge, Meter};
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use std::time::Duration;
-use anyhow::bail;
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::sync::RwLock;
 use tokio::time::timeout;
-use crate::telemetry::get_meter;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum HandshakeOption {
     Vanilla,
-    HAProxy
+    HAProxy,
 }
 
 impl Default for HandshakeOption {
@@ -33,8 +32,7 @@ pub struct Route {
     /// Route priority (higher values take precedence)
     pub priority: u32,
     /// IP Fowarding
-    pub handshake: HandshakeOption
-
+    pub handshake: HandshakeOption,
 }
 
 /// Client session tracking source, destination, and associated route
@@ -238,7 +236,10 @@ impl RouterInstance {
         client_addr: SocketAddr,
     ) -> anyhow::Result<(Arc<Session>, Arc<Route>)> {
         self.metrics.session_create.add(1, &[]);
-        let (destination_addr, route) = self.resolve(hostname).await.ok_or(anyhow::anyhow!("Resolve failed"))?;
+        let (destination_addr, route) = self
+            .resolve(hostname)
+            .await
+            .ok_or(anyhow::anyhow!("Resolve failed"))?;
 
         let session = Arc::new(Session {
             client_addr,
@@ -273,7 +274,7 @@ impl RouterInstance {
 
     /// Get active session count for monitoring
     pub async fn session_count(&self) -> anyhow::Result<usize> {
-        let sessions = timeout(Duration::from_millis(500),self.active_sessions.read()).await?;
+        let sessions = timeout(Duration::from_millis(500), self.active_sessions.read()).await?;
         let count = sessions.len();
         drop(sessions);
         Ok(count)
