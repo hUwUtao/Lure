@@ -37,7 +37,7 @@ This project (fork) is meant to "replace" [Gate](https://gate.minekube.com/). Tu
 - [ ] ~~Switch between servers.~~
 - [ ] ~~Plugin channels.~~
 - [ ] ~~Internal Commands.~~
-- [ ] ~~Addon API.~~ Route store control API
+- [x] ~~Addon API.~~ Control ~~API~~ RPC [RPC implementation in Elysia](https://github.com/hUwUtao/Lucky)
 - [x] Metrics
 - [ ] Ping fallback/override (free stuff comes with ads, who doesn't love that)
 - [ ] `LoginHello` snooping (valence's `LoginHelloC2S` decoder currently working improperly)

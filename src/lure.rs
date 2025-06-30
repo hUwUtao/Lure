@@ -2,7 +2,9 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use anyhow::bail;
-use log::error;
+use async_trait::async_trait;
+use log::{error, info};
+use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 
@@ -14,6 +16,9 @@ use crate::connection::connection::{Connection, SocketIntent};
 use crate::packet::{create_proxy_protocol_header, OwnedHandshake, OwnedPacket};
 use crate::router::status::{QueryResponseKind, StatusBouncer};
 use crate::router::{HandshakeOption, Route, RouterInstance, Session};
+use crate::telemetry::event::EventHook;
+use crate::telemetry::{init_event, EventEnvelope};
+use crate::utils::OwnedArc;
 use valence_protocol::packets::handshaking::handshake_c2s::HandshakeNextState;
 use valence_protocol::packets::handshaking::HandshakeC2s;
 use valence_protocol::packets::status::{
@@ -25,6 +30,24 @@ pub struct Lure {
     config: LureConfig,
     router: Arc<RouterInstance>,
     status: Arc<StatusBouncer>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub(crate) struct EventIdent {
+    id: String,
+}
+
+#[async_trait]
+impl EventHook<EventEnvelope, EventEnvelope> for EventIdent {
+    async fn on_handshake(&self) -> Option<EventEnvelope> {
+        Some(EventEnvelope::HandshakeIdent(self.clone()))
+    }
+
+    async fn on_event(&self, event: &'_ EventEnvelope) {
+        if let EventEnvelope::Hello(_) = event {
+            info!("RPC: Hello")
+        }
+    }
 }
 
 impl Lure {
@@ -41,9 +64,20 @@ impl Lure {
     pub async fn start(&'static mut self) -> anyhow::Result<()> {
         // Listener config.
         let listener_cfg = self.config.bind.to_owned();
-        println!("Preparing socket {}", listener_cfg);
+        info!("Preparing socket {}", listener_cfg);
         let address: SocketAddr = listener_cfg.parse()?;
         let max_connections = self.config.semaphore.acceptable as usize;
+
+        if !self.config.control.rpc.is_empty() {
+            let event = init_event(self.config.control.rpc.clone());
+            event
+                .hook(EventIdent {
+                    id: self.config.inst.clone(),
+                })
+                .await;
+            event.hook(OwnedArc::from(self.router.clone())).await;
+            event.clone().start();
+        }
 
         self.router
             .apply_route(Route {

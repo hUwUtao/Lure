@@ -20,7 +20,6 @@ use crate::telemetry::init_meter_provider;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     femme::start();
-    let meter_provider = init_meter_provider()?;
 
     let current_dir = env::current_dir()?;
     let config_file = current_dir.join("settings.toml");
@@ -48,10 +47,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 LureConfigLoadError::Parse(parse_error) => Err(parse_error),
             }
         }
-    };
+    }?;
 
-    let lure = Box::leak(Box::new(Lure::new(config?)));
+    let meter_provider = if !config.control.metrics.is_empty() {
+        Some(init_meter_provider(config.control.metrics.clone())?)
+    } else {
+        None
+    };
+    let lure = Box::leak(Box::new(Lure::new(config)));
     lure.start().await?;
-    meter_provider.shutdown()?;
+    if let Some(meter_provider) = meter_provider {
+        meter_provider.shutdown()?;
+    }
     Ok(())
 }

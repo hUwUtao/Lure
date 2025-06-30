@@ -25,3 +25,27 @@
 //         Err(_) => None,
 //     }
 // }
+
+use std::sync::Arc;
+use async_trait::async_trait;
+use crate::router::RouterInstance;
+use crate::telemetry::EventEnvelope;
+
+pub struct OwnedArc<T>(Arc<T>);
+
+impl<T> From<Arc<T>> for OwnedArc<T> {
+    fn from(arc: Arc<T>) -> Self {
+        OwnedArc(arc)
+    }
+}
+
+#[async_trait]
+impl crate::telemetry::event::EventHook<EventEnvelope, EventEnvelope> for OwnedArc<RouterInstance> {
+    async fn on_handshake(&self) -> Option<EventEnvelope> {
+        self.0.on_handshake().await
+    }
+
+    async fn on_event(&self, event: &'_ EventEnvelope) {
+        self.0.on_event(event).await;
+    }
+}

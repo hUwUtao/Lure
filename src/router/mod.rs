@@ -1,13 +1,15 @@
 pub(crate) mod status;
 
-use crate::telemetry::get_meter;
+use crate::telemetry::{get_meter, EventEnvelope};
+use async_trait::async_trait;
 use opentelemetry::metrics::{Counter, Gauge, Meter};
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, RwLockWriteGuard};
 use tokio::time::timeout;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum HandshakeOption {
     Vanilla,
     HAProxy,
@@ -20,7 +22,7 @@ impl Default for HandshakeOption {
 }
 
 /// Routing rule with matchers and endpoints, ordered by priority
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Route {
     pub id: u64,
     /// Domain patterns or hostnames this route matches
@@ -176,20 +178,17 @@ impl RouterInstance {
         }
     }
 
-    /// Remove a route and clean up indices
-    pub async fn remove_route(&self, route_id: u64) {
-        // Get route matchers before removal
-        let matchers = {
-            let routes = self.active_routes.read().await;
-            routes.get(&route_id).map(|r| r.matchers.clone())
-        };
+    async fn remote_route_unlocked(
+        &self,
+        routes: &mut RwLockWriteGuard<'_, HashMap<u64, Arc<Route>>>,
+        route_id: u64,
+    ) {
+        let matchers = { routes.get(&route_id).map(|r| r.matchers.clone()) };
 
         if let Some(matchers) = matchers {
             // Remove from active routes
-            {
-                let mut routes = self.active_routes.write().await;
-                routes.remove(&route_id);
-            }
+
+            routes.remove(&route_id);
 
             // Clean up domain index
             {
@@ -204,9 +203,20 @@ impl RouterInstance {
                 }
             }
         }
+    }
+
+    fn collect_routes_count_unlocked(&self, routes:&mut  RwLockWriteGuard<'_, HashMap<u64, Arc<Route>>>) {
         self.metrics
             .routes_active
-            .record(self.routes_count().await as u64, &[]);
+            .record(routes.len() as u64, &[]);
+    }
+
+    /// Remove a route and clean up indices
+    pub async fn remove_route(&self, route_id: u64) {
+        // Get route matchers before removal
+        let mut routes = self.active_routes.write().await;
+        self.remote_route_unlocked(&mut routes, route_id).await;
+        self.collect_routes_count_unlocked(&mut routes);
     }
 
     /// Resolve hostname to endpoint and route pair
@@ -292,3 +302,46 @@ impl RouterInstance {
         sessions.get(client_addr).cloned()
     }
 }
+
+#[derive(Serialize, Deserialize)]
+pub struct RouteReport {
+    active: u64,
+}
+
+#[async_trait]
+impl crate::telemetry::event::EventHook<EventEnvelope, EventEnvelope> for RouterInstance {
+    async fn on_handshake(&self) -> Option<EventEnvelope> {
+        self.session_count()
+            .await
+            .map(|count| {
+                EventEnvelope::HandshakeRoute(RouteReport {
+                    active: count as u64,
+                })
+            })
+            .ok()
+    }
+
+    async fn on_event(&self, event: &'_ EventEnvelope) {
+        match event {
+            EventEnvelope::SetRoute(route) => {
+                self.apply_route(route.to_owned()).await;
+            }
+            EventEnvelope::FlushRoute(_) => {
+                let keys = {
+                    let routes = self.active_routes.read().await;
+                    routes.keys().cloned().collect::<Vec<_>>()
+                };
+                let mut routes = self.active_routes.write().await;
+                for k in keys {
+                    self.remote_route_unlocked(&mut routes, k.to_owned()).await;
+                }
+                self.collect_routes_count_unlocked(&mut routes);
+            }
+            EventEnvelope::RemoveRoute(id) => {
+                self.remove_route(id.id).await;
+            }
+            _ => {}
+        }
+    }
+}
+
