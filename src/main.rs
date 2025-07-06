@@ -19,6 +19,9 @@ use crate::telemetry::init_meter_provider;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    #[cfg(debug_assertions)]
+    femme::with_level(femme::LevelFilter::Debug);
+    #[cfg(not(debug_assertions))]
     femme::start();
 
     let current_dir = env::current_dir()?;

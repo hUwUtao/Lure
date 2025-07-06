@@ -1,6 +1,6 @@
 pub(crate) mod status;
 
-use crate::telemetry::{get_meter, EventEnvelope};
+use crate::telemetry::{get_meter, EventEnvelope, EventServiceInstance, NonObj};
 use async_trait::async_trait;
 use opentelemetry::metrics::{Counter, Gauge, Meter};
 use serde::{Deserialize, Serialize};
@@ -205,10 +205,11 @@ impl RouterInstance {
         }
     }
 
-    fn collect_routes_count_unlocked(&self, routes:&mut  RwLockWriteGuard<'_, HashMap<u64, Arc<Route>>>) {
-        self.metrics
-            .routes_active
-            .record(routes.len() as u64, &[]);
+    fn collect_routes_count_unlocked(
+        &self,
+        routes: &mut RwLockWriteGuard<'_, HashMap<u64, Arc<Route>>>,
+    ) {
+        self.metrics.routes_active.record(routes.len() as u64, &[]);
     }
 
     /// Remove a route and clean up indices
@@ -303,7 +304,7 @@ impl RouterInstance {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct RouteReport {
     active: u64,
 }
@@ -321,7 +322,11 @@ impl crate::telemetry::event::EventHook<EventEnvelope, EventEnvelope> for Router
             .ok()
     }
 
-    async fn on_event(&self, event: &'_ EventEnvelope) {
+    async fn on_event(
+        &self,
+        handle: &EventServiceInstance,
+        event: &'_ EventEnvelope,
+    ) -> anyhow::Result<()> {
         match event {
             EventEnvelope::SetRoute(route) => {
                 self.apply_route(route.to_owned()).await;
@@ -337,11 +342,22 @@ impl crate::telemetry::event::EventHook<EventEnvelope, EventEnvelope> for Router
                 }
                 self.collect_routes_count_unlocked(&mut routes);
             }
+            EventEnvelope::ListRouteRequest(_) => {
+                let routes = self.active_routes.read().await;
+                let mut routes_c: Vec<Route> = Vec::with_capacity(routes.len());
+                for a in routes.values() {
+                    let a = a.as_ref().clone();
+                    routes_c.push(a);
+                }
+                handle
+                    .produce_event(EventEnvelope::ListRouteResponse(NonObj::new(routes_c)))
+                    .await?;
+            }
             EventEnvelope::RemoveRoute(id) => {
                 self.remove_route(id.id).await;
             }
             _ => {}
         }
+        Ok(())
     }
 }
-

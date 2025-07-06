@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use futures::StreamExt;
-use log::{error, info, log};
+use log::{debug, error, info, log};
 use reqwest::Client;
 use serde::{de::DeserializeOwned, Serialize};
 use std::collections::HashMap;
@@ -11,11 +11,22 @@ use tokio::time::sleep;
 use valence::log::tracing_subscriber::Layer;
 
 #[async_trait]
-pub trait EventHook<In, Out> {
+pub trait EventHook<In, Out>
+where
+    In: DeserializeOwned + Send + std::marker::Sync,
+    Out: Serialize + Send + std::marker::Sync,
+{
     /// Handshake are called many times within proxy runtime, and only when client disconnected.
     /// In that case, server will either flush the
-    async fn on_handshake(&self) -> Option<Out>;
-    async fn on_event(&self, event: &'_ In);
+    async fn on_handshake(&self) -> Option<Out> {
+        None
+    }
+
+    async fn on_event(
+        &self,
+        service: &Arc<EventService<In, Out>>,
+        event: &'_ In,
+    ) -> anyhow::Result<()>;
 }
 
 pub struct EventService<In, Out>
@@ -59,18 +70,17 @@ where
         let this = self.clone();
         tokio::spawn(async move {
             loop {
-                if let Err(e) = this.consume_events().await {
+                if let Err(e) = this.clone().consume_events().await {
                     error!("Error consuming events: {}", e);
-                    sleep(this.retry_interval).await;
                 } else {
-                    error!("Event service stopped unexpectedly");
-                    sleep(this.retry_interval).await;
+                    error!("Event stream stopped. Retrying...");
                 }
+                sleep(this.retry_interval).await;
             }
         });
     }
 
-    async fn consume_events(&self) -> Result<(), reqwest::Error> {
+    async fn consume_events(self: Arc<Self>) -> anyhow::Result<()> {
         let response = self.client.get(&self.endpoint).send().await?;
         for consumer in self.consumer.read().await.iter() {
             if let Some(event) = consumer.on_handshake().await {
@@ -93,7 +103,11 @@ where
                             }
                             if let Ok(event) = serde_json::from_str::<In>(text.trim()) {
                                 for consumer in self.consumer.read().await.iter() {
-                                    consumer.on_event(&event).await;
+                                    if let Err(err) = consumer.on_event(&self, &event).await {
+                                        error!("Error processing event: {}", err);
+                                    } else {
+                                        debug!("Success consume event");
+                                    }
                                 }
                             } else {
                                 error!(
@@ -116,8 +130,14 @@ where
         Ok(())
     }
 
-    pub async fn produce_event(&self, event: Out) -> Result<(), reqwest::Error> {
-        self.client.post(&self.endpoint).json(&event).send().await?;
+    pub async fn produce_event(&self, event: Out) -> anyhow::Result<()> {
+        let buf = serde_json::to_vec(&event)?;
+        self.client
+            .post(&self.endpoint)
+            .header("Content-Type", "application/json")
+            .body(buf)
+            .send()
+            .await?;
         Ok(())
     }
 }
@@ -137,8 +157,13 @@ mod test {
             })
         }
 
-        async fn on_event(&self, event: &MyEvent) {
+        async fn on_event(
+            &self,
+            _: &Arc<EventService<MyEvent, MyEvent>>,
+            event: &MyEvent,
+        ) -> anyhow::Result<()> {
             println!("Consumed event: {:?}", event);
+            Ok(())
         }
     }
 

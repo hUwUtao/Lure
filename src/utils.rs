@@ -26,10 +26,10 @@
 //     }
 // }
 
-use std::sync::Arc;
-use async_trait::async_trait;
 use crate::router::RouterInstance;
-use crate::telemetry::EventEnvelope;
+use crate::telemetry::{EventEnvelope, EventServiceInstance};
+use async_trait::async_trait;
+use std::sync::Arc;
 
 pub struct OwnedArc<T>(Arc<T>);
 
@@ -45,7 +45,12 @@ impl crate::telemetry::event::EventHook<EventEnvelope, EventEnvelope> for OwnedA
         self.0.on_handshake().await
     }
 
-    async fn on_event(&self, event: &'_ EventEnvelope) {
-        self.0.on_event(event).await;
+    async fn on_event(
+        &self,
+        inst: &EventServiceInstance,
+        event: &'_ EventEnvelope,
+    ) -> anyhow::Result<()> {
+        self.0.on_event(inst, event).await?;
+        Ok(())
     }
 }

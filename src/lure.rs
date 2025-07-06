@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::bail;
 use async_trait::async_trait;
-use log::{error, info};
+use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
@@ -17,7 +17,7 @@ use crate::packet::{create_proxy_protocol_header, OwnedHandshake, OwnedPacket};
 use crate::router::status::{QueryResponseKind, StatusBouncer};
 use crate::router::{HandshakeOption, Route, RouterInstance, Session};
 use crate::telemetry::event::EventHook;
-use crate::telemetry::{init_event, EventEnvelope};
+use crate::telemetry::{init_event, EventEnvelope, EventServiceInstance};
 use crate::utils::OwnedArc;
 use valence_protocol::packets::handshaking::handshake_c2s::HandshakeNextState;
 use valence_protocol::packets::handshaking::HandshakeC2s;
@@ -32,7 +32,7 @@ pub struct Lure {
     status: Arc<StatusBouncer>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub(crate) struct EventIdent {
     id: String,
 }
@@ -43,10 +43,19 @@ impl EventHook<EventEnvelope, EventEnvelope> for EventIdent {
         Some(EventEnvelope::HandshakeIdent(self.clone()))
     }
 
-    async fn on_event(&self, event: &'_ EventEnvelope) {
+    async fn on_event(
+        &self,
+        _: &EventServiceInstance,
+        event: &'_ EventEnvelope,
+    ) -> anyhow::Result<()> {
+        #[cfg(debug_assertions)]
+        {
+            debug!("RPC-S2C: {:?}", event);
+        }
         if let EventEnvelope::Hello(_) = event {
             info!("RPC: Hello")
         }
+        Ok(())
     }
 }
 
@@ -99,7 +108,7 @@ impl Lure {
             let (client, addr) = listener.accept().await?;
 
             // Apply IP-based rate limiting
-            let ip = addr.ip();
+            // let ip = addr.ip();
             // let should_accept = rate_limiters
             //     .entry(ip)
             //     .or_insert_with(|| RateLimiter::new(Duration::from_millis(100)))
