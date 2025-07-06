@@ -22,7 +22,7 @@ pub enum QueryResponseKind {
 
 #[derive(Debug)]
 pub struct StatusBouncer {
-    cache: RwLock<HashMap<SocketAddr, Arc<(OwnedQueryResponse, u64)>>>,
+    cache: RwLock<HashMap<u64, Arc<(OwnedQueryResponse, u64)>>>,
     router: Arc<RouterInstance>,
     cache_duration: u64, // Cache duration in seconds
 }
@@ -77,7 +77,7 @@ impl StatusBouncer {
                     self.cache
                         .write()
                         .await
-                        .insert(resolved.0, Arc::new((response, self.current_timestamp())));
+                        .insert(resolved.1.id, Arc::new((response, self.current_timestamp())));
                 }
                 kind
             }
@@ -89,7 +89,7 @@ impl StatusBouncer {
         if let Some(resolved) = self.router.resolve(hostname).await {
             if let Some(cached) = {
                 let lock = self.cache.read().await;
-                let val = lock.get(&resolved.0).cloned();
+                let val = lock.get(&resolved.1.id).cloned();
                 drop(lock);
                 val
             } {
