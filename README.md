@@ -39,7 +39,8 @@ This project (fork) is meant to "replace" [Gate](https://gate.minekube.com/). Tu
 - [ ] ~~Internal Commands.~~
 - [x] ~~Addon API.~~ Control ~~API~~ RPC [RPC implementation in Elysia](https://github.com/hUwUtao/Lucky)
 - [x] Metrics
-- [ ] Ping fallback/override (free stuff comes with ads, who doesn't love that)
+- [x] Ping fallback/override (free stuff comes with ads, who doesn't love that)
+- [ ] Always version match (replaceness are done before cache)
 - [ ] `LoginHello` snooping (valence's `LoginHelloC2S` decoder currently working improperly)
 - [ ] Socket ratelimit
 - [ ] Anomaly tracking

@@ -35,11 +35,20 @@ pub struct LureConfig {
     /// RPC and metrics endpoint configuration
     pub control: ControlConfig,
 
+    /// Misc config
+    pub misc: MiscConfig,
+
     /// Mapping of route patterns to upstream endpoints
     pub routes: HashMap<String, RouteConfig>,
 
     #[serde(flatten)]
     pub other_fields: HashMap<String, toml::value::Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Default)]
+pub struct MiscConfig {
+    pub override_players: Option<Vec<String>>,
 }
 
 /// Configuration for cache durations (in milliseconds)
@@ -49,7 +58,7 @@ pub struct CacheConfig {
     pub query: u64,
 
     /// TTL for intelligence data cache
-    pub inteligence: u64,
+    pub intelligence: u64,
 }
 
 /// Top-level threat protection config
@@ -132,7 +141,7 @@ impl Default for LureConfig {
             proxy_protocol: false,
             cache: CacheConfig {
                 query: 5000,
-                inteligence: 60000,
+                intelligence: 60000,
             },
             threat: ThreatConfig {
                 ban: 10,
@@ -154,6 +163,7 @@ impl Default for LureConfig {
                 rpc: "".to_string(),
                 metrics: "".to_string(),
             },
+            misc: Default::default(),
             routes: Default::default(),
             other_fields: Default::default(),
         }

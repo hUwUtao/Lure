@@ -35,6 +35,8 @@ pub struct Route {
     pub priority: u32,
     /// IP Fowarding
     pub handshake: HandshakeOption,
+    /// Query override
+    pub override_query: bool,
 }
 
 /// Client session tracking source, destination, and associated route

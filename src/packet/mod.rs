@@ -46,7 +46,15 @@ impl<'a> OwnedPacket<'a, HandshakeC2s<'a>> for OwnedHandshake {
 #[derive(Debug, Clone)]
 /// Owned `QueryResponseS2C`
 pub struct OwnedQueryResponse {
-    json: Arc<str>,
+    pub json: Arc<str>,
+}
+
+impl OwnedQueryResponse {
+    pub(crate) fn new(json: &str) -> Self {
+        Self {
+            json: json.into(),
+        }
+    }
 }
 
 impl<'a> OwnedPacket<'a, QueryResponseS2c<'a>> for OwnedQueryResponse {

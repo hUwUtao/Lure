@@ -1,10 +1,17 @@
+use crate::config::LureConfig;
 use crate::connection::connection::Connection;
+use crate::lure::Lure;
 use crate::packet::{create_proxy_protocol_header, OwnedPacket, OwnedQueryResponse, NULL_SOCKET};
 use crate::router::{HandshakeOption, Route, RouterInstance};
 use anyhow::bail;
+use bytes::BufMut;
+use futures::SinkExt;
+use log::error;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tokio::time::timeout;
@@ -20,22 +27,85 @@ pub enum QueryResponseKind {
     Disconnected,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SamplePlayer {
+    name: String,
+    id: String,
+}
+
+impl SamplePlayer {
+    fn uuid_from_number(n: u64) -> String {
+        let mut bytes = [0u8; 16];
+        bytes[..8].copy_from_slice(&n.to_be_bytes());
+
+        let mut uuid = String::with_capacity(36);
+        for (i, byte) in bytes.iter().enumerate() {
+            uuid.push_str(&format!("{:02x}", byte));
+            if matches!(i, 3 | 5 | 7 | 9) {
+                uuid.push('-');
+            }
+        }
+        uuid
+    }
+
+    pub fn create_fake_list(list: &[String]) -> Vec<Value> {
+        let mut flist: Vec<Value> = Vec::new();
+        for (i, name) in list.iter().enumerate() {
+            flist.push(json!(
+                {
+                    "name": name.clone(),
+                    "id": Self::uuid_from_number(i as u64),
+                }
+            ))
+        }
+        flist
+    }
+}
+
 #[derive(Debug)]
 pub struct StatusBouncer {
     cache: RwLock<HashMap<u64, Arc<(OwnedQueryResponse, u64)>>>,
     router: Arc<RouterInstance>,
     cache_duration: u64, // Cache duration in seconds
+    override_players: Vec<Value>,
 }
 
 type Resolved = (SocketAddr, Arc<Route>);
 
 impl StatusBouncer {
     /// Create a new StatusBouncer with default cache duration of 30 seconds
-    pub fn new(router: Arc<RouterInstance>) -> Self {
+    pub fn new(router: Arc<RouterInstance>, config: &LureConfig) -> Self {
+        let override_players = if let Some(t) = &config.misc.override_players {
+            t
+        } else {
+            &vec![]
+        };
         StatusBouncer {
             cache: RwLock::new(HashMap::new()),
             router,
             cache_duration: 1,
+            override_players: SamplePlayer::create_fake_list(override_players),
+        }
+    }
+
+    async fn transform_query(
+        &self,
+        json_raw: &'_ str,
+        route: &Arc<Route>,
+    ) -> anyhow::Result<String> {
+        if route.override_query {
+            let mut tree: Value = serde_json::from_str(json_raw)?;
+            if let Some(p) = tree.get_mut("players") {
+                if let Some(mp) = p.as_object_mut() {
+                    let a = self.override_players.clone();
+                    mp.insert("sample".into(), Value::Array(a));
+                }
+            } else {
+                error!("Query doesnt have players");
+            }
+            Ok(serde_json::to_string(&tree)?)
+        } else {
+            Ok(json_raw.to_string())
         }
     }
 
@@ -60,8 +130,9 @@ impl StatusBouncer {
             })
             .await?;
             conn.send(&QueryRequestC2s {}).await?;
-            Ok(QueryResponseKind::Valid(OwnedQueryResponse::from_packet(
-                conn.recv::<QueryResponseS2c>().await?.clone(),
+            let packet = conn.recv::<QueryResponseS2c>().await?.clone();
+            Ok(QueryResponseKind::Valid(OwnedQueryResponse::new(
+                &self.transform_query(packet.json, &resolved.1).await?,
             )))
         } else {
             bail!("Failed to connect to server");
@@ -74,10 +145,10 @@ impl StatusBouncer {
             Ok(Err(_)) => QueryResponseKind::Disconnected,
             Ok(Ok(kind)) => {
                 if let QueryResponseKind::Valid(response) = kind.clone() {
-                    self.cache
-                        .write()
-                        .await
-                        .insert(resolved.1.id, Arc::new((response, self.current_timestamp())));
+                    self.cache.write().await.insert(
+                        resolved.1.id,
+                        Arc::new((response, self.current_timestamp())),
+                    );
                 }
                 kind
             }

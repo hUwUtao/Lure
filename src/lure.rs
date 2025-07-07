@@ -62,7 +62,7 @@ impl EventHook<EventEnvelope, EventEnvelope> for EventIdent {
 impl Lure {
     pub fn new(config: LureConfig) -> Lure {
         let router = Arc::new(RouterInstance::new());
-        let status = Arc::new(StatusBouncer::new(router.clone()));
+        let status = Arc::new(StatusBouncer::new(router.clone(), &config));
         Lure {
             config,
             router,
@@ -87,17 +87,6 @@ impl Lure {
             event.hook(OwnedArc::from(self.router.clone())).await;
             event.clone().start();
         }
-
-        self.router
-            .apply_route(Route {
-                id: 0,
-                matchers: vec!["localhost".to_string()],
-                endpoints: vec![SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 25565)],
-                disabled: false,
-                priority: 0,
-                handshake: HandshakeOption::HAProxy,
-            })
-            .await;
 
         // Start server.
         let listener = TcpListener::bind(address).await?;
