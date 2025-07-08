@@ -15,14 +15,21 @@ use config::LureConfig;
 use lure::Lure;
 
 use crate::config::LureConfigLoadError;
-use crate::telemetry::init_meter_provider;
+use crate::telemetry::oltp::{init_meter, init_tracer};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    dotenvy::dotenv()?;
     #[cfg(debug_assertions)]
-    femme::with_level(femme::LevelFilter::Debug);
+    femme::with_level(femme::LevelFilter::Trace);
     #[cfg(not(debug_assertions))]
     femme::start();
+
+    let providers = if dotenvy::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
+        Some((init_meter(), 0u8))
+    } else {
+        None
+    };
 
     let current_dir = env::current_dir()?;
     let config_file = current_dir.join("settings.toml");
@@ -51,16 +58,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }?;
-
-    let meter_provider = if !config.control.metrics.is_empty() {
-        Some(init_meter_provider(config.control.metrics.clone())?)
-    } else {
-        None
-    };
     let lure = Box::leak(Box::new(Lure::new(config)));
     lure.start().await?;
-    if let Some(meter_provider) = meter_provider {
-        meter_provider.shutdown()?;
+    if let Some(providers) = providers {
+        providers.0.shutdown()?;
+        // providers.1.shutdown()?;
     }
     Ok(())
 }

@@ -62,11 +62,11 @@ struct RouterMetrics {
 impl RouterMetrics {
     fn new(meter: &Meter) -> Self {
         Self {
-            routes_active: meter.u64_gauge("routes_active").build(),
-            routes_resolve: meter.u64_counter("routes_resolve").build(),
-            sessions_active: meter.u64_gauge("sessions_active").build(),
-            session_create: meter.u64_counter("session_create").build(),
-            session_destroy: meter.u64_counter("session_destroy").build(),
+            routes_active: meter.u64_gauge("lure_router_routes_active").build(),
+            routes_resolve: meter.u64_counter("lure_router_routes_resolve").build(),
+            sessions_active: meter.u64_gauge("lure_router_sessions_active").build(),
+            session_create: meter.u64_counter("lure_router_session_create").build(),
+            session_destroy: meter.u64_counter("lure_router_session_destroy").build(),
         }
     }
 }

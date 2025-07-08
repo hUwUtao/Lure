@@ -1,7 +1,7 @@
 use crate::connection::connection::SocketIntent::{
     Generic, GreetToBackend, GreetToProxy, PassthroughClientBound, PassthroughServerBound,
 };
-use crate::telemetry::get_meter;
+use crate::telemetry::{get_meter, get_tracer};
 use bytes::BytesMut;
 use opentelemetry::metrics::{Counter, Meter};
 use opentelemetry::{global, KeyValue};
@@ -56,8 +56,8 @@ struct ConnectionMetric {
 impl ConnectionMetric {
     fn new(metric: &Meter) -> Self {
         Self {
-            packet_count: metric.u64_counter("packet_count").build(),
-            transport_volume: metric.u64_counter("transport_volume").build(),
+            packet_count: metric.u64_counter("lure_proxy_packet_count").build(),
+            transport_volume: metric.u64_counter("lure_proxy_transport_volume").build(),
         }
     }
 }
@@ -177,9 +177,9 @@ impl<'o> Connection {
     pub async fn copy<'a>(&'a mut self) -> anyhow::Result<usize> {
         let mut buf = [0u8; MAX_CHUNK_SIZE];
         let mut volume = 0usize;
-
         loop {
             let bytes_read = self.read.read(&mut buf).await?;
+            self.transport_record(bytes_read);
             volume += bytes_read;
             if bytes_read == 0 {
                 break;
@@ -187,9 +187,6 @@ impl<'o> Connection {
             self.write.write_all(&buf[..bytes_read]).await?;
             self.flush().await?;
         }
-
-        // tokio::io::copy(&mut self.read, &mut self.write).await?;
-        self.transport_record(volume);
         Ok(volume)
     }
 

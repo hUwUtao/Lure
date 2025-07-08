@@ -10,17 +10,30 @@ anyhow = "1.0"
 bytes = "1.10"
 femme = "2.2.1"
 log = "0.4.27"
-opentelemetry = "0.30.0"
-opentelemetry-otlp = { version = "0.30.0", features = ["tokio"] }
+opentelemetry = "0.30"
+opentelemetry-otlp = { version = "0.30", features = [
+    "tokio",
+    "http-proto",
+    "reqwest-rustls-webpki-roots",
+    "http-json"
+] }
+dotenvy = "0.15"
 opentelemetry-stdout = "0.30.0"
 opentelemetry_sdk = { version = "0.30.0", features = ["tokio", "tokio-stream", "rt-tokio", "http", "url"] }
 proxy-protocol = "0.5.0"
 serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1.27", features = ["full", "rt-multi-thread", "tracing"] }
 toml = "0.8"
-valence = { git = "https://github.com/valence-rs/valence"}
+valence = { git = "https://github.com/valence-rs/valence" }
 valence_protocol = { git = "https://github.com/valence-rs/valence", features = ["compression", "encryption"] }
 async-trait = "0.1.88"
 futures = "0.3.31"
-reqwest = { version = "0.12.20", features = ["stream"] }
+reqwest = { version = "0.12.20", features = ["stream", "gzip"] }
 serde_json = "1.0.140"
+#tonic = "0.13.1"
+
+[features]
+# by default we build HTTP-only
+default = []
+# if you want gRPC support, `cargo build --features grpc-tonic`
+grpc-tonic = ["opentelemetry-otlp/tonic", "opentelemetry-otlp/grpc-tonic"]
