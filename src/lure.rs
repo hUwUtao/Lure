@@ -231,14 +231,13 @@ impl Lure {
             {
             } else {
             }
-            self.router.terminate_session(&address).await?;
-            Ok(())
         } else {
             client
                 .disconnect("No destination".into_text().color(Color::RED))
                 .await?;
-            Ok(())
         }
+        self.router.terminate_session(&address).await?;
+        Ok(())
     }
 
     pub async fn handle_proxy_session(
@@ -308,14 +307,22 @@ impl Lure {
 
         let c2s_fut: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
             loop {
-                client_to_server.copy().await?;
+                let bytes = client_to_server.copy().await?;
+                if bytes == 0 {
+                    break;
+                }
             }
+            Ok(())
         });
 
         let s2c_fut = async move {
             loop {
-                server_to_client.copy().await?;
+                let bytes = server_to_client.copy().await?;
+                if bytes == 0 {
+                    break;
+                }
             }
+            Ok(())
         };
 
         tokio::select! {

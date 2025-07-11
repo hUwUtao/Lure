@@ -1,7 +1,7 @@
 use crate::connection::connection::SocketIntent::{
     Generic, GreetToBackend, GreetToProxy, PassthroughClientBound, PassthroughServerBound,
 };
-use crate::telemetry::{get_meter, get_tracer};
+use crate::telemetry::get_meter;
 use bytes::BytesMut;
 use opentelemetry::metrics::{Counter, Meter};
 use opentelemetry::{global, KeyValue};
@@ -179,7 +179,6 @@ impl<'o> Connection {
         let mut volume = 0usize;
         loop {
             let bytes_read = self.read.read(&mut buf).await?;
-            self.transport_record(bytes_read);
             volume += bytes_read;
             if bytes_read == 0 {
                 break;
@@ -187,6 +186,7 @@ impl<'o> Connection {
             self.write.write_all(&buf[..bytes_read]).await?;
             self.flush().await?;
         }
+        self.transport_record(volume);
         Ok(volume)
     }
 
