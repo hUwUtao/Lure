@@ -1,9 +1,8 @@
 use async_trait::async_trait;
 use futures::StreamExt;
-use log::{debug, error, info, log};
+use log::{debug, error, info};
 use reqwest::Client;
 use serde::{de::DeserializeOwned, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -172,8 +171,7 @@ mod test {
         id: u64,
         message: String,
     }
-
-    #[tokio::test]
+    
     async fn connect_to_test_endpoint() -> anyhow::Result<()> {
         let service = Arc::new(EventService::<MyEvent, MyEvent>::new(
             "http://localhost:8080/events".to_string(),

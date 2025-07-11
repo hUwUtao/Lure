@@ -1,13 +1,24 @@
+mod ratelimit;
+
 use anyhow::bail;
+use std::fmt::Display;
 use std::future::IntoFuture;
 use std::time::Duration;
+use thiserror::Error;
 use tokio::time::timeout;
 
+#[derive(Debug, Error)]
 pub enum ClientIntent {
     Handshake,
     Query,
     Login,
     Transport,
+}
+
+impl Display for ClientIntent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!("{:?}", self))
+    }
 }
 
 struct Intent {

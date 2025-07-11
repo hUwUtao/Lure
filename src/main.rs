@@ -15,7 +15,7 @@ use config::LureConfig;
 use lure::Lure;
 
 use crate::config::LureConfigLoadError;
-use crate::telemetry::oltp::{init_meter, init_tracer};
+use crate::telemetry::oltp::init_meter;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {

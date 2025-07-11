@@ -1,4 +1,4 @@
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::bail;
@@ -15,7 +15,7 @@ use crate::config::LureConfig;
 use crate::connection::connection::{Connection, SocketIntent};
 use crate::packet::{create_proxy_protocol_header, OwnedHandshake, OwnedPacket};
 use crate::router::status::{QueryResponseKind, StatusBouncer};
-use crate::router::{HandshakeOption, Route, RouterInstance, Session};
+use crate::router::{HandshakeOption, RouterInstance, Session};
 use crate::telemetry::event::EventHook;
 use crate::telemetry::{init_event, EventEnvelope, EventServiceInstance};
 use crate::utils::OwnedArc;
@@ -220,7 +220,7 @@ impl Lure {
             .create_session(&handshake.server_address, address)
             .await
         {
-            if let Err(_e) = self
+            if let Err(e) = self
                 .handle_proxy_session(
                     client,
                     handshake, // &login,
@@ -229,6 +229,7 @@ impl Lure {
                 )
                 .await
             {
+                debug!("Proxy session error: {e}");
             } else {
             }
         } else {

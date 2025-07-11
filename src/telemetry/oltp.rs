@@ -1,5 +1,4 @@
 use log::info;
-use opentelemetry::Value;
 use opentelemetry::{global, KeyValue};
 use opentelemetry_otlp::{self, Protocol, WithExportConfig, WithHttpConfig};
 use opentelemetry_sdk::metrics::SdkMeterProvider;
@@ -196,7 +195,7 @@ pub fn init_meter() -> SdkMeterProvider {
     let metric_exporter = build_metric_exporter();
     let resource = create_resource_from_env();
 
-    let mut meter_provider = SdkMeterProvider::builder()
+    let meter_provider = SdkMeterProvider::builder()
         .with_periodic_exporter(metric_exporter)
         .with_resource(resource);
     

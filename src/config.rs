@@ -38,15 +38,17 @@ pub struct LureConfig {
     /// Misc config
     pub misc: MiscConfig,
 
+    /// List of localize strings, doesn't really matter
+    pub strings: HashMap<String, String>,
+
     /// Mapping of route patterns to upstream endpoints
-    pub routes: HashMap<String, RouteConfig>,
+    // pub routes: HashMap<String, RouteConfig>,
 
     #[serde(flatten)]
     pub other_fields: HashMap<String, toml::value::Value>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct MiscConfig {
     pub override_players: Option<Vec<String>>,
 }
@@ -120,19 +122,6 @@ pub struct ControlConfig {
     pub metrics: String,
 }
 
-/// Configuration for a single route pattern
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RouteConfig {
-    /// List of backend destinations (host:port)
-    pub dest: Vec<String>,
-
-    /// Use HAProxy protocol when forwarding
-    pub haproto: bool,
-
-    /// Apply network masking rules to this route
-    pub mask: bool,
-}
-
 impl Default for LureConfig {
     fn default() -> Self {
         Self {
@@ -164,7 +153,8 @@ impl Default for LureConfig {
                 metrics: "".to_string(),
             },
             misc: Default::default(),
-            routes: Default::default(),
+            strings: Default::default(),
+            // routes: Default::default(),
             other_fields: Default::default(),
         }
     }
