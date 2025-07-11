@@ -1,10 +1,10 @@
-use std::net::SocketAddr;
-use std::sync::Arc;
-
 use anyhow::bail;
 use async_trait::async_trait;
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 
@@ -18,6 +18,7 @@ use crate::router::status::{QueryResponseKind, StatusBouncer};
 use crate::router::{HandshakeOption, RouterInstance, Session};
 use crate::telemetry::event::EventHook;
 use crate::telemetry::{init_event, EventEnvelope, EventServiceInstance};
+use crate::threat::ratelimit::RateLimiterController;
 use crate::utils::OwnedArc;
 use valence_protocol::packets::handshaking::handshake_c2s::HandshakeNextState;
 use valence_protocol::packets::handshaking::HandshakeC2s;
@@ -91,22 +92,21 @@ impl Lure {
         // Start server.
         let listener = TcpListener::bind(address).await?;
         let semaphore = Arc::new(Semaphore::new(max_connections));
+        let rate_limiter: RateLimiterController<IpAddr> =
+            RateLimiterController::new(5, Duration::from_secs(5));
 
         loop {
             // Accept connection first
             let (client, addr) = listener.accept().await?;
 
             // Apply IP-based rate limiting
-            // let ip = addr.ip();
-            // let should_accept = rate_limiters
-            //     .entry(ip)
-            //     .or_insert_with(|| RateLimiter::new(Duration::from_millis(100)))
-            //     .check();
-
-            // if !should_accept {
-            //     drop(client);
-            //     continue;
-            // }
+            let ip = addr.ip();
+            if let crate::threat::ratelimit::RateLimitResult::Disallowed { retry_after: _ra } =
+                rate_limiter.check(&ip)
+            {
+                drop(client);
+                continue;
+            }
 
             // Try to acquire semaphore (non-blocking)
             match semaphore.clone().try_acquire_owned() {

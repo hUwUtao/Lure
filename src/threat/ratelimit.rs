@@ -6,33 +6,36 @@ use std::num::NonZeroU32;
 use std::time::Duration;
 
 #[derive(Debug)]
-pub enum RatelimitResult {
+pub enum RateLimitResult {
     Allowed,
     Disallowed { retry_after: Duration },
 }
 
-pub struct Ratelimiter<K: Hash + Eq + Clone> {
+pub struct RateLimiterController<K: Hash + Eq + Clone> {
     limiter: RateLimiter<K, DashMapStateStore<K>, DefaultClock>,
     retry_time: Duration,
 }
 
-impl<K> Ratelimiter<K>
+impl<K> RateLimiterController<K>
 where
     K: Hash + Eq + Clone + Send + Sync,
 {
     pub fn new(requests_per_second: u32, retry_time: Duration) -> Self {
         let quota = Quota::per_second(NonZeroU32::new(requests_per_second).unwrap());
         let limiter = RateLimiter::keyed(quota);
-        Ratelimiter { limiter, retry_time }
+        RateLimiterController {
+            limiter,
+            retry_time,
+        }
     }
 
-    pub fn check(&self, key: &K) -> RatelimitResult {
+    pub fn check(&self, key: &K) -> RateLimitResult {
         match self.limiter.check_key(key) {
-            Ok(_) => RatelimitResult::Allowed,
+            Ok(_) => RateLimitResult::Allowed,
             Err(negative) => {
                 let calculated_retry = negative.wait_time_from(DefaultClock::default().now());
                 let retry_after = calculated_retry.max(self.retry_time);
-                RatelimitResult::Disallowed { retry_after }
+                RateLimitResult::Disallowed { retry_after }
             }
         }
     }
@@ -40,17 +43,17 @@ where
 
 #[cfg(test)]
 mod test {
-    use super::{RatelimitResult, Ratelimiter};
+    use super::{RateLimitResult, RateLimiterController};
     use std::time::Duration;
 
     /// Helper function to run a rate limiter test with a given limit, keys, and expected results.
     fn run_test(limit: u32, keys: Vec<&str>, expected: Vec<bool>) {
-        let limiter = Ratelimiter::new(limit, Duration::from_secs(1));
+        let limiter = RateLimiterController::new(limit, Duration::from_secs(1));
         let results: Vec<bool> = keys
             .iter()
             .map(|k| match limiter.check(&k.to_string()) {
-                RatelimitResult::Allowed => true,
-                RatelimitResult::Disallowed { .. } => false,
+                RateLimitResult::Allowed => true,
+                RateLimitResult::Disallowed { .. } => false,
             })
             .collect();
         assert_eq!(results, expected);

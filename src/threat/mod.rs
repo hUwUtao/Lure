@@ -1,4 +1,4 @@
-mod ratelimit;
+pub mod ratelimit;
 
 use anyhow::bail;
 use std::fmt::Display;
