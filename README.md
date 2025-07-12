@@ -46,6 +46,10 @@ This project (fork) is meant to "replace" [Gate](https://gate.minekube.com/). Tu
 - [ ] Anomaly tracking
 - [ ] Be evil
 
+## The coldest process
+
+Mimalloc is optional but powerful allocator. By observe on `Intel i7-9700`, mimalloc helps drop cpu usage from 4% spike to 1% spike, however sacrifice with average heap at 47.3MiB on stress load, compare to 20-ish MiB without mimalloc.
+
 ## Credits
 
 Original implementor [sammwyy](https://github.com/sammwyy)

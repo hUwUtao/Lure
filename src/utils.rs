@@ -2,6 +2,14 @@ use async_trait::async_trait;
 
 use crate::telemetry::{event::EventHook, EventEnvelope, EventServiceInstance};
 
+#[cfg(feature = "mimalloc")]
+mod mimalloc {
+    use mimalloc::MiMalloc;
+
+    #[global_allocator]
+    static GLOBAL: MiMalloc = MiMalloc;
+}
+
 pub struct OwnedStatic<T: 'static>(&'static T);
 
 impl<T> From<&'static T> for OwnedStatic<T> {

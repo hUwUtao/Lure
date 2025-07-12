@@ -8,13 +8,13 @@ use proxy_protocol::{
     version2::{ProxyAddresses, ProxyCommand, ProxyTransportProtocol},
     ProxyHeader,
 };
-use valence::uuid::Uuid;
 use valence_protocol::{
     packets::{
         handshaking::{handshake_c2s::HandshakeNextState, HandshakeC2s},
         login::LoginHelloC2s,
         status::QueryResponseS2c,
     },
+    uuid::Uuid,
     Bounded, Decode, Encode, Packet, VarInt,
 };
 

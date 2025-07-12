@@ -36,8 +36,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .to_str()
         .ok_or(anyhow!("Failed to get config file path"))?;
 
-    println!("{}", config_file_path);
-
     let config = match LureConfig::load(config_file_path) {
         Ok(config) => {
             // Save config to fill missing fields

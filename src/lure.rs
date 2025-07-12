@@ -16,11 +16,11 @@ use tokio::{
     task::JoinHandle,
     time::timeout,
 };
-use valence::prelude::*;
 use valence_protocol::packets::{
     handshaking::{handshake_c2s::HandshakeNextState, HandshakeC2s},
     status::{QueryPingC2s, QueryPongS2c, QueryRequestC2s, QueryResponseS2c},
 };
+use valence_text::{Color, IntoText};
 
 use crate::{
     config::LureConfig,
