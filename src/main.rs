@@ -1,22 +1,20 @@
-mod config;
-mod connection;
-mod lure;
+pub(crate) mod config;
+pub(crate) mod connection;
+pub(crate) mod error;
+pub(crate) mod lure;
 pub(crate) mod packet;
-mod router;
+pub(crate) mod router;
 pub(crate) mod telemetry;
-mod threat;
-mod utils;
-mod error;
+pub(crate) mod threat;
+pub(crate) mod utils;
+
+use std::{env, error::Error};
 
 use anyhow::anyhow;
-use std::env;
-use std::error::Error;
-
 use config::LureConfig;
 use lure::Lure;
 
-use crate::config::LureConfigLoadError;
-use crate::telemetry::oltp::init_meter;
+use crate::{config::LureConfigLoadError, telemetry::oltp::init_meter};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {

@@ -1,22 +1,29 @@
-use crate::config::LureConfig;
-use crate::connection::connection::Connection;
-use crate::packet::{create_proxy_protocol_header, OwnedQueryResponse, NULL_SOCKET};
-use crate::router::{HandshakeOption, Route, RouterInstance};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
 use anyhow::bail;
-use futures::SinkExt;
 use log::error;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::RwLock;
-use tokio::time::timeout;
-use valence_protocol::packets::handshaking::handshake_c2s::HandshakeNextState;
-use valence_protocol::packets::handshaking::HandshakeC2s;
-use valence_protocol::packets::status::{QueryRequestC2s, QueryResponseS2c};
-use valence_protocol::{Bounded, VarInt};
+use tokio::{sync::RwLock, time::timeout};
+use valence_protocol::{
+    packets::{
+        handshaking::{handshake_c2s::HandshakeNextState, HandshakeC2s},
+        status::{QueryRequestC2s, QueryResponseS2c},
+    },
+    Bounded, VarInt,
+};
+
+use crate::{
+    config::LureConfig,
+    connection::Connection,
+    packet::{create_proxy_protocol_header, OwnedQueryResponse, NULL_SOCKET},
+    router::{HandshakeOption, Route, RouterInstance},
+};
 
 #[derive(Debug, Clone)]
 pub enum QueryResponseKind {
@@ -113,12 +120,9 @@ impl StatusBouncer {
         resolved: &Resolved,
     ) -> anyhow::Result<QueryResponseKind> {
         if let Ok(mut conn) = Connection::create_conn(resolved.0).await {
-            match resolved.1.handshake {
-                HandshakeOption::HAProxy => {
-                    let pkt = create_proxy_protocol_header(NULL_SOCKET)?;
-                    conn.send_raw(&pkt).await?;
-                }
-                _ => {}
+            if let HandshakeOption::HAProxy = resolved.1.handshake {
+                let pkt = create_proxy_protocol_header(NULL_SOCKET)?;
+                conn.send_raw(&pkt).await?;
             }
             conn.send(&HandshakeC2s {
                 protocol_version: VarInt(770),
@@ -128,7 +132,7 @@ impl StatusBouncer {
             })
             .await?;
             conn.send(&QueryRequestC2s {}).await?;
-            let packet = conn.recv::<QueryResponseS2c>().await?.clone();
+            let packet = conn.recv::<QueryResponseS2c>().await?;
             Ok(QueryResponseKind::Valid(OwnedQueryResponse::new(
                 &self.transform_query(packet.json, &resolved.1).await?,
             )))

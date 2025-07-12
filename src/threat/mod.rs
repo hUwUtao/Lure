@@ -1,11 +1,10 @@
 pub mod ratelimit;
 
-use crate::threat::ratelimit::RateLimitResult;
-use anyhow::bail;
-use std::fmt::Display;
-use std::future::IntoFuture;
-use std::time::Duration;
+use std::{future::IntoFuture, time::Duration};
+
 use tokio::time::timeout;
+
+use crate::threat::ratelimit::RateLimitResult;
 
 pub enum IntentTag {
     Handshake,

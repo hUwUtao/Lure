@@ -1,18 +1,12 @@
 pub mod event;
 pub(crate) mod oltp;
 
-use crate::lure::EventIdent;
-use crate::router::RouteReport;
-use crate::telemetry::event::EventService;
-use opentelemetry::global;
-use opentelemetry::global::BoxedTracer;
-use opentelemetry::metrics::Meter;
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use std::time::Duration;
-use opentelemetry::trace::TracerProvider;
+use std::{sync::Arc, time::Duration};
 
-/// Initializes an OTLP TracerProvider, optionally using gRPC via `--features grpc-tonic`.
+use opentelemetry::{global, global::BoxedTracer, metrics::Meter, trace::TracerProvider};
+use serde::{Deserialize, Serialize};
+
+use crate::{lure::EventIdent, router::RouteReport, telemetry::event::EventService};
 
 pub fn get_meter() -> Meter {
     global::meter_provider().meter("alure")

@@ -1,14 +1,22 @@
+use std::{
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
+    sync::Arc,
+};
+
 use bytes::BytesMut;
-use proxy_protocol::version2::{ProxyAddresses, ProxyCommand, ProxyTransportProtocol};
-use proxy_protocol::ProxyHeader;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
-use std::sync::Arc;
+use proxy_protocol::{
+    version2::{ProxyAddresses, ProxyCommand, ProxyTransportProtocol},
+    ProxyHeader,
+};
 use valence::uuid::Uuid;
-use valence_protocol::packets::handshaking::handshake_c2s::HandshakeNextState;
-use valence_protocol::packets::handshaking::HandshakeC2s;
-use valence_protocol::packets::login::LoginHelloC2s;
-use valence_protocol::packets::status::QueryResponseS2c;
-use valence_protocol::{Bounded, Decode, Encode, Packet, VarInt};
+use valence_protocol::{
+    packets::{
+        handshaking::{handshake_c2s::HandshakeNextState, HandshakeC2s},
+        login::LoginHelloC2s,
+        status::QueryResponseS2c,
+    },
+    Bounded, Decode, Encode, Packet, VarInt,
+};
 
 pub trait OwnedPacket<'a, P: Packet + Decode<'a> + Encode> {
     fn from_packet(packet: P) -> Self;
@@ -51,9 +59,7 @@ pub struct OwnedQueryResponse {
 
 impl OwnedQueryResponse {
     pub(crate) fn new(json: &str) -> Self {
-        Self {
-            json: json.into(),
-        }
+        Self { json: json.into() }
     }
 }
 

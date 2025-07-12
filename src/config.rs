@@ -1,6 +1,4 @@
-use std::fs::File;
-use std::io::prelude::*;
-use std::{collections::HashMap, fs};
+use std::{collections::HashMap, fs, fs::File, io::prelude::*};
 
 use serde::{Deserialize, Serialize};
 // v2
@@ -41,9 +39,8 @@ pub struct LureConfig {
     /// List of localize strings, doesn't really matter
     pub strings: HashMap<Box<str>, Box<str>>,
 
-    /// Mapping of route patterns to upstream endpoints
+    // Mapping of route patterns to upstream endpoints
     // pub routes: HashMap<String, RouteConfig>,
-
     #[serde(flatten)]
     pub other_fields: HashMap<String, toml::value::Value>,
 }
@@ -162,8 +159,8 @@ impl Default for LureConfig {
 
 impl LureConfig {
     pub fn load(path: &str) -> anyhow::Result<Self, LureConfigLoadError> {
-        let raw = fs::read_to_string(path).map_err(|err| LureConfigLoadError::Io(err))?;
-        let config: Self = toml::from_str(&raw).map_err(|err| LureConfigLoadError::Parse(err))?;
+        let raw = fs::read_to_string(path).map_err(LureConfigLoadError::Io)?;
+        let config: Self = toml::from_str(&raw).map_err(LureConfigLoadError::Parse)?;
 
         for field in &config.other_fields {
             println!(
@@ -183,7 +180,10 @@ impl LureConfig {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
 pub enum LureConfigLoadError {
-    Io(std::io::Error),
-    Parse(toml::de::Error),
+    #[error("Could not open config")]
+    Io(#[from] std::io::Error),
+    #[error("Could not parse")]
+    Parse(#[from] toml::de::Error),
 }

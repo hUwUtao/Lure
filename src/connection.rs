@@ -1,19 +1,21 @@
-use crate::connection::connection::SocketIntent::{
-    Generic, GreetToBackend, GreetToProxy, PassthroughClientBound, PassthroughServerBound,
-};
-use crate::telemetry::get_meter;
+use std::{io, io::ErrorKind, net::SocketAddr};
+
 use bytes::BytesMut;
-use opentelemetry::metrics::{Counter, Meter};
-use opentelemetry::{global, KeyValue};
-use std::io;
-use std::io::ErrorKind;
-use std::net::SocketAddr;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use valence_protocol::decode::PacketFrame;
-use valence_protocol::packets::login::LoginDisconnectS2c;
-use valence_protocol::{Decode, Encode, Packet, Text};
-use valence_protocol::{PacketDecoder, PacketEncoder};
+use opentelemetry::{
+    global,
+    metrics::{Counter, Meter},
+    KeyValue,
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::tcp::{OwnedReadHalf, OwnedWriteHalf},
+};
+use valence_protocol::{
+    decode::PacketFrame, packets::login::LoginDisconnectS2c, Decode, Encode, Packet, PacketDecoder,
+    PacketEncoder, Text,
+};
+
+use crate::telemetry::get_meter;
 
 pub struct Connection {
     pub address: SocketAddr,
@@ -38,11 +40,11 @@ impl SocketIntent {
     fn as_attr(&self) -> KeyValue {
         // recv+pipe/send
         let a = match self {
-            GreetToProxy => "frontbound",
-            GreetToBackend => "backbound",
-            PassthroughClientBound => "s2c",
-            PassthroughServerBound => "c2s",
-            Generic => "generic",
+            Self::GreetToProxy => "frontbound",
+            Self::GreetToBackend => "backbound",
+            Self::PassthroughClientBound => "s2c",
+            Self::PassthroughServerBound => "c2s",
+            Self::Generic => "generic",
         };
         KeyValue::new("intent", a)
     }
@@ -64,7 +66,7 @@ impl ConnectionMetric {
 
 const MAX_CHUNK_SIZE: usize = 1024;
 
-impl<'o> Connection {
+impl Connection {
     pub fn new(
         address: SocketAddr,
         read: OwnedReadHalf,
@@ -112,7 +114,7 @@ impl<'o> Connection {
                 body: BytesMut::new(),
             },
             metric: ConnectionMetric::new(&metric),
-            intent: Generic.as_attr(),
+            intent: SocketIntent::Generic.as_attr(),
         };
         Ok(connection)
     }
@@ -169,12 +171,12 @@ impl<'o> Connection {
 
     pub async fn send_raw(&mut self, pkt: &[u8]) -> anyhow::Result<()> {
         self.packet_record();
-        self.write.write_all(&pkt).await?;
+        self.write.write_all(pkt).await?;
         self.flush().await?;
         Ok(())
     }
 
-    pub async fn copy<'a>(&'a mut self) -> anyhow::Result<usize> {
+    pub async fn copy(&mut self) -> anyhow::Result<usize> {
         let mut buf = [0u8; MAX_CHUNK_SIZE];
         let mut volume = 0usize;
         loop {

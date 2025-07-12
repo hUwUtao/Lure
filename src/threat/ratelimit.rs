@@ -1,10 +1,10 @@
-use crate::threat::ClientFail;
-use governor::clock::{Clock, DefaultClock};
-use governor::state::keyed::DashMapStateStore;
-use governor::{Quota, RateLimiter};
-use std::hash::Hash;
-use std::num::NonZeroU32;
-use std::time::Duration;
+use std::{hash::Hash, num::NonZeroU32, time::Duration};
+
+use governor::{
+    clock::{Clock, DefaultClock},
+    state::keyed::DashMapStateStore,
+    Quota, RateLimiter,
+};
 
 #[derive(Debug)]
 pub enum RateLimitResult {
@@ -44,8 +44,9 @@ where
 
 #[cfg(test)]
 mod test {
-    use super::{RateLimitResult, RateLimiterController};
     use std::time::Duration;
+
+    use super::{RateLimitResult, RateLimiterController};
 
     /// Helper function to run a rate limiter test with a given limit, keys, and expected results.
     fn run_test(limit: u32, keys: Vec<&str>, expected: Vec<bool>) {

@@ -1,13 +1,16 @@
 pub(crate) mod status;
 
-use crate::telemetry::{get_meter, EventEnvelope, EventServiceInstance, NonObj};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+
 use async_trait::async_trait;
 use opentelemetry::metrics::{Counter, Gauge, Meter};
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
-use tokio::sync::{RwLock, RwLockWriteGuard};
-use tokio::time::timeout;
+use tokio::{
+    sync::{RwLock, RwLockWriteGuard},
+    time::timeout,
+};
+
+use crate::telemetry::{get_meter, EventEnvelope, EventServiceInstance, NonObj};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum HandshakeOption {

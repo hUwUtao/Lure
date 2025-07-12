@@ -1,12 +1,13 @@
+use std::{collections::HashMap, env, time::Duration};
+
 use log::info;
 use opentelemetry::{global, KeyValue};
 use opentelemetry_otlp::{self, Protocol, WithExportConfig, WithHttpConfig};
-use opentelemetry_sdk::metrics::SdkMeterProvider;
-use opentelemetry_sdk::trace::{self, RandomIdGenerator, Sampler, SdkTracerProvider};
-use opentelemetry_sdk::Resource;
-use std::collections::HashMap;
-use std::env;
-use std::time::Duration;
+use opentelemetry_sdk::{
+    metrics::SdkMeterProvider,
+    trace::{self, RandomIdGenerator, Sampler, SdkTracerProvider},
+    Resource,
+};
 
 /// Creates an OpenTelemetry Resource from environment variables following semantic conventions,
 /// including OTEL_RESOURCE_ATTRIBUTES for additional key-value pairs.
@@ -198,10 +199,11 @@ pub fn init_meter() -> SdkMeterProvider {
     let meter_provider = SdkMeterProvider::builder()
         .with_periodic_exporter(metric_exporter)
         .with_resource(resource);
-    
+
     #[cfg(feature = "verbose")]
     {
-        meter_provider = meter_provider.with_periodic_exporter(opentelemetry_stdout::MetricExporter::builder().build());
+        meter_provider = meter_provider
+            .with_periodic_exporter(opentelemetry_stdout::MetricExporter::builder().build());
     }
 
     let meter_provider = meter_provider.build();

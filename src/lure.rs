@@ -1,36 +1,39 @@
+use std::{
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
+
 use anyhow::bail;
 use async_trait::async_trait;
-use log::{debug, error, info};
+use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::error::Error;
-use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
-use std::time::Duration;
 use thiserror::__private::AsDisplay;
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Semaphore;
-
-use tokio::task::JoinHandle;
-use tokio::time::error::Elapsed;
-use tokio::time::timeout;
+use tokio::{
+    net::{TcpListener, TcpStream},
+    sync::Semaphore,
+    task::JoinHandle,
+    time::timeout,
+};
 use valence::prelude::*;
+use valence_protocol::packets::{
+    handshaking::{handshake_c2s::HandshakeNextState, HandshakeC2s},
+    status::{QueryPingC2s, QueryPongS2c, QueryRequestC2s, QueryResponseS2c},
+};
 
-use crate::config::LureConfig;
-use crate::connection::connection::{Connection, SocketIntent};
-use crate::error::ReportableError;
-use crate::packet::{create_proxy_protocol_header, OwnedHandshake, OwnedPacket};
-use crate::router::status::{QueryResponseKind, StatusBouncer};
-use crate::router::{HandshakeOption, RouterInstance, Session};
-use crate::telemetry::event::EventHook;
-use crate::telemetry::{init_event, EventEnvelope, EventServiceInstance};
-use crate::threat::ratelimit::RateLimiterController;
-use crate::threat::{ClientIntent, IntentTag, ThreatControlService};
-use crate::utils::{leak, OwnedStatic};
-use valence_protocol::packets::handshaking::handshake_c2s::HandshakeNextState;
-use valence_protocol::packets::handshaking::HandshakeC2s;
-use valence_protocol::packets::status::{
-    QueryPingC2s, QueryPongS2c, QueryRequestC2s, QueryResponseS2c,
+use crate::{
+    config::LureConfig,
+    connection::{Connection, SocketIntent},
+    error::ReportableError,
+    packet::{create_proxy_protocol_header, OwnedHandshake, OwnedPacket},
+    router::{
+        status::{QueryResponseKind, StatusBouncer},
+        HandshakeOption, RouterInstance, Session,
+    },
+    telemetry::{event::EventHook, init_event, EventEnvelope, EventServiceInstance},
+    threat::{ratelimit::RateLimiterController, ClientIntent, IntentTag, ThreatControlService},
+    utils::{leak, OwnedStatic},
 };
 
 pub struct Lure {
@@ -284,7 +287,7 @@ impl Lure {
 
     pub async fn handle_proxy_session(
         &self,
-        mut client: Connection,
+        client: Connection,
         handshake: &OwnedHandshake,
         // login: &OwnedLoginHello,
         handshake_option: &HandshakeOption,
@@ -331,12 +334,9 @@ impl Lure {
         );
 
         // Replay necessary packets
-        match handshake_option {
-            HandshakeOption::HAProxy => {
-                let pkt = create_proxy_protocol_header(client.address)?;
-                server.send_raw(&pkt).await?;
-            }
-            _ => {}
+        if let HandshakeOption::HAProxy = handshake_option {
+            let pkt = create_proxy_protocol_header(client.address)?;
+            server.send_raw(&pkt).await?;
         }
 
         server.send(&handshake.as_packet()).await?;
@@ -348,13 +348,13 @@ impl Lure {
 
     async fn passthrough_now(&self, client: Connection, server: Connection) -> anyhow::Result<()> {
         let mut client_to_server = Connection::new(
-            client.address.clone(),
+            client.address,
             client.read,
             server.write,
             SocketIntent::PassthroughServerBound,
         );
         let mut server_to_client = Connection::new(
-            server.address.clone(),
+            server.address,
             server.read,
             client.write,
             SocketIntent::PassthroughClientBound,
