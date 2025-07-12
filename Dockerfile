@@ -9,6 +9,8 @@ RUN cargo install --path .
 # Stage 2: Create the final image
 FROM debian:bookworm-slim
 
+RUN apt-get update && apt-get upgrade && apt-get install -y openssl
+
 WORKDIR /app
 COPY --from=builder /usr/local/cargo/bin/lure /app/lure
 

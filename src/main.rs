@@ -18,7 +18,7 @@ use crate::{config::LureConfigLoadError, telemetry::oltp::init_meter};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    dotenvy::dotenv()?;
+    let _ = dotenvy::dotenv();
     #[cfg(debug_assertions)]
     femme::with_level(femme::LevelFilter::Trace);
     #[cfg(not(debug_assertions))]
