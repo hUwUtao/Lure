@@ -39,7 +39,7 @@ pub struct LureConfig {
     pub misc: MiscConfig,
 
     /// List of localize strings, doesn't really matter
-    pub strings: HashMap<String, String>,
+    pub strings: HashMap<Box<str>, Box<str>>,
 
     /// Mapping of route patterns to upstream endpoints
     // pub routes: HashMap<String, RouteConfig>,

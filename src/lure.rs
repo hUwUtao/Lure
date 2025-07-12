@@ -2,35 +2,42 @@ use anyhow::bail;
 use async_trait::async_trait;
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::error::Error;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
+use thiserror::__private::AsDisplay;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 
 use tokio::task::JoinHandle;
+use tokio::time::error::Elapsed;
+use tokio::time::timeout;
 use valence::prelude::*;
 
 use crate::config::LureConfig;
 use crate::connection::connection::{Connection, SocketIntent};
+use crate::error::ReportableError;
 use crate::packet::{create_proxy_protocol_header, OwnedHandshake, OwnedPacket};
 use crate::router::status::{QueryResponseKind, StatusBouncer};
 use crate::router::{HandshakeOption, RouterInstance, Session};
 use crate::telemetry::event::EventHook;
 use crate::telemetry::{init_event, EventEnvelope, EventServiceInstance};
 use crate::threat::ratelimit::RateLimiterController;
-use crate::utils::OwnedArc;
+use crate::threat::ThreatControlService;
+use crate::utils::{leak, OwnedStatic};
 use valence_protocol::packets::handshaking::handshake_c2s::HandshakeNextState;
 use valence_protocol::packets::handshaking::HandshakeC2s;
 use valence_protocol::packets::status::{
     QueryPingC2s, QueryPongS2c, QueryRequestC2s, QueryResponseS2c,
 };
 
-#[derive(Clone, Debug)]
 pub struct Lure {
     config: LureConfig,
-    router: Arc<RouterInstance>,
-    status: Arc<StatusBouncer>,
+    router: &'static RouterInstance,
+    status: &'static StatusBouncer,
+    threat: &'static ThreatControlService,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -62,16 +69,17 @@ impl EventHook<EventEnvelope, EventEnvelope> for EventIdent {
 
 impl Lure {
     pub fn new(config: LureConfig) -> Lure {
-        let router = Arc::new(RouterInstance::new());
-        let status = Arc::new(StatusBouncer::new(router.clone(), &config));
+        let router = leak(RouterInstance::new());
+        let status = leak(StatusBouncer::new(router, &config));
         Lure {
             config,
             router,
             status,
+            threat: leak(ThreatControlService::new()),
         }
     }
 
-    pub async fn start(&'static mut self) -> anyhow::Result<()> {
+    pub async fn start(&'static self) -> anyhow::Result<()> {
         // Listener config.
         let listener_cfg = self.config.bind.to_owned();
         info!("Preparing socket {}", listener_cfg);
@@ -85,7 +93,7 @@ impl Lure {
                     id: self.config.inst.clone(),
                 })
                 .await;
-            event.hook(OwnedArc::from(self.router.clone())).await;
+            event.hook(OwnedStatic::from(self.router)).await;
             event.clone().start();
         }
 
@@ -93,7 +101,7 @@ impl Lure {
         let listener = TcpListener::bind(address).await?;
         let semaphore = Arc::new(Semaphore::new(max_connections));
         let rate_limiter: RateLimiterController<IpAddr> =
-            RateLimiterController::new(5, Duration::from_secs(5));
+            RateLimiterController::new(10, Duration::from_secs(3));
 
         loop {
             // Accept connection first
@@ -115,11 +123,11 @@ impl Lure {
                         eprintln!("Failed to set TCP_NODELAY: {e}");
                     }
 
-                    let lure = self.clone();
+                    let lure = self;
                     tokio::spawn(async move {
                         // Apply timeout to connection handling
                         if let Err(e) = lure.handle_connection(client, addr).await {
-                            error!("connection closed: {e}")
+                            debug!("connection closed: {e}")
                         }
                         drop(permit);
                     });
@@ -130,30 +138,6 @@ impl Lure {
                 }
             }
         }
-
-        // while let Ok(permit) = semaphore.clone().acquire_owned().await {
-        // // loop {
-        //     let (client, remote_client_addr) = listener.accept().await?;
-        //     // eprintln!("Accepted connection to {remote_client_addr}");
-        //
-        //     if let Err(e) = client.set_nodelay(true) {
-        //         eprintln!("Failed to set TCP_NODELAY: {e}");
-        //     }
-        //
-        //     let lure = self.clone();
-        //     tokio::spawn(async move {
-        //         if let Err(e) = lure.handle_connection(client, remote_client_addr).await {
-        //             eprintln!("Connection to {remote_client_addr} ended with: {e}");
-        //         } else {
-        //             // eprintln!("Connection to {remote_client_addr} ended.");
-        //         }
-        //
-        //         drop(permit);
-        //     });
-        // }
-        //
-        // println!("Starting Lure server.");
-        // Ok(())
     }
 
     pub async fn handle_connection(
@@ -184,6 +168,37 @@ impl Lure {
         }
     }
 
+    fn get_string(&self, key: &str) -> Box<str> {
+        self.config
+            .strings
+            .get(key)
+            .unwrap_or(&"".into())
+            .to_owned()
+    }
+
+    fn create_placeholder_ping(&self, label: &str) -> anyhow::Result<String> {
+        let brand = self.get_string("SERVER_LIST_BRAND");
+        let target_label = self.get_string(label);
+        let v = json! {
+            {
+              "version": {
+                "name": brand,
+                "protocol": -1
+              },
+              // "players": {
+              //   "online": 0,
+              //   "max": 0,
+              //   "sample": []
+              // },
+              "description": {
+                "text": target_label
+              },
+              // "favicon": ""
+            }
+        };
+        Ok(serde_json::to_string(&v)?)
+    }
+
     pub async fn handle_status(
         &self,
         mut client: Connection,
@@ -191,17 +206,25 @@ impl Lure {
     ) -> anyhow::Result<()> {
         client.recv::<QueryRequestC2s>().await?;
         match self.status.get(&handshake.server_address).await {
-            QueryResponseKind::Valid(response) => client.send::<QueryResponseS2c>(&response.as_packet()).await?,
-            QueryResponseKind::NoHost => client
-                .send(&QueryResponseS2c {
-                    json: "{\"version\":{\"name\":\"azurepowered\",\"protocol\":-1},\"players\":{\"online\":0,\"max\":0,\"sample\":[]},\"description\":\"ROUTE NOT FOUND\",\"favicon\":\"\"}",
-                })
-                .await?,
-            QueryResponseKind::Disconnected => client
-                .send(&QueryResponseS2c {
-                    json: "{\"version\":{\"name\":\"azurepowered\",\"protocol\":-1},\"players\":{\"online\":0,\"max\":0,\"sample\":[]},\"description\":\"SERVER OFFLINE\",\"favicon\":\"\"}",
-                })
-                .await?
+            QueryResponseKind::Valid(response) => {
+                client
+                    .send::<QueryResponseS2c>(&response.as_packet())
+                    .await?
+            }
+            QueryResponseKind::NoHost => {
+                client
+                    .send(&QueryResponseS2c {
+                        json: &self.create_placeholder_ping("ROUTE_NOT_FOUND")?,
+                    })
+                    .await?
+            }
+            QueryResponseKind::Disconnected => {
+                client
+                    .send(&QueryResponseS2c {
+                        json: &self.create_placeholder_ping("SERVER_OFFLINE")?,
+                    })
+                    .await?
+            }
         }
 
         let QueryPingC2s { payload } = client.recv::<QueryPingC2s>().await?;
@@ -229,10 +252,11 @@ impl Lure {
                 )
                 .await
             {
-                debug!("Proxy session error: {e}");
-            } else {
+                let re = ReportableError::from(e);
+                debug!("Proxy session error: {re}");
             }
         } else {
+            debug!("No destination");
             client
                 .disconnect("No destination".into_text().color(Color::RED))
                 .await?;
@@ -250,16 +274,29 @@ impl Lure {
         session: &Arc<Session>,
     ) -> anyhow::Result<()> {
         let server_address = session.destination_addr;
-        let connect_result = TcpStream::connect(server_address).await;
+        let connect_result =
+            timeout(Duration::from_secs(1), TcpStream::connect(server_address)).await;
 
-        let server_stream: TcpStream = match TcpStream::connect(server_address).await {
-            Ok(stream) => stream,
-            Err(_) => {
-                let error = format!("Cannot connect to server:\n\n{:?}", connect_result.err());
-                client
-                    .disconnect(error.clone().into_text().color(Color::RED))
-                    .await?;
-                bail!(error);
+        async fn handle_err(mut client: Connection, err: &ReportableError) -> anyhow::Result<()> {
+            // let re = ;
+            let error = format!("Gateway error:\n\n{}", err.as_display());
+            client
+                .disconnect(error.clone().into_text().color(Color::RED))
+                .await?;
+            Ok(())
+        }
+
+        let server_stream: TcpStream = match connect_result {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(err)) => {
+                let err = ReportableError::from(err);
+                handle_err(client, &err).await?;
+                bail!(err);
+            }
+            Err(err) => {
+                let err = ReportableError::from(err);
+                handle_err(client, &err).await?;
+                bail!(err);
             }
         };
 

@@ -6,6 +6,7 @@ mod router;
 pub(crate) mod telemetry;
 mod threat;
 mod utils;
+mod error;
 
 use anyhow::anyhow;
 use std::env;

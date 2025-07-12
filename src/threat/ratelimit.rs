@@ -1,3 +1,4 @@
+use crate::threat::ClientFail;
 use governor::clock::{Clock, DefaultClock};
 use governor::state::keyed::DashMapStateStore;
 use governor::{Quota, RateLimiter};

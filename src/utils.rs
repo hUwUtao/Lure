@@ -27,20 +27,22 @@
 // }
 
 use crate::router::RouterInstance;
+use crate::telemetry::event::EventHook;
 use crate::telemetry::{EventEnvelope, EventServiceInstance};
 use async_trait::async_trait;
-use std::sync::Arc;
 
-pub struct OwnedArc<T>(Arc<T>);
+pub struct OwnedStatic<T: 'static>(&'static T);
 
-impl<T> From<Arc<T>> for OwnedArc<T> {
-    fn from(arc: Arc<T>) -> Self {
-        OwnedArc(arc)
+impl<T> From<&'static T> for OwnedStatic<T> {
+    fn from(value: &'static T) -> Self {
+        OwnedStatic(value)
     }
 }
 
 #[async_trait]
-impl crate::telemetry::event::EventHook<EventEnvelope, EventEnvelope> for OwnedArc<RouterInstance> {
+impl<H: EventHook<EventEnvelope, EventEnvelope> + Send + Sync>
+    EventHook<EventEnvelope, EventEnvelope> for OwnedStatic<H>
+{
     async fn on_handshake(&self) -> Option<EventEnvelope> {
         self.0.on_handshake().await
     }
@@ -53,4 +55,8 @@ impl crate::telemetry::event::EventHook<EventEnvelope, EventEnvelope> for OwnedA
         self.0.on_event(inst, event).await?;
         Ok(())
     }
+}
+
+pub fn leak<T>(inner: T) -> &'static T {
+    Box::leak(Box::new(inner))
 }

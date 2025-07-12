@@ -1,13 +1,12 @@
 pub mod ratelimit;
 
+use crate::threat::ratelimit::RateLimitResult;
 use anyhow::bail;
 use std::fmt::Display;
 use std::future::IntoFuture;
 use std::time::Duration;
-use thiserror::Error;
 use tokio::time::timeout;
 
-#[derive(Debug, Error)]
 pub enum ClientIntent {
     Handshake,
     Query,
@@ -15,10 +14,12 @@ pub enum ClientIntent {
     Transport,
 }
 
-impl Display for ClientIntent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!("{:?}", self))
-    }
+#[derive(Debug, thiserror::Error)]
+pub enum ClientFail {
+    #[error("Timeout")]
+    Timeout,
+    #[error("Rate limited")]
+    RateLimited(RateLimitResult),
 }
 
 struct Intent {
@@ -26,9 +27,13 @@ struct Intent {
     expected: Option<Duration>,
 }
 
-struct ThreatControlService;
+#[derive(Debug)]
+pub struct ThreatControlService;
 
 impl ThreatControlService {
+    pub fn new() -> Self {
+        Self {}
+    }
     /// A `timeout` wrapper with actual determination clause of failure. To control, report and handle
     pub async fn nuisance<F>(
         &self,
@@ -41,9 +46,7 @@ impl ThreatControlService {
     {
         match timeout(duration, future.into_future()).await {
             Ok(v) => Ok(v),
-            Err(_) => {
-                bail!("nuisance check timeout");
-            }
+            Err(_) => Err(ClientFail::Timeout.into()),
         }
     }
 }

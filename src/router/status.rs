@@ -63,7 +63,7 @@ impl SamplePlayer {
 #[derive(Debug)]
 pub struct StatusBouncer {
     cache: RwLock<HashMap<u64, Arc<(OwnedQueryResponse, u64)>>>,
-    router: Arc<RouterInstance>,
+    router: &'static RouterInstance,
     cache_duration: u64, // Cache duration in seconds
     override_players: Vec<Value>,
 }
@@ -72,7 +72,7 @@ type Resolved = (SocketAddr, Arc<Route>);
 
 impl StatusBouncer {
     /// Create a new StatusBouncer with default cache duration of 30 seconds
-    pub fn new(router: Arc<RouterInstance>, config: &LureConfig) -> Self {
+    pub fn new(router: &'static RouterInstance, config: &LureConfig) -> Self {
         let override_players = if let Some(t) = &config.misc.override_players {
             t
         } else {
