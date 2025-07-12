@@ -25,7 +25,7 @@ use crate::router::{HandshakeOption, RouterInstance, Session};
 use crate::telemetry::event::EventHook;
 use crate::telemetry::{init_event, EventEnvelope, EventServiceInstance};
 use crate::threat::ratelimit::RateLimiterController;
-use crate::threat::ThreatControlService;
+use crate::threat::{ClientIntent, IntentTag, ThreatControlService};
 use crate::utils::{leak, OwnedStatic};
 use valence_protocol::packets::handshaking::handshake_c2s::HandshakeNextState;
 use valence_protocol::packets::handshaking::HandshakeC2s;
@@ -161,7 +161,15 @@ impl Lure {
 
     pub async fn handle_handshake(&self, mut connection: Connection) -> anyhow::Result<()> {
         // Wait for initial handshake.
-        let handshake = OwnedHandshake::from_packet(connection.recv::<HandshakeC2s>().await?);
+        const INTENT: ClientIntent = ClientIntent {
+            tag: IntentTag::Handshake,
+            duration: Duration::from_millis(300),
+        };
+        let handshake = OwnedHandshake::from_packet(
+            self.threat
+                .nuisance(connection.recv::<HandshakeC2s>(), INTENT)
+                .await??,
+        );
         match &handshake.next_state {
             HandshakeNextState::Status => self.handle_status(connection, handshake).await,
             HandshakeNextState::Login => self.handle_proxy(connection, &handshake).await,
@@ -204,7 +212,13 @@ impl Lure {
         mut client: Connection,
         handshake: OwnedHandshake,
     ) -> anyhow::Result<()> {
-        client.recv::<QueryRequestC2s>().await?;
+        const INTENT: ClientIntent = ClientIntent {
+            tag: IntentTag::Query,
+            duration: Duration::from_millis(300),
+        };
+        self.threat
+            .nuisance(client.recv::<QueryRequestC2s>(), INTENT)
+            .await??;
         match self.status.get(&handshake.server_address).await {
             QueryResponseKind::Valid(response) => {
                 client
@@ -227,7 +241,10 @@ impl Lure {
             }
         }
 
-        let QueryPingC2s { payload } = client.recv::<QueryPingC2s>().await?;
+        let QueryPingC2s { payload } = self
+            .threat
+            .nuisance(client.recv::<QueryPingC2s>(), INTENT)
+            .await??;
         client.send(&QueryPongS2c { payload }).await?;
         Ok(())
     }
