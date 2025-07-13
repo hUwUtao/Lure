@@ -13,7 +13,6 @@ use thiserror::__private::AsDisplay;
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::Semaphore,
-    task::JoinHandle,
     time::timeout,
 };
 use valence_protocol::packets::{

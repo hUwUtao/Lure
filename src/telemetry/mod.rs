@@ -1,5 +1,6 @@
 pub mod event;
 pub(crate) mod oltp;
+pub(crate) mod process;
 
 use std::{sync::Arc, time::Duration};
 
