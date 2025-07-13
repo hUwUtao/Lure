@@ -53,6 +53,9 @@ grpc-tonic = [
 mimalloc = ["dep:mimalloc"]
 verbose = []
 
+[profile.release]
+incremental = true
+
 [profile.profiling]
 inherits = "release"
 debug = "line-tables-only"
