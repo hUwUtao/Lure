@@ -295,7 +295,7 @@ impl Lure {
     ) -> anyhow::Result<()> {
         let server_address = session.destination_addr;
         let connect_result =
-            timeout(Duration::from_secs(1), TcpStream::connect(server_address)).await;
+            timeout(Duration::from_secs(3), TcpStream::connect(server_address)).await;
 
         async fn handle_err(mut client: Connection, err: &ReportableError) -> anyhow::Result<()> {
             // let re = ;
@@ -360,29 +360,12 @@ impl Lure {
             SocketIntent::PassthroughClientBound,
         );
 
-        let c2s_fut: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
-            loop {
-                let bytes = client_to_server.copy().await?;
-                if bytes == 0 {
-                    break;
-                }
-            }
-            Ok(())
-        });
-
-        let s2c_fut = async move {
-            loop {
-                let bytes = server_to_client.copy().await?;
-                if bytes == 0 {
-                    break;
-                }
-            }
-            Ok(())
-        };
+        let c2s_fut = tokio::spawn(async move { client_to_server.copy().await });
+        let s2c_fut = tokio::spawn(async move { server_to_client.copy().await });
 
         tokio::select! {
             c2s = c2s_fut => Ok(c2s??),
-            s2c = s2c_fut => s2c,
+            s2c = s2c_fut => Ok(s2c??),
         }
     }
 }

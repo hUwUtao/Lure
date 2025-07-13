@@ -176,20 +176,21 @@ impl Connection {
         Ok(())
     }
 
-    pub async fn copy(&mut self) -> anyhow::Result<usize> {
-        let mut buf = [0u8; MAX_CHUNK_SIZE];
+    pub async fn copy(&mut self) -> anyhow::Result<()> {
         let mut volume = 0usize;
+        let mut buf = BytesMut::with_capacity(MAX_CHUNK_SIZE);
         loop {
-            let bytes_read = self.read.read(&mut buf).await?;
-            volume += bytes_read;
+            let bytes_read = self.read.read_buf(&mut buf).await?;
             if bytes_read == 0 {
                 break;
             }
-            self.write.write_all(&buf[..bytes_read]).await?;
+            volume += bytes_read;
+            self.write.write_all(&buf).await?;
             self.flush().await?;
+            buf.clear();
+            self.transport_record(bytes_read);
         }
-        self.transport_record(volume);
-        Ok(volume)
+        Ok(())
     }
 
     async fn flush(&mut self) -> anyhow::Result<()> {
