@@ -4,5 +4,6 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y openssl
 
 WORKDIR /app
 COPY lure /app/lure
+RUN chmod +x /app/lure
 
 CMD ["/app/lure"]
