@@ -10,6 +10,7 @@ use log::error;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::{sync::RwLock, time::timeout};
+use tokio::net::TcpStream;
 use valence_protocol::{
     packets::{
         handshaking::{handshake_c2s::HandshakeNextState, HandshakeC2s},
@@ -119,7 +120,8 @@ impl StatusBouncer {
         hostname: &str,
         resolved: &Resolved,
     ) -> anyhow::Result<QueryResponseKind> {
-        if let Ok(mut conn) = Connection::create_conn(resolved.0).await {
+        let conn = TcpStream::connect(resolved.0).await?;
+        if let Ok(mut conn) = Connection::connect(conn).await {
             if let HandshakeOption::HAProxy = resolved.1.handshake {
                 let pkt = create_proxy_protocol_header(NULL_SOCKET)?;
                 conn.send_raw(&pkt).await?;

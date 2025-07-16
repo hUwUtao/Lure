@@ -1,6 +1,7 @@
 pub mod event;
 pub(crate) mod oltp;
 pub(crate) mod process;
+pub(crate) mod net_observer;
 
 use std::{sync::Arc, time::Duration};
 

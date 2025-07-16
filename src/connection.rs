@@ -1,4 +1,4 @@
-use std::{io, io::ErrorKind, net::SocketAddr};
+use std::{io, io::ErrorKind};
 
 use bytes::BytesMut;
 use opentelemetry::{
@@ -8,7 +8,7 @@ use opentelemetry::{
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::tcp::{OwnedReadHalf, OwnedWriteHalf},
+    net::TcpStream,
 };
 use valence_protocol::{
     decode::PacketFrame, packets::login::LoginDisconnectS2c, Decode, Encode, Packet, PacketDecoder,
@@ -18,12 +18,10 @@ use valence_protocol::{
 use crate::telemetry::get_meter;
 
 pub struct Connection {
-    pub address: SocketAddr,
-    pub enc: PacketEncoder,
-    pub dec: PacketDecoder,
-    pub read: OwnedReadHalf,
-    pub write: OwnedWriteHalf,
-    pub frame: PacketFrame,
+    enc: PacketEncoder,
+    dec: PacketDecoder,
+    frame: PacketFrame,
+    stream: TcpStream,
     metric: ConnectionMetric,
     intent: KeyValue,
 }
@@ -52,14 +50,12 @@ impl SocketIntent {
 
 struct ConnectionMetric {
     packet_count: Counter<u64>,
-    transport_volume: Counter<u64>,
 }
 
 impl ConnectionMetric {
     fn new(metric: &Meter) -> Self {
         Self {
             packet_count: metric.u64_counter("lure_proxy_packet_count").build(),
-            transport_volume: metric.u64_counter("lure_proxy_transport_volume").build(),
         }
     }
 }
@@ -67,19 +63,12 @@ impl ConnectionMetric {
 const MAX_CHUNK_SIZE: usize = 1024;
 
 impl Connection {
-    pub fn new(
-        address: SocketAddr,
-        read: OwnedReadHalf,
-        write: OwnedWriteHalf,
-        intent: SocketIntent,
-    ) -> Self {
+    pub fn new(stream: TcpStream, intent: SocketIntent) -> Self {
         let metric = get_meter();
         Self {
-            address,
             enc: PacketEncoder::new(),
             dec: PacketDecoder::new(),
-            read,
-            write,
+            stream,
             frame: PacketFrame {
                 id: 0,
                 body: BytesMut::new(),
@@ -93,22 +82,12 @@ impl Connection {
         self.metric.packet_count.add(1, &[self.intent.clone()]);
     }
 
-    fn transport_record(&self, volume: usize) {
-        self.packet_record();
-        self.metric
-            .transport_volume
-            .add(volume as u64, &[self.intent.clone()]);
-    }
-
-    pub async fn create_conn(addr: SocketAddr) -> anyhow::Result<Connection> {
-        let (r, w) = tokio::net::TcpStream::connect(addr).await?.into_split();
+    pub async fn connect(stream: TcpStream) -> anyhow::Result<Self> {
         let metric = global::meter("alure-conn");
         let connection = Connection {
-            address: addr,
             enc: PacketEncoder::new(),
             dec: PacketDecoder::new(),
-            read: r,
-            write: w,
+            stream,
             frame: PacketFrame {
                 id: 0,
                 body: BytesMut::new(),
@@ -124,7 +103,7 @@ impl Connection {
     //     self.dec.enable_encryption(key);
     // }
 
-    pub async fn disconnect(&mut self, reason: Text) -> anyhow::Result<()> {
+    pub async fn disconnect_player(&mut self, reason: Text) -> anyhow::Result<()> {
         let kick = LoginDisconnectS2c {
             reason: reason.into(),
         };
@@ -134,9 +113,9 @@ impl Connection {
 
     /// Valence packet recv
     /// https://github.com/valence-rs/valence/blob/main/crates/valence_network/src/packet_io.rs#L53
-    pub async fn recv<'a, P>(&'a mut self) -> anyhow::Result<P>
+    pub async fn recv<'b, P>(&'b mut self) -> anyhow::Result<P>
     where
-        P: Packet + Decode<'a>,
+        P: Packet + Decode<'b>,
     {
         self.packet_record();
         loop {
@@ -148,7 +127,7 @@ impl Connection {
             self.dec.reserve(MAX_CHUNK_SIZE);
             let mut buf = self.dec.take_capacity();
 
-            if self.read.read_buf(&mut buf).await? == 0 {
+            if self.stream.read_buf(&mut buf).await? == 0 {
                 return Err(io::Error::from(ErrorKind::UnexpectedEof).into());
             }
 
@@ -164,37 +143,29 @@ impl Connection {
         self.enc.append_packet::<P>(pkt)?;
         let bytes = self.enc.take();
         // timeout(Duration::from_millis(5000), self.write.write_all(&bytes)).await??;
-        self.write.write_all(&bytes).await?;
+        self.stream.write_all(&bytes).await?;
         self.flush().await?;
         Ok(())
     }
 
     pub async fn send_raw(&mut self, pkt: &[u8]) -> anyhow::Result<()> {
         self.packet_record();
-        self.write.write_all(pkt).await?;
+        self.stream.write_all(pkt).await?;
         self.flush().await?;
         Ok(())
     }
 
-    pub async fn copy(&mut self) -> anyhow::Result<()> {
-        let mut volume = 0usize;
-        let mut buf = BytesMut::with_capacity(MAX_CHUNK_SIZE);
-        loop {
-            let bytes_read = self.read.read_buf(&mut buf).await?;
-            if bytes_read == 0 {
-                break;
-            }
-            volume += bytes_read;
-            self.write.write_all(&buf).await?;
-            self.flush().await?;
-            buf.clear();
-            self.transport_record(bytes_read);
-        }
+    async fn flush(&mut self) -> anyhow::Result<()> {
+        self.stream.flush().await?;
         Ok(())
     }
 
-    async fn flush(&mut self) -> anyhow::Result<()> {
-        self.write.flush().await?;
-        Ok(())
+    pub fn stream_peak(&self) -> &TcpStream {
+        &self.stream
+    }
+
+    /// End of its lifecycle
+    pub fn stream_purify(self) -> TcpStream {
+        self.stream
     }
 }

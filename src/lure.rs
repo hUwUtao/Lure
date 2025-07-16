@@ -6,11 +6,14 @@ use std::{
 
 use anyhow::bail;
 use async_trait::async_trait;
+use futures::FutureExt;
 use log::{debug, info};
+use opentelemetry::{Context, KeyValue};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::__private::AsDisplay;
 use tokio::{
+    io::copy_bidirectional,
     net::{TcpListener, TcpStream},
     sync::Semaphore,
     time::timeout,
@@ -30,7 +33,10 @@ use crate::{
         status::{QueryResponseKind, StatusBouncer},
         HandshakeOption, RouterInstance, Session,
     },
-    telemetry::{event::EventHook, init_event, EventEnvelope, EventServiceInstance},
+    telemetry::{
+        event::EventHook, get_meter, init_event, net_observer::MonitoredStream, EventEnvelope,
+        EventServiceInstance,
+    },
     threat::{ratelimit::RateLimiterController, ClientIntent, IntentTag, ThreatControlService},
     utils::{leak, OwnedStatic},
 };
@@ -145,23 +151,16 @@ impl Lure {
     pub async fn handle_connection(
         &self,
         client_socket: TcpStream,
-        address: SocketAddr,
+        _address: SocketAddr,
     ) -> anyhow::Result<()> {
         // Client state
-        let (client_read, client_write) = client_socket.into_split();
 
-        let connection = Connection::new(
-            address,
-            client_read,
-            client_write,
-            SocketIntent::GreetToProxy,
-        );
-
-        self.handle_handshake(connection).await?;
+        self.handle_handshake(client_socket).await?;
         Ok(())
     }
 
-    pub async fn handle_handshake(&self, mut connection: Connection) -> anyhow::Result<()> {
+    pub async fn handle_handshake(&self, connection: TcpStream) -> anyhow::Result<()> {
+        let mut handler = Connection::new(connection, SocketIntent::GreetToProxy);
         // Wait for initial handshake.
         const INTENT: ClientIntent = ClientIntent {
             tag: IntentTag::Handshake,
@@ -169,12 +168,12 @@ impl Lure {
         };
         let handshake = OwnedHandshake::from_packet(
             self.threat
-                .nuisance(connection.recv::<HandshakeC2s>(), INTENT)
+                .nuisance(handler.recv::<HandshakeC2s>(), INTENT)
                 .await??,
         );
         match &handshake.next_state {
-            HandshakeNextState::Status => self.handle_status(connection, handshake).await,
-            HandshakeNextState::Login => self.handle_proxy(connection, &handshake).await,
+            HandshakeNextState::Status => self.handle_status(handler, handshake).await,
+            HandshakeNextState::Login => self.handle_proxy(handler, &handshake).await,
         }
     }
 
@@ -256,7 +255,7 @@ impl Lure {
         mut client: Connection,
         handshake: &OwnedHandshake,
     ) -> anyhow::Result<()> {
-        let address = client.address;
+        let address = client.stream_peak().peer_addr()?;
         if let Ok((session, route)) = self
             .router
             .create_session(&handshake.server_address, address)
@@ -277,7 +276,7 @@ impl Lure {
         } else {
             debug!("No destination");
             client
-                .disconnect("No destination".into_text().color(Color::RED))
+                .disconnect_player("No destination".into_text().color(Color::RED))
                 .await?;
         }
         self.router.terminate_session(&address).await?;
@@ -300,7 +299,7 @@ impl Lure {
             // let re = ;
             let error = format!("Gateway error:\n\n{}", err.as_display());
             client
-                .disconnect(error.clone().into_text().color(Color::RED))
+                .disconnect_player(error.clone().into_text().color(Color::RED))
                 .await?;
             Ok(())
         }
@@ -323,18 +322,11 @@ impl Lure {
             eprintln!("Failed to set TCP_NODELAY: {e}");
         }
 
-        let (server_read, server_write) = server_stream.into_split();
-
-        let mut server = Connection::new(
-            server_address,
-            server_read,
-            server_write,
-            SocketIntent::GreetToBackend,
-        );
+        let mut server = Connection::new(server_stream, SocketIntent::GreetToBackend);
 
         // Replay necessary packets
         if let HandshakeOption::HAProxy = handshake_option {
-            let pkt = create_proxy_protocol_header(client.address)?;
+            let pkt = create_proxy_protocol_header(client.stream_peak().peer_addr()?)?;
             server.send_raw(&pkt).await?;
         }
 
@@ -346,25 +338,21 @@ impl Lure {
     }
 
     async fn passthrough_now(&self, client: Connection, server: Connection) -> anyhow::Result<()> {
-        let mut client_to_server = Connection::new(
-            client.address,
-            client.read,
-            server.write,
-            SocketIntent::PassthroughServerBound,
-        );
-        let mut server_to_client = Connection::new(
-            server.address,
-            server.read,
-            client.write,
-            SocketIntent::PassthroughClientBound,
-        );
-
-        let c2s_fut = tokio::spawn(async move { client_to_server.copy().await });
-        let s2c_fut = tokio::spawn(async move { server_to_client.copy().await });
-
-        tokio::select! {
-            c2s = c2s_fut => Ok(c2s??),
-            s2c = s2c_fut => Ok(s2c??),
-        }
+        let volume_record = get_meter()
+            .u64_counter("lure_proxy_transport_volume")
+            .with_unit("bytes")
+            .build();
+        let vr1 = volume_record.clone();
+        let vr2 = volume_record.clone();
+        let s2c = KeyValue::new("intent", "s2c");
+        let c2s = KeyValue::new("intent", "c2s");
+        let mut cs = MonitoredStream::new(client.stream_purify(), move |bytes| {
+            (&vr1).add(bytes, &[c2s.clone()]);
+        });
+        let mut ss = MonitoredStream::new(server.stream_purify(), move |bytes| {
+            (&vr2).add(bytes, &[s2c.clone()]);
+        });
+        copy_bidirectional(&mut cs, &mut ss).await?;
+        Ok(())
     }
 }
