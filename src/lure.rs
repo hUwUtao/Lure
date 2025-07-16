@@ -347,10 +347,10 @@ impl Lure {
         let s2c = KeyValue::new("intent", "s2c");
         let c2s = KeyValue::new("intent", "c2s");
         let mut cs = MonitoredStream::new(client.stream_purify(), move |bytes| {
-            (&vr1).add(bytes, &[c2s.clone()]);
+            vr1.add(bytes, &[s2c.clone()]);
         });
         let mut ss = MonitoredStream::new(server.stream_purify(), move |bytes| {
-            (&vr2).add(bytes, &[s2c.clone()]);
+            vr2.add(bytes, &[c2s.clone()]);
         });
         copy_bidirectional(&mut cs, &mut ss).await?;
         Ok(())

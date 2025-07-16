@@ -5,6 +5,7 @@ use std::{
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
+/// A write-ops observer
 pub struct MonitoredStream<T, F>
 where
     T: AsyncRead + AsyncWrite,
