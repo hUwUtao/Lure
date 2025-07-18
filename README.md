@@ -1,50 +1,37 @@
-<p align=center>
-  <img src="https://github.com/sammwyy/Lure/raw/main/assets/icon@64.png"/>
-<p>
+<p align="center">
+  <img src="https://github.com/sammwyy/Lure/raw/main/assets/icon@64.png" alt="Lure Icon"/>
+</p>
 
-<h1 align=center>Lure</h1>
-<p align=center>The true next-gen <strike>L7</strike> L4 minecraft proxy and load balancer. Built in Rust, Tokio and Valence.</p>
+<h1 align="center">Lure</h1>
+<p align="center"><em>A modern Minecraft Layer 4 proxy and load balancer built with Rust, Tokio, and Valence.</em></p>
 
-## Purpose
+---
 
-Route to Minecraft server with basic HAProxy protocol
+## Overview
 
-## Why?
+**Lure** is a sophisticated, but lightweight enough, high-performance Layer 4 (L4) proxy for Minecraft.
+It reach high performance with
 
-This fork is meant to strip down the "L7" of the proxy to left with a "L4" proxy that only route to server. It support match routing, ping-passthrough (with ability to overrides too), placeholder, proxy-proto and so more. Also make core dependencies like valence up-to-date
+- Fast tokio socket polling
+- Fast first-handshake deserialization
+- Async session handling
 
-This project (fork) is meant to "replace" [Gate](https://gate.minekube.com/). Turns out, Gate is sucks at actually applying config live.
+## Philosophy
 
-~~Rust is a powerful programming language and a great development environment with a large and growing ecosystem. The efficiency of the applications built in it is such that several companies are moving their products to this technology.~~ I used to love this 🥷 language
+Multi-tenancy design model, that to using well serialized configuration not config-generation and reloading
+(which prone gimmick at scale)
 
-~~Proxies built in Java store too much player data in memory. They have unneeded functions and complex API systems that in the end make a simple proxy whose job is to carry packets from one point to another become an entire server.~~ No you want to use some proxy like Velocity. You need it to compatible with plugins that actually in one ecosystem. This project doesn't affect your stack.
+Gate(lite), which is a mature proxy for this purpose, but I wasn't able to make it work on this model.
 
-~~Lure came along to fix that.~~
+## Features
 
-## 📝 To Do
-
-- [ ] Configuration system. (redo)
-- [X] ~~MoTD.~~
-- [X] ~~Favicon.~~
-- [X] Proxy client to a server.
-- [X] Multiple servers.
-- [X] Multiple hosts.
-- [X] ~~Compression.~~
-- [X] ~~Online mode.~~ *Basically not effective*
-- [ ] ~~Player limit.~~
-- [x] Query Forwarding with debounce cache
-- [x] IP Forwarding. (Proxy protocol is now supported. Paper derivatives, Velocity, Bungeecord has built in support)
-- [ ] ~~Switch between servers.~~
-- [ ] ~~Plugin channels.~~
-- [ ] ~~Internal Commands.~~
-- [x] ~~Addon API.~~ Control ~~API~~ RPC [RPC implementation in Elysia](https://github.com/hUwUtao/Lucky)
-- [x] Metrics
-- [x] Ping fallback/override (free stuff comes with ads, who doesn't love that)
-- [ ] Always version match (replaceness are done before cache)
-- [ ] `LoginHello` snooping (valence's `LoginHelloC2S` decoder currently working improperly)
-- [ ] Socket ratelimit
-- [ ] Anomaly tracking
-- [ ] Be evil
+- Customized routing with API control. *Currently, routes are loaded from RPC default_routes (see below)*
+- Query with slight cache
+- Multi-server & multi-host support
+- Proxy Protocol (supported Paper-derived, Velocity and Bungeecord)
+- Highly observable system
+- Addon API (via RPC, see [Elysia implementation](https://github.com/hUwUtao/Lucky))
+- Global threat control (WIP), with socket ratelimit, etc.
 
 ### Cutting edge
 
@@ -53,7 +40,20 @@ To extends features like runtime monitoring \(I have some jealousy with go that 
 
 ### The coldest process
 
-Mimalloc is optional but powerful allocator. By observe on `Intel i7-9700`, mimalloc helps drop cpu usage from 4% spike to 1% spike, however sacrifice with average heap at 47.3MiB on stress load, compare to 20-ish MiB without mimalloc.
+Optional [mimalloc](https://github.com/microsoft/mimalloc) crate feature allocator reduces CPU usage (4% → 1%) at the
+cost of higher memory usage (~47MiB vs ~20MiB).
+
+### Incompatibility
+
+- Known gimmick to actual protocol-use is `viaproxy`. On 1.20.6 server, there such a behavior of packet disorder 
+suspected because of async polling (or kind of?)
+
+| Server Version | Client Version   | Observed                                                                            |
+|----------------|------------------|-------------------------------------------------------------------------------------|
+| Purpur 1.20.6  | 1.20.6           | Ok                                                                                  |
+| ^              | 1.21.1-4         | Client is disconected by clientbound-entity_remove packet 1xx packet overestimation |
+| Paper 1.20.6   | 1.21.5+          | ^                                                                                   |   
+| ^              | 1.20.6, 1.21.1-4 | Ok                                                                                  |
 
 ## Credits
 
