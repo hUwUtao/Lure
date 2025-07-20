@@ -126,8 +126,10 @@ impl Lure {
             // Try to acquire semaphore (non-blocking)
             match semaphore.clone().try_acquire_owned() {
                 Ok(permit) => {
-                    if let Err(e) = client.set_nodelay(true) {
-                        error!("Failed to set TCP_NODELAY: {e}");
+                    if dotenvy::var("NO_NODELAY").is_err() {
+                        if let Err(e) = client.set_nodelay(true) {
+                            error!("Failed to set TCP_NODELAY: {e}");
+                        }
                     }
 
                     let lure = self;
@@ -331,8 +333,10 @@ impl Lure {
             }
         };
 
-        if let Err(e) = server_stream.set_nodelay(true) {
-            error!("Failed to set TCP_NODELAY: {e}");
+        if dotenvy::var("NO_NODELAY").is_err() {
+            if let Err(e) = server_stream.set_nodelay(true) {
+                error!("Failed to set TCP_NODELAY: {e}");
+            }
         }
 
         let mut server = Connection::new(server_stream, SocketIntent::GreetToBackend);
