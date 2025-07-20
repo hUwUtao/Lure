@@ -6,15 +6,14 @@ use std::{
 
 use anyhow::bail;
 use async_trait::async_trait;
-use futures::FutureExt;
-use log::{debug, info};
+use log::{debug, error, info};
 use opentelemetry::{Context, KeyValue};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::__private::AsDisplay;
 use tokio::{
     io::copy_bidirectional,
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpSocket, TcpStream},
     sync::Semaphore,
     time::timeout,
 };
@@ -128,7 +127,7 @@ impl Lure {
             match semaphore.clone().try_acquire_owned() {
                 Ok(permit) => {
                     if let Err(e) = client.set_nodelay(true) {
-                        eprintln!("Failed to set TCP_NODELAY: {e}");
+                        error!("Failed to set TCP_NODELAY: {e}");
                     }
 
                     let lure = self;
@@ -146,6 +145,18 @@ impl Lure {
                 }
             }
         }
+    }
+    fn connection_error_log<T>(client: &SocketAddr, server: Option<&SocketAddr>, err: &T)
+    where
+        T: std::error::Error,
+    {
+        if dotenvy::var("DO_NOT_LOG_CONNECTION_ERROR").is_ok() {
+            return;
+        }
+        let server_str = server
+            .map(|s| format!(" -> {s}"))
+            .unwrap_or_else(|| "".to_string());
+        error!("connection error@{client}-{server_str}: {}", err);
     }
 
     pub async fn handle_connection(
@@ -261,6 +272,7 @@ impl Lure {
             .create_session(&handshake.server_address, address)
             .await
         {
+            let server_address = session.destination_addr;
             if let Err(e) = self
                 .handle_proxy_session(
                     client,
@@ -271,13 +283,14 @@ impl Lure {
                 .await
             {
                 let re = ReportableError::from(e);
-                debug!("Proxy session error: {re}");
+                Self::connection_error_log(&address, Some(&server_address), &re);
             }
         } else {
             debug!("No destination");
-            client
+            let _ = client
                 .disconnect_player("No destination".into_text().color(Color::RED))
-                .await?;
+                .await;
+            self.router.terminate_session(&address).await?;
         }
         self.router.terminate_session(&address).await?;
         Ok(())
@@ -319,7 +332,7 @@ impl Lure {
         };
 
         if let Err(e) = server_stream.set_nodelay(true) {
-            eprintln!("Failed to set TCP_NODELAY: {e}");
+            error!("Failed to set TCP_NODELAY: {e}");
         }
 
         let mut server = Connection::new(server_stream, SocketIntent::GreetToBackend);
