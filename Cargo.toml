@@ -8,7 +8,6 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0"
 bytes = "1.10"
-femme = "2.2.1"
 log = "0.4.27"
 opentelemetry = "0.30"
 opentelemetry-otlp = { version = "0.30", features = [
@@ -41,6 +40,7 @@ thiserror = "2.0.12"
 mimalloc = { version = "0.1", optional = true }
 tonic = { version = "0.13.1", optional = true }
 tokio-metrics = "0.4.3"
+env_logger = "0.11.8"
 
 [features]
 # by default we build HTTP-only

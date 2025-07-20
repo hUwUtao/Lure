@@ -119,6 +119,7 @@ impl Lure {
             if let crate::threat::ratelimit::RateLimitResult::Disallowed { retry_after: _ra } =
                 rate_limiter.check(&ip)
             {
+                debug!("Rate-limited {ip}");
                 drop(client);
                 continue;
             }
@@ -164,9 +165,10 @@ impl Lure {
     pub async fn handle_connection(
         &self,
         client_socket: TcpStream,
-        _address: SocketAddr,
+        address: SocketAddr,
     ) -> anyhow::Result<()> {
         // Client state
+        info!("New connection {}", address);
 
         self.handle_handshake(client_socket).await?;
         Ok(())

@@ -22,9 +22,11 @@ use crate::utils::leak;
 async fn main() -> Result<(), Box<dyn Error>> {
     let _ = dotenvy::dotenv();
     #[cfg(debug_assertions)]
-    femme::with_level(femme::LevelFilter::Trace);
+    env_logger::builder()
+        .filter_level(log::LevelFilter::Debug)
+        .init();
     #[cfg(not(debug_assertions))]
-    femme::start();
+    env_logger::init();
 
     let providers = if dotenvy::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
         Some((init_meter(), 0u8))
