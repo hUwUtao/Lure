@@ -269,30 +269,43 @@ impl Lure {
         handshake: &OwnedHandshake,
     ) -> anyhow::Result<()> {
         let address = client.stream_peak().peer_addr()?;
-        if let Ok((session, route)) = self
-            .router
-            .create_session(&handshake.server_address, address)
-            .await
-        {
-            let server_address = session.destination_addr;
-            if let Err(e) = self
-                .handle_proxy_session(
-                    client,
-                    handshake, // &login,
-                    &route.handshake,
-                    &session,
-                )
-                .await
-            {
-                let re = ReportableError::from(e);
-                Self::connection_error_log(&address, Some(&server_address), &re);
+        let session_result = timeout(
+            Duration::from_secs(1),
+            self.router
+                .create_session(&handshake.server_address, address),
+        )
+        .await;
+
+        match session_result {
+            Ok(Ok((session, route))) => {
+                let server_address = session.destination_addr;
+                if let Err(e) = self
+                    .handle_proxy_session(
+                        client,
+                        handshake, // &login,
+                        &route.handshake,
+                        &session,
+                    )
+                    .await
+                {
+                    let re = ReportableError::from(e);
+                    Self::connection_error_log(&address, Some(&server_address), &re);
+                }
             }
-        } else {
-            debug!("No destination");
-            let _ = client
-                .disconnect_player("No destination".into_text().color(Color::RED))
-                .await;
-            self.router.terminate_session(&address).await?;
+            Ok(Err(e)) => {
+                debug!("Failed to create session: {}", e);
+                let _ = client
+                    .disconnect_player("Failed to create session".into_text().color(Color::RED))
+                    .await;
+                self.router.terminate_session(&address).await?;
+            }
+            Err(_) => {
+                debug!("Session creation timed out for {}", address);
+                let _ = client
+                    .disconnect_player("Session creation timed out".into_text().color(Color::RED))
+                    .await;
+                self.router.terminate_session(&address).await?;
+            }
         }
         self.router.terminate_session(&address).await?;
         Ok(())
@@ -310,26 +323,26 @@ impl Lure {
         let connect_result =
             timeout(Duration::from_secs(3), TcpStream::connect(server_address)).await;
 
-        async fn handle_err(mut client: Connection, err: &ReportableError) -> anyhow::Result<()> {
+        async fn handle_err(mut client: Connection, err: ReportableError) -> anyhow::Result<()> {
             // let re = ;
-            let error = format!("Gateway error:\n\n{}", err.as_display());
+            let error = format!("Gateway error:\n\n{}", err.to_string());
             client
                 .disconnect_player(error.clone().into_text().color(Color::RED))
                 .await?;
-            Ok(())
+            bail!(err);
         }
 
         let server_stream: TcpStream = match connect_result {
             Ok(Ok(stream)) => stream,
             Ok(Err(err)) => {
                 let err = ReportableError::from(err);
-                handle_err(client, &err).await?;
-                bail!(err);
+                handle_err(client, err).await?;
+                return Ok(());
             }
             Err(err) => {
                 let err = ReportableError::from(err);
-                handle_err(client, &err).await?;
-                bail!(err);
+                handle_err(client, err).await?;
+                return Ok(());
             }
         };
 
@@ -344,11 +357,10 @@ impl Lure {
         // Replay necessary packets
         if let HandshakeOption::HAProxy = handshake_option {
             let pkt = create_proxy_protocol_header(client.stream_peak().peer_addr()?)?;
-            server.send_raw(&pkt).await?;
+            timeout(Duration::from_secs(1), server.send_raw(&pkt)).await??;
         }
 
-        server.send(&handshake.as_packet()).await?;
-        // server.send(&login.as_packet()).await?;
+        timeout(Duration::from_secs(1), server.send(&handshake.as_packet())).await??;
 
         self.passthrough_now(client, server).await?;
         Ok(())
