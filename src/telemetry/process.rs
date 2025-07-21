@@ -1,7 +1,6 @@
 /// This service is to monitor tokio runtime (instead of the whole rust process).
 /// The reason is...to monitor! `tokio_unstable` is on by default and I have no reason to refuse that.
 /// Disable `tokio_unstable` feature, and maybe override flags if you are too -phobic and ith it's fine.
-
 use std::time::Duration;
 
 use opentelemetry::metrics::{Counter, Gauge};

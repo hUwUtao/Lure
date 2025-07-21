@@ -14,9 +14,11 @@ use anyhow::anyhow;
 use config::LureConfig;
 use lure::Lure;
 
-use crate::{config::LureConfigLoadError, telemetry::oltp::init_meter};
-use crate::telemetry::process::ProcessMetricsService;
-use crate::utils::leak;
+use crate::{
+    config::LureConfigLoadError,
+    telemetry::{oltp::init_meter, process::ProcessMetricsService},
+    utils::leak,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -59,10 +61,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }?;
-    
+
     let pmt = leak(ProcessMetricsService::new());
     pmt.start();
-    
+
     let lure = leak(Lure::new(config));
     lure.start().await?;
     if let Some(providers) = providers {

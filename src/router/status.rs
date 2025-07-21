@@ -9,8 +9,7 @@ use anyhow::bail;
 use log::error;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::{sync::RwLock, time::timeout};
-use tokio::net::TcpStream;
+use tokio::{net::TcpStream, sync::RwLock, time::timeout};
 use valence_protocol::{
     packets::{
         handshaking::{handshake_c2s::HandshakeNextState, HandshakeC2s},
