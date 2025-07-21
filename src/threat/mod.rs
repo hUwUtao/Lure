@@ -15,9 +15,9 @@ pub enum IntentTag {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientFail {
-    #[error("Timeout")]
+    #[error("Timeout (cf::nt)")]
     Timeout,
-    #[error("Rate limited")]
+    #[error("Rate limited (cf::rl)")]
     RateLimited(RateLimitResult),
 }
 

@@ -179,7 +179,7 @@ impl Lure {
         // Wait for initial handshake.
         const INTENT: ClientIntent = ClientIntent {
             tag: IntentTag::Handshake,
-            duration: Duration::from_millis(300),
+            duration: Duration::from_secs(1),
         };
         let handshake = OwnedHandshake::from_packet(
             self.threat
@@ -230,7 +230,7 @@ impl Lure {
     ) -> anyhow::Result<()> {
         const INTENT: ClientIntent = ClientIntent {
             tag: IntentTag::Query,
-            duration: Duration::from_millis(300),
+            duration: Duration::from_secs(1),
         };
         self.threat
             .nuisance(client.recv::<QueryRequestC2s>(), INTENT)
