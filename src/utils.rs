@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use tokio::net::TcpStream;
 
 use crate::telemetry::{event::EventHook, EventEnvelope, EventServiceInstance};
 
@@ -38,4 +39,36 @@ impl<H: EventHook<EventEnvelope, EventEnvelope> + Send + Sync>
 
 pub fn leak<T>(inner: T) -> &'static T {
     Box::leak(Box::new(inner))
+}
+
+pub struct Connection {
+    stream: tokio::net::TcpStream,
+    addr: std::net::SocketAddr,
+}
+
+impl TryFrom<TcpStream> for Connection {
+    type Error = anyhow::Error;
+
+    fn try_from(stream: TcpStream) -> anyhow::Result<Self> {
+        let addr = stream.peer_addr()?;
+        Ok(Self { stream, addr })
+    }
+}
+
+impl Connection {
+    pub fn new(stream: tokio::net::TcpStream, addr: std::net::SocketAddr) -> Self {
+        Self { stream, addr }
+    }
+
+    pub fn as_ref(&self) -> &tokio::net::TcpStream {
+        &self.stream
+    }
+
+    pub fn as_mut(&mut self) -> &mut tokio::net::TcpStream {
+        &mut self.stream
+    }
+
+    pub fn addr(&self) -> &std::net::SocketAddr {
+        &self.addr
+    }
 }

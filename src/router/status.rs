@@ -20,9 +20,10 @@ use valence_protocol::{
 
 use crate::{
     config::LureConfig,
-    connection::Connection,
+    connection::EncodedConnection,
     packet::{create_proxy_protocol_header, OwnedQueryResponse, NULL_SOCKET},
     router::{HandshakeOption, Route, RouterInstance},
+    utils::Connection,
 };
 
 #[derive(Debug, Clone)]
@@ -119,8 +120,8 @@ impl StatusBouncer {
         hostname: &str,
         resolved: &Resolved,
     ) -> anyhow::Result<QueryResponseKind> {
-        let conn = TcpStream::connect(resolved.0).await?;
-        if let Ok(mut conn) = Connection::connect(conn).await {
+        let mut conn = Connection::try_from(TcpStream::connect(resolved.0).await?)?;
+        if let Ok(mut conn) = EncodedConnection::connect(&mut conn).await {
             if let HandshakeOption::HAProxy = resolved.1.handshake {
                 let pkt = create_proxy_protocol_header(NULL_SOCKET)?;
                 conn.send_raw(&pkt).await?;

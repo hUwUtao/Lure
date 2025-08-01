@@ -6,24 +6,22 @@ use opentelemetry::{
     metrics::{Counter, Meter},
     KeyValue,
 };
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
-};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use valence_protocol::{
     decode::PacketFrame, packets::login::LoginDisconnectS2c, Decode, Encode, Packet, PacketDecoder,
     PacketEncoder, Text,
 };
 
-use crate::telemetry::get_meter;
+use crate::{telemetry::get_meter, utils::Connection};
 
-pub struct Connection {
+pub struct EncodedConnection<'a> {
     enc: PacketEncoder,
     dec: PacketDecoder,
     frame: PacketFrame,
-    stream: TcpStream,
+    stream: &'a mut Connection,
     metric: ConnectionMetric,
     intent: KeyValue,
+    _reserved_lifetime: std::marker::PhantomData<&'a ()>,
 }
 
 pub enum SocketIntent {
@@ -62,8 +60,8 @@ impl ConnectionMetric {
 
 const MAX_CHUNK_SIZE: usize = 1024;
 
-impl Connection {
-    pub fn new(stream: TcpStream, intent: SocketIntent) -> Self {
+impl<'a> EncodedConnection<'a> {
+    pub fn new(stream: &'a mut Connection, intent: SocketIntent) -> Self {
         let metric = get_meter();
         Self {
             enc: PacketEncoder::new(),
@@ -75,6 +73,7 @@ impl Connection {
             },
             metric: ConnectionMetric::new(&metric),
             intent: intent.as_attr(),
+            _reserved_lifetime: std::marker::PhantomData,
         }
     }
 
@@ -82,9 +81,9 @@ impl Connection {
         self.metric.packet_count.add(1, &[self.intent.clone()]);
     }
 
-    pub async fn connect(stream: TcpStream) -> anyhow::Result<Self> {
+    pub async fn connect(stream: &'a mut Connection) -> anyhow::Result<Self> {
         let metric = global::meter("alure-conn");
-        let connection = Connection {
+        let connection = EncodedConnection {
             enc: PacketEncoder::new(),
             dec: PacketDecoder::new(),
             stream,
@@ -94,6 +93,7 @@ impl Connection {
             },
             metric: ConnectionMetric::new(&metric),
             intent: SocketIntent::Generic.as_attr(),
+            _reserved_lifetime: std::marker::PhantomData,
         };
         Ok(connection)
     }
@@ -127,7 +127,7 @@ impl Connection {
             self.dec.reserve(MAX_CHUNK_SIZE);
             let mut buf = self.dec.take_capacity();
 
-            if self.stream.read_buf(&mut buf).await? == 0 {
+            if self.stream.as_mut().read_buf(&mut buf).await? == 0 {
                 return Err(io::Error::from(ErrorKind::UnexpectedEof).into());
             }
 
@@ -143,29 +143,28 @@ impl Connection {
         self.enc.append_packet::<P>(pkt)?;
         let bytes = self.enc.take();
         // timeout(Duration::from_millis(5000), self.write.write_all(&bytes)).await??;
-        self.stream.write_all(&bytes).await?;
+        self.stream.as_mut().write_all(&bytes).await?;
         self.flush().await?;
         Ok(())
     }
 
     pub async fn send_raw(&mut self, pkt: &[u8]) -> anyhow::Result<()> {
         self.packet_record();
-        self.stream.write_all(pkt).await?;
+        self.stream.as_mut().write_all(pkt).await?;
         self.flush().await?;
         Ok(())
     }
 
     async fn flush(&mut self) -> anyhow::Result<()> {
-        self.stream.flush().await?;
+        self.stream.as_mut().flush().await?;
         Ok(())
     }
 
-    pub fn stream_peak(&self) -> &TcpStream {
-        &self.stream
+    pub fn as_inner_mut(&mut self) -> &mut Connection {
+        &mut self.stream
     }
 
-    /// End of its lifecycle
-    pub fn stream_purify(self) -> TcpStream {
-        self.stream
+    pub fn as_inner(&self) -> &Connection {
+        &self.stream
     }
 }

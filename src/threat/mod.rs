@@ -2,10 +2,11 @@ pub mod ratelimit;
 
 use std::{future::IntoFuture, time::Duration};
 
-use tokio::time::timeout;
+use tokio::time::{error::Elapsed, timeout};
 
 use crate::threat::ratelimit::RateLimitResult;
 
+#[derive(Debug)]
 pub enum IntentTag {
     Handshake,
     Query,
@@ -15,12 +16,16 @@ pub enum IntentTag {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientFail {
-    #[error("Timeout (cf::nt)")]
-    Timeout,
+    #[error("Timeout (cf::nt:{elapsed:?})")]
+    Timeout {
+        intent: ClientIntent,
+        elapsed: Elapsed,
+    },
     #[error("Rate limited (cf::rl)")]
     RateLimited(RateLimitResult),
 }
 
+#[derive(Debug)]
 pub struct ClientIntent {
     pub tag: IntentTag,
     pub duration: Duration,
@@ -40,7 +45,7 @@ impl ThreatControlService {
     {
         match timeout(intent.duration, future.into_future()).await {
             Ok(v) => Ok(v),
-            Err(_) => Err(ClientFail::Timeout.into()),
+            Err(elapsed) => Err(ClientFail::Timeout { intent, elapsed }.into()),
         }
     }
 }

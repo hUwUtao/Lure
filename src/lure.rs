@@ -8,13 +8,13 @@ use anyhow::bail;
 use async_trait::async_trait;
 use futures::FutureExt;
 use log::{debug, error, info};
-use opentelemetry::{Context, KeyValue};
+use opentelemetry::KeyValue;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use thiserror::__private::{AsDisplay, AsDynError};
+use thiserror::__private::AsDynError;
 use tokio::{
-    io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpSocket, TcpStream},
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
     sync::{broadcast, Semaphore},
     time::timeout,
 };
@@ -26,7 +26,7 @@ use valence_text::{Color, IntoText};
 
 use crate::{
     config::LureConfig,
-    connection::{Connection, SocketIntent},
+    connection::{EncodedConnection, SocketIntent},
     error::ReportableError,
     packet::{create_proxy_protocol_header, OwnedHandshake, OwnedPacket},
     router::{
@@ -35,7 +35,7 @@ use crate::{
     },
     telemetry::{event::EventHook, get_meter, init_event, EventEnvelope, EventServiceInstance},
     threat::{ratelimit::RateLimiterController, ClientIntent, IntentTag, ThreatControlService},
-    utils::{leak, OwnedStatic},
+    utils::{leak, Connection, OwnedStatic},
 };
 
 pub struct Lure {
@@ -112,6 +112,8 @@ impl Lure {
             // Accept connection first
             let (client, addr) = listener.accept().await?;
 
+            let client = Connection::new(client, addr);
+
             // Apply IP-based rate limiting
             let ip = addr.ip();
             if let crate::threat::ratelimit::RateLimitResult::Disallowed { retry_after: _ra } =
@@ -126,7 +128,7 @@ impl Lure {
             match semaphore.clone().try_acquire_owned() {
                 Ok(permit) => {
                     if dotenvy::var("NO_NODELAY").is_err() {
-                        if let Err(e) = client.set_nodelay(true) {
+                        if let Err(e) = client.as_ref().set_nodelay(true) {
                             error!("Failed to set TCP_NODELAY: {e}");
                         }
                     }
@@ -162,7 +164,7 @@ impl Lure {
 
     pub async fn handle_connection(
         &self,
-        client_socket: TcpStream,
+        client_socket: Connection,
         address: SocketAddr,
     ) -> anyhow::Result<()> {
         // Client state
@@ -172,12 +174,12 @@ impl Lure {
         Ok(())
     }
 
-    pub async fn handle_handshake(&self, connection: TcpStream) -> anyhow::Result<()> {
-        let mut handler = Connection::new(connection, SocketIntent::GreetToProxy);
+    pub async fn handle_handshake(&self, mut connection: Connection) -> anyhow::Result<()> {
+        let mut handler = EncodedConnection::new(&mut connection, SocketIntent::GreetToProxy);
         // Wait for initial handshake.
         const INTENT: ClientIntent = ClientIntent {
             tag: IntentTag::Handshake,
-            duration: Duration::from_secs(1),
+            duration: Duration::from_secs(5),
         };
         let handshake = OwnedHandshake::from_packet(
             self.threat
@@ -223,7 +225,7 @@ impl Lure {
 
     pub async fn handle_status(
         &self,
-        mut client: Connection,
+        mut client: EncodedConnection<'_>,
         handshake: OwnedHandshake,
     ) -> anyhow::Result<()> {
         const INTENT: ClientIntent = ClientIntent {
@@ -263,12 +265,12 @@ impl Lure {
         Ok(())
     }
 
-    pub async fn handle_proxy(
+    pub async fn handle_proxy<'a>(
         &self,
-        mut client: Connection,
+        mut client: EncodedConnection<'a>,
         handshake: &OwnedHandshake,
     ) -> anyhow::Result<()> {
-        let address = client.stream_peak().peer_addr()?;
+        let address = *client.as_inner().addr();
         let session_result = timeout(
             Duration::from_secs(1),
             self.router
@@ -313,7 +315,7 @@ impl Lure {
 
     pub async fn handle_proxy_session(
         &self,
-        client: Connection,
+        mut client: EncodedConnection<'_>,
         handshake: &OwnedHandshake,
         // login: &OwnedLoginHello,
         handshake_option: &HandshakeOption,
@@ -323,7 +325,10 @@ impl Lure {
         let connect_result =
             timeout(Duration::from_secs(3), TcpStream::connect(server_address)).await;
 
-        async fn handle_err(mut client: Connection, err: ReportableError) -> anyhow::Result<()> {
+        async fn handle_err(
+            mut client: EncodedConnection<'_>,
+            err: ReportableError,
+        ) -> anyhow::Result<()> {
             // let re = ;
             let error = format!("Gateway error:\n\n{}", err.to_string());
             client
@@ -352,21 +357,26 @@ impl Lure {
             }
         }
 
-        let mut server = Connection::new(server_stream, SocketIntent::GreetToBackend);
+        let mut owned_stream = Connection::try_from(server_stream)?;
+        let mut server = EncodedConnection::new(&mut owned_stream, SocketIntent::GreetToBackend);
 
         // Replay necessary packets
         if let HandshakeOption::HAProxy = handshake_option {
-            let pkt = create_proxy_protocol_header(client.stream_peak().peer_addr()?)?;
+            let pkt = create_proxy_protocol_header(*client.as_inner().addr())?;
             timeout(Duration::from_secs(1), server.send_raw(&pkt)).await??;
         }
 
         timeout(Duration::from_secs(1), server.send(&handshake.as_packet())).await??;
 
-        self.passthrough_now(client, server).await?;
+        self.passthrough_now(&mut client, &mut server).await?;
         Ok(())
     }
 
-    async fn passthrough_now(&self, client: Connection, server: Connection) -> anyhow::Result<()> {
+    async fn passthrough_now<'a, 'b>(
+        &self,
+        client: &mut EncodedConnection<'a>,
+        server: &mut EncodedConnection<'b>,
+    ) -> anyhow::Result<()> {
         let volume_record = get_meter()
             .u64_counter("lure_proxy_transport_volume")
             .with_unit("bytes")
@@ -376,12 +386,12 @@ impl Lure {
         let s2c = KeyValue::new("intent", "s2c");
         let c2s = KeyValue::new("intent", "c2s");
 
-        let mut client = client.stream_purify();
-        let mut server = server.stream_purify();
-        let cad = client.peer_addr()?;
-        let rad = server.peer_addr()?;
-        let (mut client_read, mut client_write) = client.split();
-        let (mut remote_read, mut remote_write) = server.split();
+        let client = client.as_inner_mut();
+        let server = server.as_inner_mut();
+        let cad = *client.addr();
+        let rad = *server.addr();
+        let (mut client_read, mut client_write) = client.as_mut().split();
+        let (mut remote_read, mut remote_write) = server.as_mut().split();
 
         // Borrowed from mqudsi/tcpproxy
         // https://github.com/mqudsi/tcpproxy/blob/e2d423b72898b497b129e8a58307934f9335974b/src/main.rs#L114C1-L159C6
