@@ -214,8 +214,11 @@ impl Lure {
     }
 
     pub async fn handle_handshake(&self, mut connection: Connection) -> anyhow::Result<()> {
-        let hs = timeout(Duration::from_secs(5), Self::peek_handshake(connection.as_ref()))
-            .await??;
+        let hs = timeout(
+            Duration::from_secs(5),
+            Self::peek_handshake(connection.as_ref()),
+        )
+        .await??;
         let state_attr = match hs.next_state {
             HandshakeNextState::Status => "status",
             HandshakeNextState::Login => "login",
@@ -282,16 +285,14 @@ impl Lure {
             duration: Duration::from_secs(1),
         };
         // Resolve target server
-        let address = *client.as_inner().addr();
-        let session_result = timeout(
+        let resolve_result = timeout(
             Duration::from_secs(1),
-            self.router
-                .create_session(&handshake.server_address, address),
+            self.router.resolve(&handshake.server_address),
         )
         .await;
 
-        let server_address = match session_result {
-            Ok(Ok((session, _))) => session.destination_addr,
+        let server_address = match resolve_result {
+            Ok(Some((addr, _))) => addr,
             _ => {
                 self.metrics
                     .failures
@@ -415,7 +416,6 @@ impl Lure {
                 let _ = client
                     .disconnect_player("Failed to create session".into_text().color(Color::RED))
                     .await;
-                self.router.terminate_session(&address).await?;
             }
             Err(_) => {
                 debug!("Session creation timed out for {}", address);
@@ -425,10 +425,8 @@ impl Lure {
                 let _ = client
                     .disconnect_player("Session creation timed out".into_text().color(Color::RED))
                     .await;
-                self.router.terminate_session(&address).await?;
             }
         }
-        self.router.terminate_session(&address).await?;
         Ok(())
     }
 
@@ -438,7 +436,7 @@ impl Lure {
         handshake: &OwnedHandshake,
         // login: &OwnedLoginHello,
         handshake_option: &HandshakeOption,
-        session: &Arc<Session>,
+        session: &Session,
     ) -> anyhow::Result<()> {
         let server_address = session.destination_addr;
         let connect_result =
