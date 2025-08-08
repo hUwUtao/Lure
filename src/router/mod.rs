@@ -228,21 +228,69 @@ impl RouterInstance {
     /// Resolve hostname to endpoint and route pair
     pub async fn resolve(&self, hostname: &str) -> Option<(SocketAddr, Arc<Route>)> {
         self.metrics.routes_resolve.add(1, &[]);
-        // Get route IDs for hostname
-        let route_ids = {
+        // Try exact match first using domain index
+        if let Some(route_ids) = {
             let domain_index = self.domain_index.read().await;
             domain_index.get(hostname).cloned()
-        }?;
+        } {
+            let routes = self.active_routes.read().await;
+            let best_route = route_ids
+                .iter()
+                .find_map(|&id| routes.get(&id))
+                .filter(|route| !route.disabled)?;
 
-        // Find first enabled route (already sorted by priority)
+            let endpoint = *best_route.endpoints.first()?;
+            return Some((endpoint, best_route.clone()));
+        }
+
+        // Fallback to wildcard matchers
         let routes = self.active_routes.read().await;
-        let best_route = route_ids
-            .iter()
-            .find_map(|&id| routes.get(&id))
-            .filter(|route| !route.disabled)?;
+        let mut best: Option<(SocketAddr, Arc<Route>)> = None;
 
-        let endpoint = *best_route.endpoints.first()?;
-        Some((endpoint, best_route.clone()))
+        for route in routes.values() {
+            if route.disabled {
+                continue;
+            }
+            for matcher in &route.matchers {
+                if let Some(port) = Self::match_wildcard(matcher, hostname) {
+                    let mut endpoint = *route.endpoints.first()?;
+                    if endpoint.port() == 0 {
+                        endpoint.set_port(port);
+                    }
+
+                    match &best {
+                        Some((_, existing)) if existing.priority >= route.priority => {}
+                        _ => best = Some((endpoint, route.clone())),
+                    }
+                    break;
+                }
+            }
+        }
+
+        best
+    }
+
+    fn match_wildcard(matcher: &str, hostname: &str) -> Option<u16> {
+        let star = matcher.find('*')?;
+        let prefix = &matcher[..star];
+        let suffix = &matcher[star + 1..];
+
+        if !hostname.ends_with(suffix) {
+            return None;
+        }
+
+        let value_part = &hostname[..hostname.len() - suffix.len()];
+
+        let dash = prefix.find('-')?;
+        let start = prefix[..dash].parse::<u16>().ok()?;
+        let end = prefix[dash + 1..].parse::<u16>().ok()?;
+        let value = value_part.parse::<u16>().ok()?;
+
+        if value >= start && value <= end {
+            Some(value)
+        } else {
+            None
+        }
     }
 
     /// Create a new session with optimized route lookup
@@ -364,5 +412,27 @@ impl crate::telemetry::event::EventHook<EventEnvelope, EventEnvelope> for Router
             _ => {}
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn wildcard_resolve_replaces_port() {
+        let router = RouterInstance::new();
+        let route = Route {
+            id: 1,
+            matchers: vec!["10000-10245*.abc.xyz.com".to_string()],
+            endpoints: vec!["123.245.122.21:0".parse().unwrap()],
+            disabled: false,
+            priority: 0,
+            handshake: HandshakeOption::default(),
+            override_query: false,
+        };
+        router.apply_route(route).await;
+        let resolved = router.resolve("10241.abc.xyz.com").await.unwrap();
+        assert_eq!(resolved.0, "123.245.122.21:10241".parse().unwrap());
     }
 }
