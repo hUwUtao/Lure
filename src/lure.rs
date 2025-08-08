@@ -500,6 +500,14 @@ impl Lure {
             .build();
         let vr1 = volume_record.clone();
         let vr2 = volume_record.clone();
+
+        let packet_record = get_meter()
+            .u64_counter("lure_proxy_transport_packet_count")
+            .with_unit("packets")
+            .build();
+        let pr1 = packet_record.clone();
+        let pr2 = packet_record.clone();
+
         let s2c = KeyValue::new("intent", "s2c");
         let c2s = KeyValue::new("intent", "c2s");
 
@@ -567,10 +575,14 @@ impl Lure {
         let (ra, rb) = tokio::join! {
             copy_with_abort(&mut remote_read, &mut client_write, cancel.subscribe(), move |u| {
                 vr1.add(u, &[s2c.clone()]);
+                pr1.add(1, &[s2c.clone()]);
             })
                 .then(|r| { let _ = cancel.send(()); async { r } }),
             copy_with_abort(&mut client_read, &mut remote_write, cancel.subscribe(),
-                move |u| { vr2.add(u, &[c2s.clone()]); }
+                move |u| {
+                    vr2.add(u, &[c2s.clone()]);
+                    pr2.add(1, &[c2s.clone()]);
+                }
             )
                 .then(|r| { let _ = cancel.send(()); async { r } }),
         };
