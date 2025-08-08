@@ -6,6 +6,7 @@ use std::{
 
 use anyhow::bail;
 use async_trait::async_trait;
+use bytes::BytesMut;
 use futures::FutureExt;
 use log::{debug, error, info};
 use opentelemetry::{
@@ -19,11 +20,15 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::{broadcast, Semaphore},
+    task::yield_now,
     time::timeout,
 };
-use valence_protocol::packets::{
-    handshaking::{handshake_c2s::HandshakeNextState, HandshakeC2s},
-    status::{QueryPingC2s, QueryPongS2c, QueryRequestC2s, QueryResponseS2c},
+use valence_protocol::{
+    packets::{
+        handshaking::{handshake_c2s::HandshakeNextState, HandshakeC2s},
+        status::{QueryPingC2s, QueryPongS2c, QueryRequestC2s, QueryResponseS2c},
+    },
+    PacketDecoder,
 };
 use valence_text::{Color, IntoText};
 
@@ -94,6 +99,27 @@ impl Lure {
             router,
             threat: leak(ThreatControlService::new()),
             metrics: HandshakeMetrics::new(&get_meter()),
+        }
+    }
+
+    async fn peek_handshake(stream: &tokio::net::TcpStream) -> anyhow::Result<OwnedHandshake> {
+        let mut buf = [0u8; 1024];
+        let mut decoder = PacketDecoder::new();
+        let mut filled = 0;
+        loop {
+            let n = stream.peek(&mut buf).await?;
+            if n > filled {
+                decoder.queue_bytes(BytesMut::from(&buf[filled..n]));
+                filled = n;
+            }
+            if let Some(frame) = decoder.try_next_packet()? {
+                let hs: HandshakeC2s = frame.decode()?;
+                return Ok(OwnedHandshake::from_packet(hs));
+            }
+            if n == buf.len() {
+                bail!("handshake too large");
+            }
+            yield_now().await;
         }
     }
 
@@ -188,27 +214,30 @@ impl Lure {
     }
 
     pub async fn handle_handshake(&self, mut connection: Connection) -> anyhow::Result<()> {
-        let mut handler = EncodedConnection::new(&mut connection, SocketIntent::GreetToProxy);
-        // Wait for initial handshake.
-        const INTENT: ClientIntent = ClientIntent {
-            tag: IntentTag::Handshake,
-            duration: Duration::from_secs(5),
-        };
-        let hs_pkt = self
-            .threat
-            .nuisance(handler.recv::<HandshakeC2s>(), INTENT)
+        let hs = timeout(Duration::from_secs(5), Self::peek_handshake(connection.as_ref()))
             .await??;
-        let handshake = OwnedHandshake::from_packet(hs_pkt);
-        let state_attr = match handshake.next_state {
+        let state_attr = match hs.next_state {
             HandshakeNextState::Status => "status",
             HandshakeNextState::Login => "login",
         };
         self.metrics
             .attempts
             .add(1, &[KeyValue::new("state", state_attr)]);
-        match &handshake.next_state {
-            HandshakeNextState::Status => self.proxy_status(handler, &handshake).await,
-            HandshakeNextState::Login => self.handle_proxy(handler, &handshake).await,
+
+        let mut handler = EncodedConnection::new(&mut connection, SocketIntent::GreetToProxy);
+        const INTENT: ClientIntent = ClientIntent {
+            tag: IntentTag::Handshake,
+            duration: Duration::from_secs(5),
+        };
+        // Consume the handshake packet from the client stream.
+        let _ = self
+            .threat
+            .nuisance(handler.recv::<HandshakeC2s>(), INTENT)
+            .await??;
+
+        match hs.next_state {
+            HandshakeNextState::Status => self.proxy_status(handler, &hs).await,
+            HandshakeNextState::Login => self.handle_proxy(handler, &hs).await,
         }
     }
 
