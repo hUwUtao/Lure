@@ -53,6 +53,39 @@ pub struct Session {
     pub route_id: u64,
 }
 
+/// RAII handle that terminates the session when dropped
+pub struct SessionHandle {
+    router: &'static RouterInstance,
+    inner: Arc<Session>,
+}
+
+impl SessionHandle {
+    pub fn new(router: &'static RouterInstance, session: Arc<Session>) -> Self {
+        Self {
+            router,
+            inner: session,
+        }
+    }
+}
+
+impl std::ops::Deref for SessionHandle {
+    type Target = Session;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl Drop for SessionHandle {
+    fn drop(&mut self) {
+        let router = self.router;
+        let addr = self.inner.client_addr;
+        tokio::spawn(async move {
+            let _ = router.terminate_session(&addr).await;
+        });
+    }
+}
+
 #[derive(Debug)]
 struct RouterMetrics {
     pub routes_active: Gauge<u64>,
@@ -247,10 +280,10 @@ impl RouterInstance {
 
     /// Create a new session with optimized route lookup
     pub async fn create_session(
-        &self,
+        &'static self,
         hostname: &str,
         client_addr: SocketAddr,
-    ) -> anyhow::Result<(Arc<Session>, Arc<Route>)> {
+    ) -> anyhow::Result<(SessionHandle, Arc<Route>)> {
         self.metrics.session_create.add(1, &[]);
         let (destination_addr, route) = self
             .resolve(hostname)
@@ -273,7 +306,7 @@ impl RouterInstance {
         self.metrics
             .sessions_active
             .record(self.session_count().await? as u64, &[]);
-        Ok((session, route))
+        Ok((SessionHandle::new(self, session), route))
     }
 
     /// Terminate a session
