@@ -8,7 +8,10 @@ use anyhow::bail;
 use async_trait::async_trait;
 use futures::FutureExt;
 use log::{debug, error, info};
-use opentelemetry::KeyValue;
+use opentelemetry::{
+    metrics::{Counter, Meter},
+    KeyValue,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::__private::AsDynError;
@@ -29,20 +32,31 @@ use crate::{
     connection::{EncodedConnection, SocketIntent},
     error::ReportableError,
     packet::{create_proxy_protocol_header, OwnedHandshake, OwnedPacket},
-    router::{
-        status::{QueryResponseKind, StatusBouncer},
-        HandshakeOption, RouterInstance, Session,
-    },
+    router::{HandshakeOption, RouterInstance, Session},
     telemetry::{event::EventHook, get_meter, init_event, EventEnvelope, EventServiceInstance},
     threat::{ratelimit::RateLimiterController, ClientIntent, IntentTag, ThreatControlService},
     utils::{leak, Connection, OwnedStatic},
 };
 
+struct HandshakeMetrics {
+    attempts: Counter<u64>,
+    failures: Counter<u64>,
+}
+
+impl HandshakeMetrics {
+    fn new(meter: &Meter) -> Self {
+        Self {
+            attempts: meter.u64_counter("lure_handshake_total").build(),
+            failures: meter.u64_counter("lure_handshake_fail_total").build(),
+        }
+    }
+}
+
 pub struct Lure {
     config: LureConfig,
     router: &'static RouterInstance,
-    status: &'static StatusBouncer,
     threat: &'static ThreatControlService,
+    metrics: HandshakeMetrics,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -75,12 +89,11 @@ impl EventHook<EventEnvelope, EventEnvelope> for EventIdent {
 impl Lure {
     pub fn new(config: LureConfig) -> Lure {
         let router = leak(RouterInstance::new());
-        let status = leak(StatusBouncer::new(router, &config));
         Lure {
             config,
             router,
-            status,
             threat: leak(ThreatControlService::new()),
+            metrics: HandshakeMetrics::new(&get_meter()),
         }
     }
 
@@ -181,13 +194,20 @@ impl Lure {
             tag: IntentTag::Handshake,
             duration: Duration::from_secs(5),
         };
-        let handshake = OwnedHandshake::from_packet(
-            self.threat
-                .nuisance(handler.recv::<HandshakeC2s>(), INTENT)
-                .await??,
-        );
+        let hs_pkt = self
+            .threat
+            .nuisance(handler.recv::<HandshakeC2s>(), INTENT)
+            .await??;
+        let handshake = OwnedHandshake::from_packet(hs_pkt);
+        let state_attr = match handshake.next_state {
+            HandshakeNextState::Status => "status",
+            HandshakeNextState::Login => "login",
+        };
+        self.metrics
+            .attempts
+            .add(1, &[KeyValue::new("state", state_attr)]);
         match &handshake.next_state {
-            HandshakeNextState::Status => self.handle_status(handler, handshake).await,
+            HandshakeNextState::Status => self.proxy_status(handler, &handshake).await,
             HandshakeNextState::Login => self.handle_proxy(handler, &handshake).await,
         }
     }
@@ -223,45 +243,109 @@ impl Lure {
         Ok(serde_json::to_string(&v)?)
     }
 
-    pub async fn handle_status(
+    pub async fn proxy_status(
         &self,
         mut client: EncodedConnection<'_>,
-        handshake: OwnedHandshake,
+        handshake: &OwnedHandshake,
     ) -> anyhow::Result<()> {
         const INTENT: ClientIntent = ClientIntent {
             tag: IntentTag::Query,
             duration: Duration::from_secs(1),
         };
-        self.threat
-            .nuisance(client.recv::<QueryRequestC2s>(), INTENT)
-            .await??;
-        match self.status.get(&handshake.server_address).await {
-            QueryResponseKind::Valid(response) => {
-                client
-                    .send::<QueryResponseS2c>(&response.as_packet())
-                    .await?
-            }
-            QueryResponseKind::NoHost => {
+        // Resolve target server
+        let address = *client.as_inner().addr();
+        let session_result = timeout(
+            Duration::from_secs(1),
+            self.router
+                .create_session(&handshake.server_address, address),
+        )
+        .await;
+
+        let server_address = match session_result {
+            Ok(Ok((session, _))) => session.destination_addr,
+            _ => {
+                self.metrics
+                    .failures
+                    .add(1, &[KeyValue::new("state", "status")]);
                 client
                     .send(&QueryResponseS2c {
                         json: &self.create_placeholder_ping("ROUTE_NOT_FOUND")?,
                     })
-                    .await?
+                    .await?;
+                return Ok(());
             }
-            QueryResponseKind::Disconnected => {
+        };
+
+        // Connect to server
+        let server_stream =
+            match timeout(Duration::from_secs(3), TcpStream::connect(server_address)).await {
+                Ok(Ok(stream)) => stream,
+                _ => {
+                    self.metrics
+                        .failures
+                        .add(1, &[KeyValue::new("state", "status")]);
+                    client
+                        .send(&QueryResponseS2c {
+                            json: &self.create_placeholder_ping("SERVER_OFFLINE")?,
+                        })
+                        .await?;
+                    return Ok(());
+                }
+            };
+
+        if dotenvy::var("NO_NODELAY").is_err() {
+            if let Err(e) = server_stream.set_nodelay(true) {
+                error!("Failed to set TCP_NODELAY: {e}");
+            }
+        }
+
+        let mut owned_stream = Connection::try_from(server_stream)?;
+        let mut server = EncodedConnection::new(&mut owned_stream, SocketIntent::GreetToBackend);
+
+        timeout(Duration::from_secs(1), server.send(&handshake.as_packet())).await??;
+
+        // Forward query request
+        let req = self
+            .threat
+            .nuisance(client.recv::<QueryRequestC2s>(), INTENT)
+            .await??;
+        server.send(&req).await?;
+
+        let response = match server.recv::<QueryResponseS2c>().await {
+            Ok(r) => r,
+            Err(_) => {
+                self.metrics
+                    .failures
+                    .add(1, &[KeyValue::new("state", "status")]);
                 client
                     .send(&QueryResponseS2c {
                         json: &self.create_placeholder_ping("SERVER_OFFLINE")?,
                     })
-                    .await?
+                    .await?;
+                return Ok(());
             }
-        }
+        };
+        client.send(&response).await?;
 
-        let QueryPingC2s { payload } = self
+        // Forward ping
+        let ping = self
             .threat
             .nuisance(client.recv::<QueryPingC2s>(), INTENT)
             .await??;
-        client.send(&QueryPongS2c { payload }).await?;
+        server.send(&ping).await?;
+        match server.recv::<QueryPongS2c>().await {
+            Ok(pong) => client.send(&pong).await?,
+            Err(_) => {
+                self.metrics
+                    .failures
+                    .add(1, &[KeyValue::new("state", "status")]);
+                client
+                    .send(&QueryPongS2c {
+                        payload: ping.payload,
+                    })
+                    .await?;
+            }
+        }
         Ok(())
     }
 
@@ -296,6 +380,9 @@ impl Lure {
             }
             Ok(Err(e)) => {
                 debug!("Failed to create session: {}", e);
+                self.metrics
+                    .failures
+                    .add(1, &[KeyValue::new("state", "login")]);
                 let _ = client
                     .disconnect_player("Failed to create session".into_text().color(Color::RED))
                     .await;
@@ -303,6 +390,9 @@ impl Lure {
             }
             Err(_) => {
                 debug!("Session creation timed out for {}", address);
+                self.metrics
+                    .failures
+                    .add(1, &[KeyValue::new("state", "login")]);
                 let _ = client
                     .disconnect_player("Session creation timed out".into_text().color(Color::RED))
                     .await;
