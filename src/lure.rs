@@ -227,7 +227,7 @@ impl Lure {
         let mut handler = EncodedConnection::new(&mut connection, SocketIntent::GreetToProxy);
         const INTENT: ClientIntent = ClientIntent {
             tag: IntentTag::Handshake,
-            duration: Duration::from_secs(5),
+            duration: Duration::from_secs(60),
         };
         // Consume the handshake packet from the client stream.
         let _ = self
