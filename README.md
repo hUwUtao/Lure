@@ -25,12 +25,10 @@ Gate(lite), which is a mature proxy for this purpose, but I wasn't able to make 
 
 ## Features
 
-- Customized routing with API control. *Currently, routes are loaded from RPC default_routes (see below)*
-- Query with slight cache
+- Provision with an API backend for orchestration (via RPC, see [Elysia implementation](https://github.com/hUwUtao/Lucky))
 - Multi-server & multi-host support
 - Proxy Protocol (supported Paper-derived, Velocity and Bungeecord)
-- Highly observable system
-- Addon API (via RPC, see [Elysia implementation](https://github.com/hUwUtao/Lucky))
+- Highly observable system through OTEL
 - Global threat control (WIP), with socket ratelimit, etc.
 
 ### Cutting edge
@@ -45,7 +43,9 @@ cost of higher memory usage (~47MiB vs ~20MiB).
 
 ### Incompatibility
 
-- Known gimmick to actual protocol-use is `viaproxy`. On 1.20.6 server, there such a behavior of packet disorder 
+- [x] Client are disconnected after a while: The client will timeout. Tolerate handshake for bit longer. Seems like working!
+
+- [ ] Known gimmick to actual protocol-use is `viaproxy`. On 1.20.6 server, there such a behavior of packet disorder 
 suspected because of async polling (or kind of?)
 
 | Server Version | Client Version   | Observed                                                                            |
@@ -54,6 +54,8 @@ suspected because of async polling (or kind of?)
 | ^              | 1.21.1-4         | Client is disconected by clientbound-entity_remove packet 1xx packet overestimation |
 | Paper 1.20.6   | 1.21.5+          | ^                                                                                   |   
 | ^              | 1.20.6, 1.21.1-4 | Ok                                                                                  |
+
+> Update: ViaVersion has an update
 
 ## Credits
 
