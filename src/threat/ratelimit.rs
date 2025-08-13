@@ -5,6 +5,7 @@ use governor::{
     state::keyed::DashMapStateStore,
     Quota, RateLimiter,
 };
+use log::warn;
 
 #[derive(Debug)]
 pub enum RateLimitResult {
@@ -19,7 +20,7 @@ pub struct RateLimiterController<K: Hash + Eq + Clone> {
 
 impl<K> RateLimiterController<K>
 where
-    K: Hash + Eq + Clone + Send + Sync,
+    K: Hash + Eq + Clone + Send + Sync + std::fmt::Debug,
 {
     pub fn new(requests_per_second: u32, retry_time: Duration) -> Self {
         let quota = Quota::per_second(NonZeroU32::new(requests_per_second).unwrap());
@@ -36,6 +37,7 @@ where
             Err(negative) => {
                 let calculated_retry = negative.wait_time_from(DefaultClock::default().now());
                 let retry_after = calculated_retry.max(self.retry_time);
+                warn!("Rate limit exceeded for key: {:?}", key);
                 RateLimitResult::Disallowed { retry_after }
             }
         }

@@ -3,7 +3,7 @@ use std::{io, io::ErrorKind};
 use bytes::BytesMut;
 use opentelemetry::{
     global,
-    metrics::{Counter, Meter},
+    metrics::{Counter, Histogram, Meter},
     KeyValue,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -48,12 +48,14 @@ impl SocketIntent {
 
 struct ConnectionMetric {
     packet_count: Counter<u64>,
+    packet_size: Histogram<u64>,
 }
 
 impl ConnectionMetric {
     fn new(metric: &Meter) -> Self {
         Self {
             packet_count: metric.u64_counter("lure_proxy_packet_count").build(),
+            packet_size: metric.u64_histogram("lure_proxy_packet_size").build(),
         }
     }
 }
@@ -77,8 +79,11 @@ impl<'a> EncodedConnection<'a> {
         }
     }
 
-    fn packet_record(&self) {
+    fn packet_record(&self, size: usize) {
         self.metric.packet_count.add(1, &[self.intent.clone()]);
+        self.metric
+            .packet_size
+            .record(size as u64, &[self.intent.clone()]);
     }
 
     pub async fn connect(stream: &'a mut Connection) -> anyhow::Result<Self> {
@@ -117,10 +122,11 @@ impl<'a> EncodedConnection<'a> {
     where
         P: Packet + Decode<'b>,
     {
-        self.packet_record();
         loop {
             if let Some(frame) = self.dec.try_next_packet()? {
+                let size = frame.body.len();
                 self.frame = frame;
+                self.packet_record(size);
                 return self.frame.decode();
             }
 
@@ -139,9 +145,10 @@ impl<'a> EncodedConnection<'a> {
     where
         P: Encode + Packet,
     {
-        self.packet_record();
         self.enc.append_packet::<P>(pkt)?;
         let bytes = self.enc.take();
+        let size = bytes.len();
+        self.packet_record(size);
         // timeout(Duration::from_millis(5000), self.write.write_all(&bytes)).await??;
         self.stream.as_mut().write_all(&bytes).await?;
         self.flush().await?;
@@ -149,7 +156,8 @@ impl<'a> EncodedConnection<'a> {
     }
 
     pub async fn send_raw(&mut self, pkt: &[u8]) -> anyhow::Result<()> {
-        self.packet_record();
+        let size = pkt.len();
+        self.packet_record(size);
         self.stream.as_mut().write_all(pkt).await?;
         self.flush().await?;
         Ok(())
