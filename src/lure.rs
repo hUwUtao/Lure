@@ -1,7 +1,7 @@
 use std::{
     net::{IpAddr, SocketAddr},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::bail;
@@ -10,7 +10,7 @@ use bytes::BytesMut;
 use futures::FutureExt;
 use log::{debug, error, info};
 use opentelemetry::{
-    metrics::{Counter, Meter},
+    metrics::{Counter, Histogram, Meter},
     KeyValue,
 };
 use serde::{Deserialize, Serialize};
@@ -46,6 +46,7 @@ use crate::{
 struct HandshakeMetrics {
     attempts: Counter<u64>,
     failures: Counter<u64>,
+    duration: Histogram<u64>,
 }
 
 impl HandshakeMetrics {
@@ -53,6 +54,7 @@ impl HandshakeMetrics {
         Self {
             attempts: meter.u64_counter("lure_handshake_total").build(),
             failures: meter.u64_counter("lure_handshake_fail_total").build(),
+            duration: meter.u64_histogram("lure_handshake_time_ms").build(),
         }
     }
 }
@@ -214,6 +216,7 @@ impl Lure {
     }
 
     pub async fn handle_handshake(&self, mut connection: Connection) -> anyhow::Result<()> {
+        let start = Instant::now();
         let hs = timeout(
             Duration::from_secs(5),
             Self::peek_handshake(connection.as_ref()),
@@ -237,6 +240,12 @@ impl Lure {
             .threat
             .nuisance(handler.recv::<HandshakeC2s>(), INTENT)
             .await??;
+
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        debug!("Handshake completed in {}ms", elapsed_ms);
+        self.metrics
+            .duration
+            .record(elapsed_ms, &[KeyValue::new("state", state_attr)]);
 
         match hs.next_state {
             HandshakeNextState::Status => self.proxy_status(handler, &hs).await,

@@ -2,6 +2,7 @@ pub mod ratelimit;
 
 use std::{future::IntoFuture, time::Duration};
 
+use log::warn;
 use tokio::time::{error::Elapsed, timeout};
 
 use crate::threat::ratelimit::RateLimitResult;
@@ -45,7 +46,13 @@ impl ThreatControlService {
     {
         match timeout(intent.duration, future.into_future()).await {
             Ok(v) => Ok(v),
-            Err(elapsed) => Err(ClientFail::Timeout { intent, elapsed }.into()),
+            Err(elapsed) => {
+                warn!(
+                    "Client {:?} timed out after {:?}",
+                    intent.tag, intent.duration
+                );
+                Err(ClientFail::Timeout { intent, elapsed }.into())
+            }
         }
     }
 }
