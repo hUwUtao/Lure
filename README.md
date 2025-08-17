@@ -45,7 +45,7 @@ cost of higher memory usage (~47MiB vs ~20MiB).
 
 - [x] Client are disconnected after a while: The client will timeout. Tolerate handshake for bit longer. Seems like working!
 
-- [ ] Known gimmick to actual protocol-use is `viaproxy`. On 1.20.6 server, there such a behavior of packet disorder 
+- [x] Known gimmick to actual protocol-use is `viaproxy`. On 1.20.6 server, there such a behavior of packet disorder 
 suspected because of async polling (or kind of?)
 
 | Server Version | Client Version   | Observed                                                                            |
@@ -56,6 +56,8 @@ suspected because of async polling (or kind of?)
 | ^              | 1.20.6, 1.21.1-4 | Ok                                                                                  |
 
 > Update: ViaVersion has an update
+
+- [ ] "TL\*uncher Guard" (suspected) flatten hostname to ip. Result is mixed of people with TL\*ncher
 
 ## Credits
 
