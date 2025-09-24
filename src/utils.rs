@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use serde_json::json;
 use tokio::net::TcpStream;
 
 use crate::telemetry::{event::EventHook, EventEnvelope, EventServiceInstance};
@@ -39,6 +40,19 @@ impl<H: EventHook<EventEnvelope, EventEnvelope> + Send + Sync>
 
 pub fn leak<T>(inner: T) -> &'static T {
     Box::leak(Box::new(inner))
+}
+
+pub fn placeholder_status_response(brand: &str, message: &str) -> String {
+    json!({
+        "version": {
+            "name": brand,
+            "protocol": -1
+        },
+        "description": {
+            "text": message
+        }
+    })
+    .to_string()
 }
 
 pub struct Connection {

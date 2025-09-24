@@ -1,7 +1,4 @@
-use std::{
-    net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
-    sync::Arc,
-};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 use bytes::BytesMut;
 use proxy_protocol::{
@@ -12,7 +9,6 @@ use valence_protocol::{
     packets::{
         handshaking::{handshake_c2s::HandshakeNextState, HandshakeC2s},
         login::LoginHelloC2s,
-        status::QueryResponseS2c,
     },
     uuid::Uuid,
     Bounded, Decode, Encode, Packet, VarInt,
@@ -48,29 +44,6 @@ impl<'a> OwnedPacket<'a, HandshakeC2s<'a>> for OwnedHandshake {
             server_port: self.server_port,
             next_state: self.next_state,
         }
-    }
-}
-
-#[derive(Debug, Clone)]
-/// Owned `QueryResponseS2C`
-pub struct OwnedQueryResponse {
-    pub json: Arc<str>,
-}
-
-impl OwnedQueryResponse {
-    pub(crate) fn new(json: &str) -> Self {
-        Self { json: json.into() }
-    }
-}
-
-impl<'a> OwnedPacket<'a, QueryResponseS2c<'a>> for OwnedQueryResponse {
-    fn from_packet(response: QueryResponseS2c) -> Self {
-        Self {
-            json: Arc::from(response.json),
-        }
-    }
-    fn as_packet(&'a self) -> QueryResponseS2c<'a> {
-        QueryResponseS2c { json: &self.json }
     }
 }
 
@@ -114,5 +87,3 @@ pub fn create_proxy_protocol_header(socket: SocketAddr) -> anyhow::Result<BytesM
     };
     Ok(proxy_protocol::encode(proxy_header)?)
 }
-
-pub const NULL_SOCKET: SocketAddr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0));
