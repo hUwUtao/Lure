@@ -8,7 +8,7 @@ use anyhow::bail;
 use async_trait::async_trait;
 use bytes::BytesMut;
 use futures::FutureExt;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use opentelemetry::{
     metrics::{Counter, Histogram, Meter},
     KeyValue,
@@ -177,7 +177,7 @@ impl Lure {
                     tokio::spawn(async move {
                         // Apply timeout to connection handling
                         if let Err(e) = lure.handle_connection(client, addr).await {
-                            debug!("connection closed: {e}")
+                            debug!("Connection {addr} closed: {e}")
                         }
                         drop(permit);
                     });
@@ -196,10 +196,8 @@ impl Lure {
         if dotenvy::var("DO_NOT_LOG_CONNECTION_ERROR").is_ok() {
             return;
         }
-        let server_str = server
-            .map(|s| format!(" -> {s}"))
-            .unwrap_or_else(|| "".to_string());
-        error!("connection error@{client}-{server_str}: {}", err);
+        let server_str = server.map(|s| format!(" -> {s}")).unwrap_or_default();
+        error!("connection error@{client}{server_str}: {}", err);
     }
 
     pub async fn handle_connection(
@@ -274,6 +272,40 @@ impl Lure {
         let brand = self.get_string("SERVER_LIST_BRAND");
         let target_label = self.get_string(label);
         placeholder_status_response(brand.as_ref(), target_label.as_ref())
+    }
+
+    async fn disconnect_with_log<S, L>(
+        &self,
+        client: &mut EncodedConnection<'_>,
+        addr: SocketAddr,
+        public_reason: S,
+        log_reason: L,
+    ) -> anyhow::Result<()>
+    where
+        S: Into<String>,
+        L: Into<String>,
+    {
+        let public_reason = public_reason.into();
+        let log_reason = log_reason.into();
+        warn!("Disconnecting client {addr}: {log_reason}");
+        client
+            .disconnect_player(public_reason.into_text().color(Color::RED))
+            .await
+    }
+
+    async fn disconnect_with_error(
+        &self,
+        client: &mut EncodedConnection<'_>,
+        addr: SocketAddr,
+        err: &ReportableError,
+        context: impl Into<String>,
+    ) -> anyhow::Result<()> {
+        let context = context.into();
+        let err_msg = err.to_string();
+        let public_reason = format!("Gateway error:\n\n{}", err_msg);
+        let log_reason = format!("{}: {}", context, err_msg);
+        self.disconnect_with_log(client, addr, public_reason, log_reason)
+            .await
     }
 
     pub async fn proxy_status(
@@ -382,14 +414,20 @@ impl Lure {
         resolved: Option<ResolvedRoute>,
     ) -> anyhow::Result<()> {
         let address = *client.as_inner().addr();
+        let hostname = handshake.server_address.as_str();
 
         let Some(resolved) = resolved else {
             self.metrics
                 .failures
                 .add(1, &[KeyValue::new("state", "login")]);
-            let _ = client
-                .disconnect_player("Route not found".into_text().color(Color::RED))
-                .await;
+            let display = format!("Route not found for {hostname}");
+            let log_reason = format!("route '{hostname}' not found");
+            if let Err(err) = self
+                .disconnect_with_log(&mut client, address, display, log_reason)
+                .await
+            {
+                debug!("Failed to send disconnect to {address}: {err}");
+            }
             return Ok(());
         };
 
@@ -416,22 +454,32 @@ impl Lure {
                 }
             }
             Ok(Err(e)) => {
-                debug!("Failed to create session: {}", e);
+                debug!("Failed to create session for {address} (host '{hostname}'): {e}");
                 self.metrics
                     .failures
                     .add(1, &[KeyValue::new("state", "login")]);
-                let _ = client
-                    .disconnect_player("Failed to create session".into_text().color(Color::RED))
-                    .await;
+                let display = format!("Failed to create session for {hostname}");
+                let log_reason = format!("session creation failed for host '{hostname}': {e}");
+                if let Err(err) = self
+                    .disconnect_with_log(&mut client, address, display, log_reason)
+                    .await
+                {
+                    debug!("Failed to send disconnect to {address}: {err}");
+                }
             }
             Err(_) => {
-                debug!("Session creation timed out for {}", address);
+                debug!("Session creation timed out for {address} (host '{hostname}')");
                 self.metrics
                     .failures
                     .add(1, &[KeyValue::new("state", "login")]);
-                let _ = client
-                    .disconnect_player("Session creation timed out".into_text().color(Color::RED))
-                    .await;
+                let display = format!("Session creation timed out for {hostname}");
+                let log_reason = format!("session creation timed out for host '{hostname}'");
+                if let Err(err) = self
+                    .disconnect_with_log(&mut client, address, display, log_reason)
+                    .await
+                {
+                    debug!("Failed to send disconnect to {address}: {err}");
+                }
             }
         }
         Ok(())
@@ -446,40 +494,38 @@ impl Lure {
         session: &Session,
     ) -> anyhow::Result<()> {
         let server_address = session.destination_addr;
-        async fn handle_err(
-            mut client: EncodedConnection<'_>,
-            err: ReportableError,
-        ) -> anyhow::Result<()> {
-            // let re = ;
-            let error = format!("Gateway error:\n\n{}", err.to_string());
-            client
-                .disconnect_player(error.clone().into_text().color(Color::RED))
-                .await?;
-            bail!(err);
-        }
+        let client_addr = *client.as_inner().addr();
+        let hostname = handshake.server_address.as_str();
 
         let mut owned_stream = match self.open_backend_connection(server_address).await {
             Ok(stream) => stream,
             Err(err) => {
                 let err = ReportableError::from(err);
-                handle_err(client, err).await?;
-                return Ok(());
+                self.disconnect_with_error(
+                    &mut client,
+                    client_addr,
+                    &err,
+                    format!("backend connection to {server_address} for host '{hostname}'"),
+                )
+                .await?;
+                return Err(err.into());
             }
         };
         let mut server = EncodedConnection::new(&mut owned_stream, SocketIntent::GreetToBackend);
 
         if let Err(err) = self
-            .initialize_backend_protocol(
-                &mut server,
-                handshake_option,
-                *client.as_inner().addr(),
-                handshake,
-            )
+            .initialize_backend_protocol(&mut server, handshake_option, client_addr, handshake)
             .await
         {
             let err = ReportableError::from(err);
-            handle_err(client, err).await?;
-            return Ok(());
+            self.disconnect_with_error(
+                &mut client,
+                client_addr,
+                &err,
+                format!("backend handshake to {server_address} for host '{hostname}'"),
+            )
+            .await?;
+            return Err(err.into());
         }
 
         self.passthrough_now(&mut client, &mut server).await?;

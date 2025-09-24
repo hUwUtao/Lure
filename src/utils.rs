@@ -55,6 +55,21 @@ pub fn placeholder_status_response(brand: &str, message: &str) -> String {
     .to_string()
 }
 
+pub fn sanitize_hostname(input: &str) -> String {
+    const FALLBACK: &str = "unknown-host";
+    let sanitized: String = input
+        .chars()
+        .filter(|c| c.is_ascii() && !c.is_ascii_control())
+        .take(255)
+        .collect();
+    let sanitized = sanitized.trim().to_owned();
+    if sanitized.is_empty() {
+        FALLBACK.to_owned()
+    } else {
+        sanitized
+    }
+}
+
 pub struct Connection {
     stream: tokio::net::TcpStream,
     addr: std::net::SocketAddr,

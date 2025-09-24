@@ -14,6 +14,8 @@ use valence_protocol::{
     Bounded, Decode, Encode, Packet, VarInt,
 };
 
+use crate::utils::sanitize_hostname;
+
 pub trait OwnedPacket<'a, P: Packet + Decode<'a> + Encode> {
     fn from_packet(packet: P) -> Self;
     fn as_packet(&'a self) -> P;
@@ -32,7 +34,7 @@ impl<'a> OwnedPacket<'a, HandshakeC2s<'a>> for OwnedHandshake {
     fn from_packet(hs: HandshakeC2s<'a>) -> Self {
         Self {
             protocol_version: hs.protocol_version,
-            server_address: hs.server_address.0.to_string(),
+            server_address: sanitize_hostname(hs.server_address.0),
             server_port: hs.server_port,
             next_state: hs.next_state,
         }
