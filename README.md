@@ -45,17 +45,19 @@ cost of higher memory usage (~47MiB vs ~20MiB).
 
 - [x] Client are disconnected after a while: The client will timeout. Tolerate handshake for bit longer. Seems like working!
 
-- [x] Known gimmick to actual protocol-use is `viaproxy`. On 1.20.6 server, there such a behavior of packet disorder 
+- [x] **FIXED**, Known gimmick to actual protocol-use is `viaproxy`. On 1.20.6 server, there such a behavior of packet disorder 
 suspected because of async polling (or kind of?)
 
 | Server Version | Client Version   | Observed                                                                            |
 |----------------|------------------|-------------------------------------------------------------------------------------|
 | Purpur 1.20.6  | 1.20.6           | Ok                                                                                  |
-| ^              | 1.21.1-4         | Client is disconected by clientbound-entity_remove packet 1xx packet overestimation |
+| ^              | 1.21.1-4         | ~~Client is disconected by clientbound-entity_remove packet 1xx packet overestimation~~ |
 | Paper 1.20.6   | 1.21.5+          | ^                                                                                   |   
 | ^              | 1.20.6, 1.21.1-4 | Ok                                                                                  |
 
-> Update: ViaVersion has an update
+> Update: ViaVersion has an update.
+
+- [ ] Does not connect well when native condition of Distant Horizon paper support is met. Currently investigating.
 
 - [ ] "TL\*uncher Guard" (suspected) flatten hostname to ip. Result is mixed of people with TL\*ncher
 
