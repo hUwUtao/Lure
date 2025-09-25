@@ -16,6 +16,14 @@ It reach high performance with
 - Fast first-handshake deserialization
 - Async session handling
 
+### Performance
+
+Gate vs Lure, tested from VN to SG, with Wifi latency. 
+
+![Gate: 96ms; Lure: 16ms](/assets/thicc.png)
+
+<sub>*Lure actually give off uneven result with random spike, while Gate keeps a stable number, a quite lower than the peak of Lure</sub>
+
 ## Philosophy
 
 Multi-tenancy design model, that to using well serialized configuration not config-generation and reloading
