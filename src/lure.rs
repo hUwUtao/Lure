@@ -8,13 +8,12 @@ use anyhow::bail;
 use async_trait::async_trait;
 use bytes::BytesMut;
 use futures::FutureExt;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use opentelemetry::{
     metrics::{Counter, Histogram, Meter},
     KeyValue,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use thiserror::__private::AsDynError;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -37,10 +36,12 @@ use crate::{
     connection::{EncodedConnection, SocketIntent},
     error::ReportableError,
     packet::{create_proxy_protocol_header, OwnedHandshake, OwnedPacket},
-    router::{HandshakeOption, RouterInstance, Session},
+    router::{HandshakeOption, ResolvedRoute, RouterInstance, Session},
     telemetry::{event::EventHook, get_meter, init_event, EventEnvelope, EventServiceInstance},
-    threat::{ratelimit::RateLimiterController, ClientIntent, IntentTag, ThreatControlService},
-    utils::{leak, Connection, OwnedStatic},
+    threat::{
+        ratelimit::RateLimiterController, ClientFail, ClientIntent, IntentTag, ThreatControlService,
+    },
+    utils::{leak, placeholder_status_response, Connection, OwnedStatic},
 };
 
 struct HandshakeMetrics {
@@ -178,7 +179,7 @@ impl Lure {
                     tokio::spawn(async move {
                         // Apply timeout to connection handling
                         if let Err(e) = lure.handle_connection(client, addr).await {
-                            debug!("connection closed: {e}")
+                            debug!("Connection {addr} closed: {e}")
                         }
                         drop(permit);
                     });
@@ -197,10 +198,8 @@ impl Lure {
         if dotenvy::var("DO_NOT_LOG_CONNECTION_ERROR").is_ok() {
             return;
         }
-        let server_str = server
-            .map(|s| format!(" -> {s}"))
-            .unwrap_or_else(|| "".to_string());
-        error!("connection error@{client}-{server_str}: {}", err);
+        let server_str = server.map(|s| format!(" -> {s}")).unwrap_or_default();
+        error!("connection error@{client}{server_str}: {}", err);
     }
 
     pub async fn handle_connection(
@@ -247,9 +246,19 @@ impl Lure {
             .duration
             .record(elapsed_ms, &[KeyValue::new("state", state_attr)]);
 
+        let resolved = match timeout(
+            Duration::from_secs(1),
+            self.router.resolve(hs.virtual_host()),
+        )
+        .await
+        {
+            Ok(resolved) => resolved,
+            Err(_) => None,
+        };
+
         match hs.next_state {
-            HandshakeNextState::Status => self.proxy_status(handler, &hs).await,
-            HandshakeNextState::Login => self.handle_proxy(handler, &hs).await,
+            HandshakeNextState::Status => self.proxy_status(handler, &hs, resolved).await,
+            HandshakeNextState::Login => self.handle_proxy(handler, &hs, resolved).await,
         }
     }
 
@@ -261,89 +270,186 @@ impl Lure {
             .to_owned()
     }
 
-    fn create_placeholder_ping(&self, label: &str) -> anyhow::Result<String> {
+    fn placeholder_status_json(&self, label: &str) -> String {
         let brand = self.get_string("SERVER_LIST_BRAND");
         let target_label = self.get_string(label);
-        let v = json! {
-            {
-              "version": {
-                "name": brand,
-                "protocol": -1
-              },
-              // "players": {
-              //   "online": 0,
-              //   "max": 0,
-              //   "sample": []
-              // },
-              "description": {
-                "text": target_label
-              },
-              // "favicon": ""
+        placeholder_status_response(brand.as_ref(), target_label.as_ref())
+    }
+
+    async fn consume_status_request<'a>(
+        &self,
+        client: &mut EncodedConnection<'a>,
+    ) -> anyhow::Result<Option<QueryPingC2s>> {
+        self.threat
+            .nuisance(
+                client.recv::<QueryRequestC2s>(),
+                ClientIntent {
+                    tag: IntentTag::Query,
+                    duration: Duration::from_secs(1),
+                },
+            )
+            .await??;
+
+        match self
+            .threat
+            .nuisance(
+                client.recv::<QueryPingC2s>(),
+                ClientIntent {
+                    tag: IntentTag::Query,
+                    duration: Duration::from_secs(1),
+                },
+            )
+            .await
+        {
+            Ok(Ok(ping)) => Ok(Some(ping)),
+            Ok(Err(err)) => Err(err),
+            Err(err) => {
+                if matches!(
+                    err.downcast_ref::<ClientFail>(),
+                    Some(ClientFail::Timeout { .. })
+                ) {
+                    Ok(None)
+                } else {
+                    Err(err)
+                }
             }
-        };
-        Ok(serde_json::to_string(&v)?)
+        }
+    }
+
+    async fn disconnect_with_log<S, L>(
+        &self,
+        client: &mut EncodedConnection<'_>,
+        addr: SocketAddr,
+        public_reason: S,
+        log_reason: L,
+    ) -> anyhow::Result<()>
+    where
+        S: Into<String>,
+        L: Into<String>,
+    {
+        let public_reason = public_reason.into();
+        let log_reason = log_reason.into();
+        warn!("Disconnecting client {addr}: {log_reason}");
+        client
+            .disconnect_player(public_reason.into_text().color(Color::RED))
+            .await
+    }
+
+    async fn disconnect_with_error(
+        &self,
+        client: &mut EncodedConnection<'_>,
+        addr: SocketAddr,
+        err: &ReportableError,
+        context: impl Into<String>,
+    ) -> anyhow::Result<()> {
+        let context = context.into();
+        let err_msg = err.to_string();
+        let public_reason = format!("Gateway error:\n\n{}", err_msg);
+        let log_reason = format!("{}: {}", context, err_msg);
+        self.disconnect_with_log(client, addr, public_reason, log_reason)
+            .await
     }
 
     pub async fn proxy_status(
         &self,
         mut client: EncodedConnection<'_>,
         handshake: &OwnedHandshake,
+        resolved: Option<ResolvedRoute>,
     ) -> anyhow::Result<()> {
         const INTENT: ClientIntent = ClientIntent {
             tag: IntentTag::Query,
             duration: Duration::from_secs(1),
         };
-        // Resolve target server
-        let resolve_result = timeout(
-            Duration::from_secs(1),
-            self.router.resolve(&handshake.server_address),
-        )
-        .await;
+        let client_addr = *client.as_inner().addr();
+        let Some(resolved) = resolved else {
+            let ping = match self.consume_status_request(&mut client).await {
+                Ok(ping) => ping,
+                Err(err) => {
+                    debug!("Failed to receive status request from {client_addr}: {err}");
+                    return Err(err);
+                }
+            };
+            if let Some(ping) = ping {
+                client
+                    .send(&QueryPongS2c {
+                        payload: ping.payload,
+                    })
+                    .await?;
+            }
+            self.metrics
+                .failures
+                .add(1, &[KeyValue::new("state", "status")]);
+            let placeholder = self.placeholder_status_json("ROUTE_NOT_FOUND");
+            client
+                .send(&QueryResponseS2c { json: &placeholder })
+                .await?;
+            return Ok(());
+        };
 
-        let server_address = match resolve_result {
-            Ok(Some((addr, _))) => addr,
-            _ => {
+        let mut backend = match self.open_backend_connection(resolved.endpoint).await {
+            Ok(connection) => connection,
+            Err(_) => {
+                let ping = match self.consume_status_request(&mut client).await {
+                    Ok(ping) => ping,
+                    Err(err) => {
+                        debug!("Failed to receive status request from {client_addr}: {err}");
+                        return Err(err);
+                    }
+                };
+                if let Some(ping) = ping {
+                    client
+                        .send(&QueryPongS2c {
+                            payload: ping.payload,
+                        })
+                        .await?;
+                }
                 self.metrics
                     .failures
                     .add(1, &[KeyValue::new("state", "status")]);
+                let placeholder = self.placeholder_status_json("SERVER_OFFLINE");
                 client
-                    .send(&QueryResponseS2c {
-                        json: &self.create_placeholder_ping("ROUTE_NOT_FOUND")?,
-                    })
+                    .send(&QueryResponseS2c { json: &placeholder })
                     .await?;
                 return Ok(());
             }
         };
 
-        // Connect to server
-        let server_stream =
-            match timeout(Duration::from_secs(3), TcpStream::connect(server_address)).await {
-                Ok(Ok(stream)) => stream,
-                _ => {
-                    self.metrics
-                        .failures
-                        .add(1, &[KeyValue::new("state", "status")]);
-                    client
-                        .send(&QueryResponseS2c {
-                            json: &self.create_placeholder_ping("SERVER_OFFLINE")?,
-                        })
-                        .await?;
-                    return Ok(());
+        let client_addr = *client.as_inner().addr();
+        let mut server = EncodedConnection::new(&mut backend, SocketIntent::GreetToBackend);
+
+        if let Err(_) = self
+            .initialize_backend_protocol(
+                &mut server,
+                &resolved.route.handshake,
+                client_addr,
+                handshake,
+            )
+            .await
+        {
+            let ping = match self.consume_status_request(&mut client).await {
+                Ok(ping) => ping,
+                Err(err) => {
+                    debug!("Failed to receive status request from {client_addr}: {err}");
+                    return Err(err);
                 }
             };
-
-        if dotenvy::var("NO_NODELAY").is_err() {
-            if let Err(e) = server_stream.set_nodelay(true) {
-                error!("Failed to set TCP_NODELAY: {e}");
+            if let Some(ping) = ping {
+                client
+                    .send(&QueryPongS2c {
+                        payload: ping.payload,
+                    })
+                    .await?;
             }
+            self.metrics
+                .failures
+                .add(1, &[KeyValue::new("state", "status")]);
+            let placeholder = self.placeholder_status_json("SERVER_OFFLINE");
+            client
+                .send(&QueryResponseS2c { json: &placeholder })
+                .await?;
+            return Ok(());
         }
 
-        let mut owned_stream = Connection::try_from(server_stream)?;
-        let mut server = EncodedConnection::new(&mut owned_stream, SocketIntent::GreetToBackend);
-
-        timeout(Duration::from_secs(1), server.send(&handshake.as_packet())).await??;
-
-        // Forward query request
         let req = self
             .threat
             .nuisance(client.recv::<QueryRequestC2s>(), INTENT)
@@ -356,17 +462,15 @@ impl Lure {
                 self.metrics
                     .failures
                     .add(1, &[KeyValue::new("state", "status")]);
+                let placeholder = self.placeholder_status_json("SERVER_OFFLINE");
                 client
-                    .send(&QueryResponseS2c {
-                        json: &self.create_placeholder_ping("SERVER_OFFLINE")?,
-                    })
+                    .send(&QueryResponseS2c { json: &placeholder })
                     .await?;
                 return Ok(());
             }
         };
         client.send(&response).await?;
 
-        // Forward ping
         let ping = self
             .threat
             .nuisance(client.recv::<QueryPingC2s>(), INTENT)
@@ -392,12 +496,29 @@ impl Lure {
         &self,
         mut client: EncodedConnection<'a>,
         handshake: &OwnedHandshake,
+        resolved: Option<ResolvedRoute>,
     ) -> anyhow::Result<()> {
         let address = *client.as_inner().addr();
+        let hostname = handshake.display_host();
+
+        let Some(resolved) = resolved else {
+            self.metrics
+                .failures
+                .add(1, &[KeyValue::new("state", "login")]);
+            let display = format!("Route not found for {hostname}");
+            let log_reason = format!("route '{hostname}' not found");
+            if let Err(err) = self
+                .disconnect_with_log(&mut client, address, display, log_reason)
+                .await
+            {
+                debug!("Failed to send disconnect to {address}: {err}");
+            }
+            return Ok(());
+        };
+
         let session_result = timeout(
             Duration::from_secs(1),
-            self.router
-                .create_session(&handshake.server_address, address),
+            self.router.create_session_with_resolved(&resolved, address),
         )
         .await;
 
@@ -418,22 +539,32 @@ impl Lure {
                 }
             }
             Ok(Err(e)) => {
-                debug!("Failed to create session: {}", e);
+                debug!("Failed to create session for {address} (host '{hostname}'): {e}");
                 self.metrics
                     .failures
                     .add(1, &[KeyValue::new("state", "login")]);
-                let _ = client
-                    .disconnect_player("Failed to create session".into_text().color(Color::RED))
-                    .await;
+                let display = format!("Failed to create session for {hostname}");
+                let log_reason = format!("session creation failed for host '{hostname}': {e}");
+                if let Err(err) = self
+                    .disconnect_with_log(&mut client, address, display, log_reason)
+                    .await
+                {
+                    debug!("Failed to send disconnect to {address}: {err}");
+                }
             }
             Err(_) => {
-                debug!("Session creation timed out for {}", address);
+                debug!("Session creation timed out for {address} (host '{hostname}')");
                 self.metrics
                     .failures
                     .add(1, &[KeyValue::new("state", "login")]);
-                let _ = client
-                    .disconnect_player("Session creation timed out".into_text().color(Color::RED))
-                    .await;
+                let display = format!("Session creation timed out for {hostname}");
+                let log_reason = format!("session creation timed out for host '{hostname}'");
+                if let Err(err) = self
+                    .disconnect_with_log(&mut client, address, display, log_reason)
+                    .await
+                {
+                    debug!("Failed to send disconnect to {address}: {err}");
+                }
             }
         }
         Ok(())
@@ -448,53 +579,69 @@ impl Lure {
         session: &Session,
     ) -> anyhow::Result<()> {
         let server_address = session.destination_addr;
-        let connect_result =
-            timeout(Duration::from_secs(3), TcpStream::connect(server_address)).await;
+        let client_addr = *client.as_inner().addr();
+        let hostname = handshake.display_host();
 
-        async fn handle_err(
-            mut client: EncodedConnection<'_>,
-            err: ReportableError,
-        ) -> anyhow::Result<()> {
-            // let re = ;
-            let error = format!("Gateway error:\n\n{}", err.to_string());
-            client
-                .disconnect_player(error.clone().into_text().color(Color::RED))
-                .await?;
-            bail!(err);
-        }
-
-        let server_stream: TcpStream = match connect_result {
-            Ok(Ok(stream)) => stream,
-            Ok(Err(err)) => {
-                let err = ReportableError::from(err);
-                handle_err(client, err).await?;
-                return Ok(());
-            }
+        let mut owned_stream = match self.open_backend_connection(server_address).await {
+            Ok(stream) => stream,
             Err(err) => {
                 let err = ReportableError::from(err);
-                handle_err(client, err).await?;
-                return Ok(());
+                self.disconnect_with_error(
+                    &mut client,
+                    client_addr,
+                    &err,
+                    format!("backend connection to {server_address} for host '{hostname}'"),
+                )
+                .await?;
+                return Err(err.into());
             }
         };
+        let mut server = EncodedConnection::new(&mut owned_stream, SocketIntent::GreetToBackend);
+
+        if let Err(err) = self
+            .initialize_backend_protocol(&mut server, handshake_option, client_addr, handshake)
+            .await
+        {
+            let err = ReportableError::from(err);
+            self.disconnect_with_error(
+                &mut client,
+                client_addr,
+                &err,
+                format!("backend handshake to {server_address} for host '{hostname}'"),
+            )
+            .await?;
+            return Err(err.into());
+        }
+
+        self.passthrough_now(&mut client, &mut server).await?;
+        Ok(())
+    }
+
+    async fn open_backend_connection(&self, address: SocketAddr) -> anyhow::Result<Connection> {
+        let stream = timeout(Duration::from_secs(3), TcpStream::connect(address)).await??;
 
         if dotenvy::var("NO_NODELAY").is_err() {
-            if let Err(e) = server_stream.set_nodelay(true) {
+            if let Err(e) = stream.set_nodelay(true) {
                 error!("Failed to set TCP_NODELAY: {e}");
             }
         }
 
-        let mut owned_stream = Connection::try_from(server_stream)?;
-        let mut server = EncodedConnection::new(&mut owned_stream, SocketIntent::GreetToBackend);
+        Connection::try_from(stream)
+    }
 
-        // Replay necessary packets
+    async fn initialize_backend_protocol(
+        &self,
+        server: &mut EncodedConnection<'_>,
+        handshake_option: &HandshakeOption,
+        client_addr: SocketAddr,
+        handshake: &OwnedHandshake,
+    ) -> anyhow::Result<()> {
         if let HandshakeOption::HAProxy = handshake_option {
-            let pkt = create_proxy_protocol_header(*client.as_inner().addr())?;
+            let pkt = create_proxy_protocol_header(client_addr)?;
             timeout(Duration::from_secs(1), server.send_raw(&pkt)).await??;
         }
 
         timeout(Duration::from_secs(1), server.send(&handshake.as_packet())).await??;
-
-        self.passthrough_now(&mut client, &mut server).await?;
         Ok(())
     }
 

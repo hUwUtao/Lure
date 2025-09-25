@@ -1,7 +1,4 @@
-use std::{
-    net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
-    sync::Arc,
-};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 use bytes::BytesMut;
 use proxy_protocol::{
@@ -12,11 +9,12 @@ use valence_protocol::{
     packets::{
         handshaking::{handshake_c2s::HandshakeNextState, HandshakeC2s},
         login::LoginHelloC2s,
-        status::QueryResponseS2c,
     },
     uuid::Uuid,
     Bounded, Decode, Encode, Packet, VarInt,
 };
+
+use crate::utils::sanitize_hostname;
 
 pub trait OwnedPacket<'a, P: Packet + Decode<'a> + Encode> {
     fn from_packet(packet: P) -> Self;
@@ -30,15 +28,18 @@ pub struct OwnedHandshake {
     pub server_address: String,
     pub server_port: u16,
     pub next_state: HandshakeNextState,
+    display_host: String,
 }
 
 impl<'a> OwnedPacket<'a, HandshakeC2s<'a>> for OwnedHandshake {
     fn from_packet(hs: HandshakeC2s<'a>) -> Self {
+        let virtual_host = hs.server_address.0.split('\0').next().unwrap_or("");
         Self {
             protocol_version: hs.protocol_version,
             server_address: hs.server_address.0.to_string(),
             server_port: hs.server_port,
             next_state: hs.next_state,
+            display_host: sanitize_hostname(virtual_host),
         }
     }
     fn as_packet(&'a self) -> HandshakeC2s<'a> {
@@ -51,26 +52,13 @@ impl<'a> OwnedPacket<'a, HandshakeC2s<'a>> for OwnedHandshake {
     }
 }
 
-#[derive(Debug, Clone)]
-/// Owned `QueryResponseS2C`
-pub struct OwnedQueryResponse {
-    pub json: Arc<str>,
-}
-
-impl OwnedQueryResponse {
-    pub(crate) fn new(json: &str) -> Self {
-        Self { json: json.into() }
+impl OwnedHandshake {
+    pub fn virtual_host(&self) -> &str {
+        self.server_address.split('\0').next().unwrap_or("")
     }
-}
 
-impl<'a> OwnedPacket<'a, QueryResponseS2c<'a>> for OwnedQueryResponse {
-    fn from_packet(response: QueryResponseS2c) -> Self {
-        Self {
-            json: Arc::from(response.json),
-        }
-    }
-    fn as_packet(&'a self) -> QueryResponseS2c<'a> {
-        QueryResponseS2c { json: &self.json }
+    pub fn display_host(&self) -> &str {
+        &self.display_host
     }
 }
 
@@ -114,5 +102,3 @@ pub fn create_proxy_protocol_header(socket: SocketAddr) -> anyhow::Result<BytesM
     };
     Ok(proxy_protocol::encode(proxy_header)?)
 }
-
-pub const NULL_SOCKET: SocketAddr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0));
