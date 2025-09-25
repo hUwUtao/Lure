@@ -38,7 +38,9 @@ use crate::{
     packet::{create_proxy_protocol_header, OwnedHandshake, OwnedPacket},
     router::{HandshakeOption, ResolvedRoute, RouterInstance, Session},
     telemetry::{event::EventHook, get_meter, init_event, EventEnvelope, EventServiceInstance},
-    threat::{ratelimit::RateLimiterController, ClientIntent, IntentTag, ThreatControlService},
+    threat::{
+        ratelimit::RateLimiterController, ClientFail, ClientIntent, IntentTag, ThreatControlService,
+    },
     utils::{leak, placeholder_status_response, Connection, OwnedStatic},
 };
 
@@ -274,6 +276,46 @@ impl Lure {
         placeholder_status_response(brand.as_ref(), target_label.as_ref())
     }
 
+    async fn consume_status_request<'a>(
+        &self,
+        client: &mut EncodedConnection<'a>,
+    ) -> anyhow::Result<Option<QueryPingC2s>> {
+        self.threat
+            .nuisance(
+                client.recv::<QueryRequestC2s>(),
+                ClientIntent {
+                    tag: IntentTag::Query,
+                    duration: Duration::from_secs(1),
+                },
+            )
+            .await??;
+
+        match self
+            .threat
+            .nuisance(
+                client.recv::<QueryPingC2s>(),
+                ClientIntent {
+                    tag: IntentTag::Query,
+                    duration: Duration::from_secs(1),
+                },
+            )
+            .await
+        {
+            Ok(Ok(ping)) => Ok(Some(ping)),
+            Ok(Err(err)) => Err(err),
+            Err(err) => {
+                if matches!(
+                    err.downcast_ref::<ClientFail>(),
+                    Some(ClientFail::Timeout { .. })
+                ) {
+                    Ok(None)
+                } else {
+                    Err(err)
+                }
+            }
+        }
+    }
+
     async fn disconnect_with_log<S, L>(
         &self,
         client: &mut EncodedConnection<'_>,
@@ -318,7 +360,22 @@ impl Lure {
             tag: IntentTag::Query,
             duration: Duration::from_secs(1),
         };
+        let client_addr = *client.as_inner().addr();
         let Some(resolved) = resolved else {
+            let ping = match self.consume_status_request(&mut client).await {
+                Ok(ping) => ping,
+                Err(err) => {
+                    debug!("Failed to receive status request from {client_addr}: {err}");
+                    return Err(err);
+                }
+            };
+            if let Some(ping) = ping {
+                client
+                    .send(&QueryPongS2c {
+                        payload: ping.payload,
+                    })
+                    .await?;
+            }
             self.metrics
                 .failures
                 .add(1, &[KeyValue::new("state", "status")]);
@@ -332,6 +389,20 @@ impl Lure {
         let mut backend = match self.open_backend_connection(resolved.endpoint).await {
             Ok(connection) => connection,
             Err(_) => {
+                let ping = match self.consume_status_request(&mut client).await {
+                    Ok(ping) => ping,
+                    Err(err) => {
+                        debug!("Failed to receive status request from {client_addr}: {err}");
+                        return Err(err);
+                    }
+                };
+                if let Some(ping) = ping {
+                    client
+                        .send(&QueryPongS2c {
+                            payload: ping.payload,
+                        })
+                        .await?;
+                }
                 self.metrics
                     .failures
                     .add(1, &[KeyValue::new("state", "status")]);
@@ -355,6 +426,20 @@ impl Lure {
             )
             .await
         {
+            let ping = match self.consume_status_request(&mut client).await {
+                Ok(ping) => ping,
+                Err(err) => {
+                    debug!("Failed to receive status request from {client_addr}: {err}");
+                    return Err(err);
+                }
+            };
+            if let Some(ping) = ping {
+                client
+                    .send(&QueryPongS2c {
+                        payload: ping.payload,
+                    })
+                    .await?;
+            }
             self.metrics
                 .failures
                 .add(1, &[KeyValue::new("state", "status")]);
