@@ -1,5 +1,3 @@
-pub(crate) mod status;
-
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
@@ -84,6 +82,12 @@ impl Drop for SessionHandle {
             let _ = router.terminate_session(&addr).await;
         });
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedRoute {
+    pub endpoint: SocketAddr,
+    pub route: Arc<Route>,
 }
 
 #[derive(Debug)]
@@ -259,7 +263,7 @@ impl RouterInstance {
     }
 
     /// Resolve hostname to endpoint and route pair
-    pub async fn resolve(&self, hostname: &str) -> Option<(SocketAddr, Arc<Route>)> {
+    pub async fn resolve(&self, hostname: &str) -> Option<ResolvedRoute> {
         self.metrics.routes_resolve.add(1, &[]);
         // Try exact match first using domain index
         if let Some(route_ids) = {
@@ -270,15 +274,19 @@ impl RouterInstance {
             let best_route = route_ids
                 .iter()
                 .find_map(|&id| routes.get(&id))
-                .filter(|route| !route.disabled)?;
+                .filter(|route| !route.disabled)?
+                .clone();
 
             let endpoint = *best_route.endpoints.first()?;
-            return Some((endpoint, best_route.clone()));
+            return Some(ResolvedRoute {
+                endpoint,
+                route: best_route,
+            });
         }
 
         // Fallback to wildcard matchers
         let routes = self.active_routes.read().await;
-        let mut best: Option<(SocketAddr, Arc<Route>)> = None;
+        let mut best: Option<ResolvedRoute> = None;
 
         for route in routes.values() {
             if route.disabled {
@@ -292,8 +300,13 @@ impl RouterInstance {
                     }
 
                     match &best {
-                        Some((_, existing)) if existing.priority >= route.priority => {}
-                        _ => best = Some((endpoint, route.clone())),
+                        Some(existing) if existing.route.priority >= route.priority => {}
+                        _ => {
+                            best = Some(ResolvedRoute {
+                                endpoint,
+                                route: route.clone(),
+                            })
+                        }
                     }
                     break;
                 }
@@ -326,22 +339,16 @@ impl RouterInstance {
         }
     }
 
-    /// Create a new session with optimized route lookup
-    pub async fn create_session(
+    pub async fn create_session_with_resolved(
         &'static self,
-        hostname: &str,
+        resolved: &ResolvedRoute,
         client_addr: SocketAddr,
     ) -> anyhow::Result<(SessionHandle, Arc<Route>)> {
         self.metrics.session_create.add(1, &[]);
-        let (destination_addr, route) = self
-            .resolve(hostname)
-            .await
-            .ok_or(anyhow::anyhow!("Resolve failed"))?;
-
         let session = Arc::new(Session {
             client_addr,
-            destination_addr,
-            route_id: route.id,
+            destination_addr: resolved.endpoint,
+            route_id: resolved.route.id,
         });
 
         // Store session
@@ -354,7 +361,22 @@ impl RouterInstance {
         self.metrics
             .sessions_active
             .record(self.session_count().await? as u64, &[]);
-        Ok((SessionHandle::new(self, session), route))
+        Ok((SessionHandle::new(self, session), resolved.route.clone()))
+    }
+
+    /// Create a new session with optimized route lookup
+    pub async fn create_session(
+        &'static self,
+        hostname: &str,
+        client_addr: SocketAddr,
+    ) -> anyhow::Result<(SessionHandle, Arc<Route>)> {
+        let resolved = self
+            .resolve(hostname)
+            .await
+            .ok_or(anyhow::anyhow!("Resolve failed"))?;
+
+        self.create_session_with_resolved(&resolved, client_addr)
+            .await
     }
 
     /// Terminate a session
@@ -466,6 +488,6 @@ mod tests {
         };
         router.apply_route(route).await;
         let resolved = router.resolve("10241.abc.xyz.com").await.unwrap();
-        assert_eq!(resolved.0, "123.245.122.21:10241".parse().unwrap());
+        assert_eq!(resolved.endpoint, "123.245.122.21:10241".parse().unwrap());
     }
 }

@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use serde_json::json;
 use tokio::net::TcpStream;
 
 use crate::telemetry::{event::EventHook, EventEnvelope, EventServiceInstance};
@@ -39,6 +40,34 @@ impl<H: EventHook<EventEnvelope, EventEnvelope> + Send + Sync>
 
 pub fn leak<T>(inner: T) -> &'static T {
     Box::leak(Box::new(inner))
+}
+
+pub fn placeholder_status_response(brand: &str, message: &str) -> String {
+    json!({
+        "version": {
+            "name": brand,
+            "protocol": -1
+        },
+        "description": {
+            "text": message
+        }
+    })
+    .to_string()
+}
+
+pub fn sanitize_hostname(input: &str) -> String {
+    const FALLBACK: &str = "unknown-host";
+    let sanitized: String = input
+        .chars()
+        .filter(|c| c.is_ascii() && !c.is_ascii_control())
+        .take(255)
+        .collect();
+    let sanitized = sanitized.trim().to_owned();
+    if sanitized.is_empty() {
+        FALLBACK.to_owned()
+    } else {
+        sanitized
+    }
 }
 
 pub struct Connection {
