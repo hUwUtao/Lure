@@ -4,37 +4,33 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::bail;
+use anyhow::{bail, ensure};
 use async_trait::async_trait;
-use bytes::BytesMut;
 use futures::FutureExt;
-use log::{debug, error, info, warn};
-use opentelemetry::{
-    metrics::{Counter, Histogram, Meter},
-    KeyValue,
-};
+use log::{debug, info};
+use opentelemetry::KeyValue;
 use serde::{Deserialize, Serialize};
-use thiserror::__private::AsDynError;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::{broadcast, Semaphore},
-    task::yield_now,
-    time::timeout,
+    time::{error::Elapsed, timeout},
 };
 use valence_protocol::{
     packets::{
         handshaking::{handshake_c2s::HandshakeNextState, HandshakeC2s},
         status::{QueryPingC2s, QueryPongS2c, QueryRequestC2s, QueryResponseS2c},
     },
-    PacketDecoder,
+    var_int::{VarInt, VarIntDecodeError},
+    Decode, Packet,
 };
-use valence_text::{Color, IntoText};
 
 use crate::{
     config::LureConfig,
     connection::{EncodedConnection, SocketIntent},
-    error::ReportableError,
+    error::{ErrorResponder, ReportableError},
+    logging::LureLogger,
+    metrics::HandshakeMetrics,
     packet::{create_proxy_protocol_header, OwnedHandshake, OwnedPacket},
     router::{HandshakeOption, ResolvedRoute, RouterInstance, Session},
     telemetry::{event::EventHook, get_meter, init_event, EventEnvelope, EventServiceInstance},
@@ -43,28 +39,12 @@ use crate::{
     },
     utils::{leak, placeholder_status_response, Connection, OwnedStatic},
 };
-
-struct HandshakeMetrics {
-    attempts: Counter<u64>,
-    failures: Counter<u64>,
-    duration: Histogram<u64>,
-}
-
-impl HandshakeMetrics {
-    fn new(meter: &Meter) -> Self {
-        Self {
-            attempts: meter.u64_counter("lure_handshake_total").build(),
-            failures: meter.u64_counter("lure_handshake_fail_total").build(),
-            duration: meter.u64_histogram("lure_handshake_time_ms").build(),
-        }
-    }
-}
-
 pub struct Lure {
     config: LureConfig,
     router: &'static RouterInstance,
     threat: &'static ThreatControlService,
     metrics: HandshakeMetrics,
+    errors: ErrorResponder,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -102,34 +82,14 @@ impl Lure {
             router,
             threat: leak(ThreatControlService::new()),
             metrics: HandshakeMetrics::new(&get_meter()),
-        }
-    }
-
-    async fn peek_handshake(stream: &tokio::net::TcpStream) -> anyhow::Result<OwnedHandshake> {
-        let mut buf = [0u8; 1024];
-        let mut decoder = PacketDecoder::new();
-        let mut filled = 0;
-        loop {
-            let n = stream.peek(&mut buf).await?;
-            if n > filled {
-                decoder.queue_bytes(BytesMut::from(&buf[filled..n]));
-                filled = n;
-            }
-            if let Some(frame) = decoder.try_next_packet()? {
-                let hs: HandshakeC2s = frame.decode()?;
-                return Ok(OwnedHandshake::from_packet(hs));
-            }
-            if n == buf.len() {
-                bail!("handshake too large");
-            }
-            yield_now().await;
+            errors: ErrorResponder::new(),
         }
     }
 
     pub async fn start(&'static self) -> anyhow::Result<()> {
         // Listener config.
         let listener_cfg = self.config.bind.to_owned();
-        info!("Preparing socket {}", listener_cfg);
+        LureLogger::preparing_socket(&listener_cfg);
         let address: SocketAddr = listener_cfg.parse()?;
         let max_connections = self.config.semaphore.acceptable as usize;
 
@@ -161,7 +121,7 @@ impl Lure {
             if let crate::threat::ratelimit::RateLimitResult::Disallowed { retry_after: _ra } =
                 rate_limiter.check(&ip)
             {
-                debug!("Rate-limited {ip}");
+                LureLogger::rate_limited(&ip);
                 drop(client);
                 continue;
             }
@@ -171,7 +131,7 @@ impl Lure {
                 Ok(permit) => {
                     if dotenvy::var("NO_NODELAY").is_err() {
                         if let Err(e) = client.as_ref().set_nodelay(true) {
-                            error!("Failed to set TCP_NODELAY: {e}");
+                            LureLogger::tcp_nodelay_failed(&e);
                         }
                     }
 
@@ -179,7 +139,7 @@ impl Lure {
                     tokio::spawn(async move {
                         // Apply timeout to connection handling
                         if let Err(e) = lure.handle_connection(client, addr).await {
-                            debug!("Connection {addr} closed: {e}")
+                            LureLogger::connection_closed(&addr, &e);
                         }
                         drop(permit);
                     });
@@ -191,24 +151,13 @@ impl Lure {
             }
         }
     }
-    fn connection_error_log<T>(client: &SocketAddr, server: Option<&SocketAddr>, err: &T)
-    where
-        T: std::error::Error,
-    {
-        if dotenvy::var("DO_NOT_LOG_CONNECTION_ERROR").is_ok() {
-            return;
-        }
-        let server_str = server.map(|s| format!(" -> {s}")).unwrap_or_default();
-        error!("connection error@{client}{server_str}: {}", err);
-    }
 
     pub async fn handle_connection(
         &self,
         client_socket: Connection,
         address: SocketAddr,
     ) -> anyhow::Result<()> {
-        // Client state
-        info!("New connection {}", address);
+        LureLogger::new_connection(&address);
 
         self.handle_handshake(client_socket).await?;
         Ok(())
@@ -216,35 +165,48 @@ impl Lure {
 
     pub async fn handle_handshake(&self, mut connection: Connection) -> anyhow::Result<()> {
         let start = Instant::now();
-        let hs = timeout(
-            Duration::from_secs(5),
-            Self::peek_handshake(connection.as_ref()),
-        )
-        .await??;
+        let client_addr = *connection.addr();
+        const HANDSHAKE_INTENT: ClientIntent = ClientIntent {
+            tag: IntentTag::Handshake,
+            duration: Duration::from_secs(5),
+        };
+        let hs = match self
+            .threat
+            .nuisance(
+                async { Self::read_owned_handshake(connection.as_mut()).await },
+                HANDSHAKE_INTENT,
+            )
+            .await
+        {
+            Ok(Ok(hs)) => hs,
+            Ok(Err(err)) => {
+                LureLogger::parser_failure(&client_addr, "client handshake", &err);
+                return Err(err);
+            }
+            Err(err) => {
+                if let Some(ClientFail::Timeout { intent, .. }) = err.downcast_ref::<ClientFail>() {
+                    LureLogger::deadline_missed(
+                        "client handshake",
+                        intent.duration,
+                        Some(&client_addr),
+                        None,
+                    );
+                } else {
+                    LureLogger::parser_failure(&client_addr, "client handshake", &err);
+                }
+                return Err(err);
+            }
+        };
         let state_attr = match hs.next_state {
             HandshakeNextState::Status => "status",
             HandshakeNextState::Login => "login",
         };
-        self.metrics
-            .attempts
-            .add(1, &[KeyValue::new("state", state_attr)]);
+        self.metrics.record_attempt(state_attr);
 
-        let mut handler = EncodedConnection::new(&mut connection, SocketIntent::GreetToProxy);
-        const INTENT: ClientIntent = ClientIntent {
-            tag: IntentTag::Handshake,
-            duration: Duration::from_secs(60),
-        };
-        // Consume the handshake packet from the client stream.
-        let _ = self
-            .threat
-            .nuisance(handler.recv::<HandshakeC2s>(), INTENT)
-            .await??;
-
+        let handler = EncodedConnection::new(&mut connection, SocketIntent::GreetToProxy);
         let elapsed_ms = start.elapsed().as_millis() as u64;
-        debug!("Handshake completed in {}ms", elapsed_ms);
-        self.metrics
-            .duration
-            .record(elapsed_ms, &[KeyValue::new("state", state_attr)]);
+        LureLogger::handshake_completed(elapsed_ms, state_attr);
+        self.metrics.record_duration(elapsed_ms, state_attr);
 
         let resolved = match timeout(
             Duration::from_secs(1),
@@ -253,13 +215,59 @@ impl Lure {
         .await
         {
             Ok(resolved) => resolved,
-            Err(_) => None,
+            Err(_) => {
+                LureLogger::deadline_missed(
+                    "router.resolve",
+                    Duration::from_secs(1),
+                    Some(&client_addr),
+                    Some(hs.server_address.as_str()),
+                );
+                None
+            }
         };
 
         match hs.next_state {
-            HandshakeNextState::Status => self.proxy_status(handler, &hs, resolved).await,
+            HandshakeNextState::Status => self.handle_status(handler, &hs, resolved).await,
             HandshakeNextState::Login => self.handle_proxy(handler, &hs, resolved).await,
         }
+    }
+
+    async fn read_owned_handshake(stream: &mut TcpStream) -> anyhow::Result<OwnedHandshake> {
+        let mut len_buf = [0u8; 5];
+        let mut len_len = 0usize;
+
+        let packet_len = loop {
+            stream
+                .read_exact(&mut len_buf[len_len..len_len + 1])
+                .await?;
+            len_len += 1;
+            let mut slice = &len_buf[..len_len];
+            match VarInt::decode_partial(&mut slice) {
+                Ok(len) => {
+                    ensure!(len >= 0, "negative handshake length");
+                    break len as usize;
+                }
+                Err(VarIntDecodeError::Incomplete) => {
+                    ensure!(len_len < len_buf.len(), "handshake length varint too long");
+                }
+                Err(VarIntDecodeError::TooLarge) => {
+                    bail!("handshake length varint too large");
+                }
+            }
+        };
+
+        let mut packet_buf = vec![0u8; packet_len];
+        stream.read_exact(&mut packet_buf).await?;
+
+        let mut body = &packet_buf[..];
+        let packet_id = VarInt::decode(&mut body)?.0;
+        ensure!(
+            packet_id == HandshakeC2s::ID,
+            "unexpected packet id {packet_id} for handshake"
+        );
+
+        let handshake_packet = HandshakeC2s::decode(&mut body)?;
+        Ok(OwnedHandshake::from_packet(handshake_packet))
     }
 
     fn get_string(&self, key: &str) -> Box<str> {
@@ -276,81 +284,19 @@ impl Lure {
         placeholder_status_response(brand.as_ref(), target_label.as_ref())
     }
 
-    async fn consume_status_request<'a>(
-        &self,
-        client: &mut EncodedConnection<'a>,
-    ) -> anyhow::Result<Option<QueryPingC2s>> {
-        self.threat
-            .nuisance(
-                client.recv::<QueryRequestC2s>(),
-                ClientIntent {
-                    tag: IntentTag::Query,
-                    duration: Duration::from_secs(1),
-                },
-            )
-            .await??;
-
-        match self
-            .threat
-            .nuisance(
-                client.recv::<QueryPingC2s>(),
-                ClientIntent {
-                    tag: IntentTag::Query,
-                    duration: Duration::from_secs(1),
-                },
-            )
-            .await
-        {
-            Ok(Ok(ping)) => Ok(Some(ping)),
-            Ok(Err(err)) => Err(err),
-            Err(err) => {
-                if matches!(
-                    err.downcast_ref::<ClientFail>(),
-                    Some(ClientFail::Timeout { .. })
-                ) {
-                    Ok(None)
-                } else {
-                    Err(err)
-                }
-            }
-        }
-    }
-
-    async fn disconnect_with_log<S, L>(
+    async fn send_status_failure(
         &self,
         client: &mut EncodedConnection<'_>,
-        addr: SocketAddr,
-        public_reason: S,
-        log_reason: L,
-    ) -> anyhow::Result<()>
-    where
-        S: Into<String>,
-        L: Into<String>,
-    {
-        let public_reason = public_reason.into();
-        let log_reason = log_reason.into();
-        warn!("Disconnecting client {addr}: {log_reason}");
-        client
-            .disconnect_player(public_reason.into_text().color(Color::RED))
-            .await
-    }
-
-    async fn disconnect_with_error(
-        &self,
-        client: &mut EncodedConnection<'_>,
-        addr: SocketAddr,
-        err: &ReportableError,
-        context: impl Into<String>,
+        label: &str,
     ) -> anyhow::Result<()> {
-        let context = context.into();
-        let err_msg = err.to_string();
-        let public_reason = format!("Gateway error:\n\n{}", err_msg);
-        let log_reason = format!("{}: {}", context, err_msg);
-        self.disconnect_with_log(client, addr, public_reason, log_reason)
-            .await
+        let placeholder = self.placeholder_status_json(label);
+        client
+            .send(&QueryResponseS2c { json: &placeholder })
+            .await?;
+        Ok(())
     }
 
-    pub async fn proxy_status(
+    pub async fn handle_status(
         &self,
         mut client: EncodedConnection<'_>,
         handshake: &OwnedHandshake,
@@ -362,62 +308,38 @@ impl Lure {
         };
         let client_addr = *client.as_inner().addr();
         let Some(resolved) = resolved else {
-            let ping = match self.consume_status_request(&mut client).await {
-                Ok(ping) => ping,
-                Err(err) => {
-                    debug!("Failed to receive status request from {client_addr}: {err}");
-                    return Err(err);
-                }
-            };
-            if let Some(ping) = ping {
-                client
-                    .send(&QueryPongS2c {
-                        payload: ping.payload,
-                    })
-                    .await?;
-            }
-            self.metrics
-                .failures
-                .add(1, &[KeyValue::new("state", "status")]);
-            let placeholder = self.placeholder_status_json("ROUTE_NOT_FOUND");
-            client
-                .send(&QueryResponseS2c { json: &placeholder })
+            self.metrics.record_failure("status");
+            self.send_status_failure(&mut client, "ROUTE_NOT_FOUND")
                 .await?;
             return Ok(());
         };
 
-        let mut backend = match self.open_backend_connection(resolved.endpoint).await {
+        let backend_addr = resolved.endpoint;
+        let backend_label = backend_addr.to_string();
+
+        let mut backend = match self.open_backend_connection(backend_addr).await {
             Ok(connection) => connection,
-            Err(_) => {
-                let ping = match self.consume_status_request(&mut client).await {
-                    Ok(ping) => ping,
-                    Err(err) => {
-                        debug!("Failed to receive status request from {client_addr}: {err}");
-                        return Err(err);
-                    }
-                };
-                if let Some(ping) = ping {
-                    client
-                        .send(&QueryPongS2c {
-                            payload: ping.payload,
-                        })
-                        .await?;
+            Err(err) => {
+                if err.downcast_ref::<Elapsed>().is_some() {
+                    LureLogger::deadline_missed(
+                        "backend connect",
+                        Duration::from_secs(3),
+                        Some(&client_addr),
+                        Some(&backend_label),
+                    );
+                } else {
+                    LureLogger::backend_failure(Some(&client_addr), backend_addr, "connect", &err);
                 }
-                self.metrics
-                    .failures
-                    .add(1, &[KeyValue::new("state", "status")]);
-                let placeholder = self.placeholder_status_json("SERVER_OFFLINE");
-                client
-                    .send(&QueryResponseS2c { json: &placeholder })
+                self.metrics.record_failure("status");
+                self.send_status_failure(&mut client, "SERVER_OFFLINE")
                     .await?;
                 return Ok(());
             }
         };
 
-        let client_addr = *client.as_inner().addr();
         let mut server = EncodedConnection::new(&mut backend, SocketIntent::GreetToBackend);
 
-        if let Err(_) = self
+        if let Err(err) = self
             .initialize_backend_protocol(
                 &mut server,
                 &resolved.route.handshake,
@@ -426,62 +348,91 @@ impl Lure {
             )
             .await
         {
-            let ping = match self.consume_status_request(&mut client).await {
-                Ok(ping) => ping,
-                Err(err) => {
-                    debug!("Failed to receive status request from {client_addr}: {err}");
-                    return Err(err);
-                }
-            };
-            if let Some(ping) = ping {
-                client
-                    .send(&QueryPongS2c {
-                        payload: ping.payload,
-                    })
-                    .await?;
+            if err.downcast_ref::<Elapsed>().is_some() {
+                LureLogger::deadline_missed(
+                    "backend handshake",
+                    Duration::from_secs(1),
+                    Some(&client_addr),
+                    Some(&backend_label),
+                );
+            } else {
+                LureLogger::backend_failure(Some(&client_addr), backend_addr, "handshake", &err);
             }
-            self.metrics
-                .failures
-                .add(1, &[KeyValue::new("state", "status")]);
-            let placeholder = self.placeholder_status_json("SERVER_OFFLINE");
-            client
-                .send(&QueryResponseS2c { json: &placeholder })
+            self.metrics.record_failure("status");
+            self.send_status_failure(&mut client, "SERVER_OFFLINE")
                 .await?;
             return Ok(());
         }
 
-        let req = self
+        let req = match self
             .threat
             .nuisance(client.recv::<QueryRequestC2s>(), INTENT)
-            .await??;
+            .await
+        {
+            Ok(Ok(packet)) => packet,
+            Ok(Err(err)) => {
+                LureLogger::parser_failure(&client_addr, "client status query request", &err);
+                return Err(err);
+            }
+            Err(err) => {
+                if let Some(ClientFail::Timeout { intent, .. }) = err.downcast_ref::<ClientFail>() {
+                    LureLogger::deadline_missed(
+                        "client status query request",
+                        intent.duration,
+                        Some(&client_addr),
+                        None,
+                    );
+                } else {
+                    LureLogger::parser_failure(&client_addr, "client status query request", &err);
+                }
+                return Err(err);
+            }
+        };
+
         server.send(&req).await?;
 
         let response = match server.recv::<QueryResponseS2c>().await {
             Ok(r) => r,
-            Err(_) => {
-                self.metrics
-                    .failures
-                    .add(1, &[KeyValue::new("state", "status")]);
-                let placeholder = self.placeholder_status_json("SERVER_OFFLINE");
-                client
-                    .send(&QueryResponseS2c { json: &placeholder })
+            Err(err) => {
+                LureLogger::parser_failure(&client_addr, "backend status response", &err);
+                self.metrics.record_failure("status");
+                self.send_status_failure(&mut client, "SERVER_OFFLINE")
                     .await?;
                 return Ok(());
             }
         };
         client.send(&response).await?;
 
-        let ping = self
+        let ping = match self
             .threat
             .nuisance(client.recv::<QueryPingC2s>(), INTENT)
-            .await??;
+            .await
+        {
+            Ok(Ok(packet)) => packet,
+            Ok(Err(err)) => {
+                LureLogger::parser_failure(&client_addr, "client status ping", &err);
+                return Err(err);
+            }
+            Err(err) => {
+                if let Some(ClientFail::Timeout { intent, .. }) = err.downcast_ref::<ClientFail>() {
+                    LureLogger::deadline_missed(
+                        "client status ping",
+                        intent.duration,
+                        Some(&client_addr),
+                        None,
+                    );
+                } else {
+                    LureLogger::parser_failure(&client_addr, "client status ping", &err);
+                }
+                return Err(err);
+            }
+        };
         server.send(&ping).await?;
         match server.recv::<QueryPongS2c>().await {
             Ok(pong) => client.send(&pong).await?,
-            Err(_) => {
-                self.metrics
-                    .failures
-                    .add(1, &[KeyValue::new("state", "status")]);
+            Err(err) => {
+                LureLogger::parser_failure(&client_addr, "backend status pong", &err);
+                self.metrics.record_failure("status");
                 client
                     .send(&QueryPongS2c {
                         payload: ping.payload,
@@ -502,16 +453,15 @@ impl Lure {
         let hostname = handshake.server_address.as_str();
 
         let Some(resolved) = resolved else {
-            self.metrics
-                .failures
-                .add(1, &[KeyValue::new("state", "login")]);
+            self.metrics.record_failure("login");
             let display = format!("Route not found for {hostname}");
             let log_reason = format!("route '{hostname}' not found");
             if let Err(err) = self
+                .errors
                 .disconnect_with_log(&mut client, address, display, log_reason)
                 .await
             {
-                debug!("Failed to send disconnect to {address}: {err}");
+                LureLogger::disconnect_failure(&address, &err);
             }
             return Ok(());
         };
@@ -526,44 +476,43 @@ impl Lure {
             Ok(Ok((session, route))) => {
                 let server_address = session.destination_addr;
                 if let Err(e) = self
-                    .handle_proxy_session(
-                        client,
-                        handshake, // &login,
-                        &route.handshake,
-                        &session,
-                    )
+                    .handle_proxy_session(client, handshake, &route.handshake, &session)
                     .await
                 {
                     let re = ReportableError::from(e);
-                    Self::connection_error_log(&address, Some(&server_address), &re);
+                    LureLogger::connection_error(&address, Some(&server_address), &re);
                 }
             }
             Ok(Err(e)) => {
-                debug!("Failed to create session for {address} (host '{hostname}'): {e}");
-                self.metrics
-                    .failures
-                    .add(1, &[KeyValue::new("state", "login")]);
+                LureLogger::session_creation_failed(&address, hostname, &e);
+                self.metrics.record_failure("login");
                 let display = format!("Failed to create session for {hostname}");
                 let log_reason = format!("session creation failed for host '{hostname}': {e}");
                 if let Err(err) = self
+                    .errors
                     .disconnect_with_log(&mut client, address, display, log_reason)
                     .await
                 {
-                    debug!("Failed to send disconnect to {address}: {err}");
+                    LureLogger::disconnect_failure(&address, &err);
                 }
             }
             Err(_) => {
-                debug!("Session creation timed out for {address} (host '{hostname}')");
-                self.metrics
-                    .failures
-                    .add(1, &[KeyValue::new("state", "login")]);
+                LureLogger::deadline_missed(
+                    "router.create_session",
+                    Duration::from_secs(1),
+                    Some(&address),
+                    Some(hostname),
+                );
+                LureLogger::session_creation_timeout(&address, hostname);
+                self.metrics.record_failure("login");
                 let display = format!("Session creation timed out for {hostname}");
                 let log_reason = format!("session creation timed out for host '{hostname}'");
                 if let Err(err) = self
+                    .errors
                     .disconnect_with_log(&mut client, address, display, log_reason)
                     .await
                 {
-                    debug!("Failed to send disconnect to {address}: {err}");
+                    LureLogger::disconnect_failure(&address, &err);
                 }
             }
         }
@@ -574,7 +523,6 @@ impl Lure {
         &self,
         mut client: EncodedConnection<'_>,
         handshake: &OwnedHandshake,
-        // login: &OwnedLoginHello,
         handshake_option: &HandshakeOption,
         session: &Session,
     ) -> anyhow::Result<()> {
@@ -586,13 +534,14 @@ impl Lure {
             Ok(stream) => stream,
             Err(err) => {
                 let err = ReportableError::from(err);
-                self.disconnect_with_error(
-                    &mut client,
-                    client_addr,
-                    &err,
-                    format!("backend connection to {server_address} for host '{hostname}'"),
-                )
-                .await?;
+                self.errors
+                    .disconnect_with_error(
+                        &mut client,
+                        client_addr,
+                        &err,
+                        format!("backend connection to {server_address} for host '{hostname}'"),
+                    )
+                    .await?;
                 return Err(err.into());
             }
         };
@@ -603,13 +552,14 @@ impl Lure {
             .await
         {
             let err = ReportableError::from(err);
-            self.disconnect_with_error(
-                &mut client,
-                client_addr,
-                &err,
-                format!("backend handshake to {server_address} for host '{hostname}'"),
-            )
-            .await?;
+            self.errors
+                .disconnect_with_error(
+                    &mut client,
+                    client_addr,
+                    &err,
+                    format!("backend handshake to {server_address} for host '{hostname}'"),
+                )
+                .await?;
             return Err(err.into());
         }
 
@@ -622,7 +572,7 @@ impl Lure {
 
         if dotenvy::var("NO_NODELAY").is_err() {
             if let Err(e) = stream.set_nodelay(true) {
-                error!("Failed to set TCP_NODELAY: {e}");
+                LureLogger::tcp_nodelay_failed(&e);
             }
         }
 
@@ -638,10 +588,10 @@ impl Lure {
     ) -> anyhow::Result<()> {
         if let HandshakeOption::HAProxy = handshake_option {
             let pkt = create_proxy_protocol_header(client_addr)?;
-            timeout(Duration::from_secs(1), server.send_raw(&pkt)).await??;
+            server.send_raw(&pkt).await?;
         }
 
-        timeout(Duration::from_secs(1), server.send(&handshake.as_packet())).await??;
+        server.send(&handshake.as_packet()).await?;
         Ok(())
     }
 
@@ -729,10 +679,12 @@ impl Lure {
         let (cancel, _) = broadcast::channel::<()>(1);
         // how would two error can be reported consecutively under single handler? maybe we do it byo.
         let (ra, rb) = tokio::join! {
-            copy_with_abort(&mut remote_read, &mut client_write, cancel.subscribe(), move |u| {
-                vr1.add(u, &[s2c.clone()]);
-                pr1.add(1, &[s2c.clone()]);
-            })
+            copy_with_abort(&mut remote_read, &mut client_write, cancel.subscribe(),
+                move |u| {
+                    vr1.add(u, &[s2c.clone()]);
+                    pr1.add(1, &[s2c.clone()]);
+                }
+            )
                 .then(|r| { let _ = cancel.send(()); async { r } }),
             copy_with_abort(&mut client_read, &mut remote_write, cancel.subscribe(),
                 move |u| {
@@ -744,10 +696,10 @@ impl Lure {
         };
 
         if let Err(era) = ra {
-            Self::connection_error_log(&cad, Some(&rad), &era.as_dyn_error())
+            LureLogger::connection_error(&cad, Some(&rad), &era);
         }
         if let Err(erb) = rb {
-            Self::connection_error_log(&cad, Some(&rad), &erb.as_dyn_error())
+            LureLogger::connection_error(&cad, Some(&rad), &erb);
         }
 
         Ok(())
