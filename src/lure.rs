@@ -38,9 +38,7 @@ use crate::{
     packet::{create_proxy_protocol_header, OwnedHandshake, OwnedPacket},
     router::{HandshakeOption, ResolvedRoute, RouterInstance, Session},
     telemetry::{event::EventHook, get_meter, init_event, EventEnvelope, EventServiceInstance},
-    threat::{
-        ratelimit::RateLimiterController, ClientFail, ClientIntent, IntentTag, ThreatControlService,
-    },
+    threat::{ratelimit::RateLimiterController, ClientIntent, IntentTag, ThreatControlService},
     utils::{leak, placeholder_status_response, Connection, OwnedStatic},
 };
 
@@ -234,12 +232,6 @@ impl Lure {
             tag: IntentTag::Handshake,
             duration: Duration::from_secs(60),
         };
-        // Consume the handshake packet from the client stream.
-        let _ = self
-            .threat
-            .nuisance(handler.recv::<HandshakeC2s>(), INTENT)
-            .await??;
-
         let elapsed_ms = start.elapsed().as_millis() as u64;
         debug!("Handshake completed in {}ms", elapsed_ms);
         self.metrics
@@ -257,7 +249,7 @@ impl Lure {
         };
 
         match hs.next_state {
-            HandshakeNextState::Status => self.proxy_status(handler, &hs, resolved).await,
+            HandshakeNextState::Status => self.handle_status(handler, &hs, resolved).await,
             HandshakeNextState::Login => self.handle_proxy(handler, &hs, resolved).await,
         }
     }
@@ -276,44 +268,16 @@ impl Lure {
         placeholder_status_response(brand.as_ref(), target_label.as_ref())
     }
 
-    async fn consume_status_request<'a>(
+    async fn send_status_failure(
         &self,
-        client: &mut EncodedConnection<'a>,
-    ) -> anyhow::Result<Option<QueryPingC2s>> {
-        self.threat
-            .nuisance(
-                client.recv::<QueryRequestC2s>(),
-                ClientIntent {
-                    tag: IntentTag::Query,
-                    duration: Duration::from_secs(1),
-                },
-            )
-            .await??;
-
-        match self
-            .threat
-            .nuisance(
-                client.recv::<QueryPingC2s>(),
-                ClientIntent {
-                    tag: IntentTag::Query,
-                    duration: Duration::from_secs(1),
-                },
-            )
-            .await
-        {
-            Ok(Ok(ping)) => Ok(Some(ping)),
-            Ok(Err(err)) => Err(err),
-            Err(err) => {
-                if matches!(
-                    err.downcast_ref::<ClientFail>(),
-                    Some(ClientFail::Timeout { .. })
-                ) {
-                    Ok(None)
-                } else {
-                    Err(err)
-                }
-            }
-        }
+        client: &mut EncodedConnection<'_>,
+        label: &str,
+    ) -> anyhow::Result<()> {
+        let placeholder = self.placeholder_status_json(label);
+        client
+            .send(&QueryResponseS2c { json: &placeholder })
+            .await?;
+        Ok(())
     }
 
     async fn disconnect_with_log<S, L>(
@@ -350,7 +314,7 @@ impl Lure {
             .await
     }
 
-    pub async fn proxy_status(
+    pub async fn handle_status(
         &self,
         mut client: EncodedConnection<'_>,
         handshake: &OwnedHandshake,
@@ -360,28 +324,11 @@ impl Lure {
             tag: IntentTag::Query,
             duration: Duration::from_secs(1),
         };
-        let client_addr = *client.as_inner().addr();
         let Some(resolved) = resolved else {
-            let ping = match self.consume_status_request(&mut client).await {
-                Ok(ping) => ping,
-                Err(err) => {
-                    debug!("Failed to receive status request from {client_addr}: {err}");
-                    return Err(err);
-                }
-            };
-            if let Some(ping) = ping {
-                client
-                    .send(&QueryPongS2c {
-                        payload: ping.payload,
-                    })
-                    .await?;
-            }
             self.metrics
                 .failures
                 .add(1, &[KeyValue::new("state", "status")]);
-            let placeholder = self.placeholder_status_json("ROUTE_NOT_FOUND");
-            client
-                .send(&QueryResponseS2c { json: &placeholder })
+            self.send_status_failure(&mut client, "ROUTE_NOT_FOUND")
                 .await?;
             return Ok(());
         };
@@ -389,26 +336,10 @@ impl Lure {
         let mut backend = match self.open_backend_connection(resolved.endpoint).await {
             Ok(connection) => connection,
             Err(_) => {
-                let ping = match self.consume_status_request(&mut client).await {
-                    Ok(ping) => ping,
-                    Err(err) => {
-                        debug!("Failed to receive status request from {client_addr}: {err}");
-                        return Err(err);
-                    }
-                };
-                if let Some(ping) = ping {
-                    client
-                        .send(&QueryPongS2c {
-                            payload: ping.payload,
-                        })
-                        .await?;
-                }
                 self.metrics
                     .failures
                     .add(1, &[KeyValue::new("state", "status")]);
-                let placeholder = self.placeholder_status_json("SERVER_OFFLINE");
-                client
-                    .send(&QueryResponseS2c { json: &placeholder })
+                self.send_status_failure(&mut client, "SERVER_OFFLINE")
                     .await?;
                 return Ok(());
             }
@@ -416,6 +347,9 @@ impl Lure {
 
         let client_addr = *client.as_inner().addr();
         let mut server = EncodedConnection::new(&mut backend, SocketIntent::GreetToBackend);
+
+        let hs = client.recv::<HandshakeC2s>().await?;
+        server.send(&hs).await?;
 
         if let Err(_) = self
             .initialize_backend_protocol(
@@ -426,26 +360,10 @@ impl Lure {
             )
             .await
         {
-            let ping = match self.consume_status_request(&mut client).await {
-                Ok(ping) => ping,
-                Err(err) => {
-                    debug!("Failed to receive status request from {client_addr}: {err}");
-                    return Err(err);
-                }
-            };
-            if let Some(ping) = ping {
-                client
-                    .send(&QueryPongS2c {
-                        payload: ping.payload,
-                    })
-                    .await?;
-            }
             self.metrics
                 .failures
                 .add(1, &[KeyValue::new("state", "status")]);
-            let placeholder = self.placeholder_status_json("SERVER_OFFLINE");
-            client
-                .send(&QueryResponseS2c { json: &placeholder })
+            self.send_status_failure(&mut client, "SERVER_OFFLINE")
                 .await?;
             return Ok(());
         }
@@ -462,9 +380,7 @@ impl Lure {
                 self.metrics
                     .failures
                     .add(1, &[KeyValue::new("state", "status")]);
-                let placeholder = self.placeholder_status_json("SERVER_OFFLINE");
-                client
-                    .send(&QueryResponseS2c { json: &placeholder })
+                self.send_status_failure(&mut client, "SERVER_OFFLINE")
                     .await?;
                 return Ok(());
             }
