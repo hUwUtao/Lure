@@ -33,6 +33,9 @@ pub struct Route {
     pub matchers: Vec<String>,
     /// Available endpoint addresses for this route
     pub endpoints: Vec<SocketAddr>,
+    /// Zone ID, to identify by a global group
+    /// TODO: Not-null by the spec in the future
+    pub zone: Option<u64>,
     /// Whether this route is currently disabled
     pub disabled: bool,
     /// Route priority (higher values take precedence)
@@ -463,6 +466,7 @@ mod tests {
             endpoints: vec!["123.245.122.21:0".parse().unwrap()],
             disabled: false,
             priority: 0,
+            zone: None,
             handshake: HandshakeOption::default(),
             override_query: false,
         };
