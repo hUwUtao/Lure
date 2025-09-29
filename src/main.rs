@@ -1,7 +1,9 @@
 pub(crate) mod config;
 pub(crate) mod connection;
 pub(crate) mod error;
+pub(crate) mod logging;
 pub(crate) mod lure;
+pub(crate) mod metrics;
 pub(crate) mod packet;
 pub(crate) mod router;
 pub(crate) mod telemetry;

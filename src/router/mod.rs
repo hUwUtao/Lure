@@ -1,14 +1,17 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use opentelemetry::metrics::{Counter, Gauge, Meter};
+use log::debug;
 use serde::{Deserialize, Serialize};
 use tokio::{
     sync::{RwLock, RwLockWriteGuard},
     time::timeout,
 };
 
-use crate::telemetry::{get_meter, EventEnvelope, EventServiceInstance, NonObj};
+use crate::{
+    metrics::RouterMetrics,
+    telemetry::{get_meter, EventEnvelope, EventServiceInstance, NonObj},
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum HandshakeOption {
@@ -90,27 +93,6 @@ pub struct ResolvedRoute {
     pub route: Arc<Route>,
 }
 
-#[derive(Debug)]
-struct RouterMetrics {
-    pub routes_active: Gauge<u64>,
-    pub routes_resolve: Counter<u64>,
-    pub sessions_active: Gauge<u64>,
-    pub session_create: Counter<u64>,
-    pub session_destroy: Counter<u64>,
-}
-
-impl RouterMetrics {
-    fn new(meter: &Meter) -> Self {
-        Self {
-            routes_active: meter.u64_gauge("lure_router_routes_active").build(),
-            routes_resolve: meter.u64_counter("lure_router_routes_resolve").build(),
-            sessions_active: meter.u64_gauge("lure_router_sessions_active").build(),
-            session_create: meter.u64_counter("lure_router_session_create").build(),
-            session_destroy: meter.u64_counter("lure_router_session_destroy").build(),
-        }
-    }
-}
-
 /// High-performance router with optimized storage and fast domain resolution
 #[derive(Debug)]
 pub struct RouterInstance {
@@ -159,8 +141,7 @@ impl RouterInstance {
             routes.insert(route_id, Arc::new(route));
         }
         self.metrics
-            .routes_active
-            .record(self.routes_count().await as u64, &[]);
+            .record_routes_active(self.routes_count().await as u64);
     }
 
     /// Add route to domain index with priority-based sorting
@@ -251,7 +232,7 @@ impl RouterInstance {
         &self,
         routes: &mut RwLockWriteGuard<'_, HashMap<u64, Arc<Route>>>,
     ) {
-        self.metrics.routes_active.record(routes.len() as u64, &[]);
+        self.metrics.record_routes_active(routes.len() as u64);
     }
 
     /// Remove a route and clean up indices
@@ -264,7 +245,7 @@ impl RouterInstance {
 
     /// Resolve hostname to endpoint and route pair
     pub async fn resolve(&self, hostname: &str) -> Option<ResolvedRoute> {
-        self.metrics.routes_resolve.add(1, &[]);
+        self.metrics.record_routes_resolve();
         // Try exact match first using domain index
         if let Some(route_ids) = {
             let domain_index = self.domain_index.read().await;
@@ -344,7 +325,7 @@ impl RouterInstance {
         resolved: &ResolvedRoute,
         client_addr: SocketAddr,
     ) -> anyhow::Result<(SessionHandle, Arc<Route>)> {
-        self.metrics.session_create.add(1, &[]);
+        self.metrics.record_session_create();
         let session = Arc::new(Session {
             client_addr,
             destination_addr: resolved.endpoint,
@@ -359,8 +340,7 @@ impl RouterInstance {
         }
 
         self.metrics
-            .sessions_active
-            .record(self.session_count().await? as u64, &[]);
+            .record_sessions_active(self.session_count().await? as u64);
         Ok((SessionHandle::new(self, session), resolved.route.clone()))
     }
 
@@ -381,13 +361,12 @@ impl RouterInstance {
 
     /// Terminate a session
     pub async fn terminate_session(&self, addr: &SocketAddr) -> anyhow::Result<()> {
-        self.metrics.session_destroy.add(1, &[]);
+        self.metrics.record_session_destroy();
         let mut sessions = self.active_sessions.write().await;
         sessions.remove(addr);
         drop(sessions);
         self.metrics
-            .sessions_active
-            .record(self.session_count().await? as u64, &[]);
+            .record_sessions_active(self.session_count().await? as u64);
         Ok(())
     }
 
@@ -437,6 +416,7 @@ impl crate::telemetry::event::EventHook<EventEnvelope, EventEnvelope> for Router
     ) -> anyhow::Result<()> {
         match event {
             EventEnvelope::SetRoute(route) => {
+                debug!("Setting route: {:?}", route);
                 self.apply_route(route.to_owned()).await;
             }
             EventEnvelope::FlushRoute(_) => {
