@@ -598,6 +598,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fake_serialize"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3c8fda06c9097dda0d564382410eaaccc58bbdd9e6a9ddb36cd062fed5f204c"
+dependencies = [
+ "quote",
+ "serde",
+ "syn 1.0.109",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1295,6 +1306,7 @@ dependencies = [
  "bytes",
  "dotenvy",
  "env_logger",
+ "fake_serialize",
  "futures",
  "governor",
  "log",

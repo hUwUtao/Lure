@@ -136,6 +136,7 @@ where
     }
 }
 
+#[allow(dead_code)]
 mod test {
     use serde::Deserialize;
 

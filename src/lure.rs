@@ -11,7 +11,7 @@ use log::{debug, info};
 use opentelemetry::KeyValue;
 use serde::{Deserialize, Serialize};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::AsyncReadExt,
     net::{TcpListener, TcpStream},
     sync::{broadcast, Semaphore},
     time::{error::Elapsed, timeout},
@@ -27,12 +27,12 @@ use valence_protocol::{
 
 use crate::{
     config::LureConfig,
-    connection::{EncodedConnection, SocketIntent},
+    connection::{copy_with_abort, EncodedConnection, SocketIntent},
     error::{ErrorResponder, ReportableError},
     logging::LureLogger,
     metrics::HandshakeMetrics,
     packet::{create_proxy_protocol_header, OwnedHandshake, OwnedPacket},
-    router::{HandshakeOption, ResolvedRoute, RouterInstance, Session},
+    router::{ResolvedRoute, RouterInstance, Session},
     telemetry::{event::EventHook, get_meter, init_event, EventEnvelope, EventServiceInstance},
     threat::{
         ratelimit::RateLimiterController, ClientFail, ClientIntent, IntentTag, ThreatControlService,
@@ -342,7 +342,7 @@ impl Lure {
         if let Err(err) = self
             .initialize_backend_protocol(
                 &mut server,
-                &resolved.route.handshake,
+                resolved.route.proxied(),
                 client_addr,
                 handshake,
             )
@@ -476,7 +476,7 @@ impl Lure {
             Ok(Ok((session, route))) => {
                 let server_address = session.destination_addr;
                 if let Err(e) = self
-                    .handle_proxy_session(client, handshake, &route.handshake, &session)
+                    .handle_proxy_session(client, handshake, route.proxied(), &session)
                     .await
                 {
                     let re = ReportableError::from(e);
@@ -523,7 +523,7 @@ impl Lure {
         &self,
         mut client: EncodedConnection<'_>,
         handshake: &OwnedHandshake,
-        handshake_option: &HandshakeOption,
+        proxied: bool,
         session: &Session,
     ) -> anyhow::Result<()> {
         let server_address = session.destination_addr;
@@ -548,7 +548,7 @@ impl Lure {
         let mut server = EncodedConnection::new(&mut owned_stream, SocketIntent::GreetToBackend);
 
         if let Err(err) = self
-            .initialize_backend_protocol(&mut server, handshake_option, client_addr, handshake)
+            .initialize_backend_protocol(&mut server, proxied, client_addr, handshake)
             .await
         {
             let err = ReportableError::from(err);
@@ -582,11 +582,11 @@ impl Lure {
     async fn initialize_backend_protocol(
         &self,
         server: &mut EncodedConnection<'_>,
-        handshake_option: &HandshakeOption,
+        proxied: bool,
         client_addr: SocketAddr,
         handshake: &OwnedHandshake,
     ) -> anyhow::Result<()> {
-        if let HandshakeOption::HAProxy = handshake_option {
+        if proxied {
             let pkt = create_proxy_protocol_header(client_addr)?;
             server.send_raw(&pkt).await?;
         }
@@ -624,72 +624,20 @@ impl Lure {
         let (mut client_read, mut client_write) = client.as_mut().split();
         let (mut remote_read, mut remote_write) = server.as_mut().split();
 
-        // Borrowed from mqudsi/tcpproxy
-        // https://github.com/mqudsi/tcpproxy/blob/e2d423b72898b497b129e8a58307934f9335974b/src/main.rs#L114C1-L159C6
-        // Quote
-        // Two instances of this function are spawned for each half of the connection: client-to-server,
-        // server-to-client. We can't use tokio::io::copy() instead (no matter how convenient it might
-        // be) because it doesn't give us a way to correlate the lifetimes of the two tcp read/write
-        // loops: even after the client disconnects, tokio would keep the upstream connection to the
-        // server alive until the connection's max client idle timeout is reached.
-        // Unquote
-        async fn copy_with_abort<R, W, L>(
-            read: &mut R,
-            write: &mut W,
-            mut abort: broadcast::Receiver<()>,
-            poll_size: L,
-        ) -> anyhow::Result<()>
-        where
-            R: tokio::io::AsyncRead + Unpin,
-            W: tokio::io::AsyncWrite + Unpin,
-            L: Fn(u64),
-        {
-            // let mut copied = 0;
-            let mut buf = [0u8; 1024];
-            loop {
-                let bytes_read;
-                tokio::select! {
-                    res = read.read(&mut buf) => {
-                        bytes_read = match res {
-                            Ok(n) => n,
-                            Err(e) => match e.kind() {
-                                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted => 0,
-                                _ => return Err(ReportableError::from(e).into()),
-                            },
-                        };
-                        poll_size(bytes_read as u64);
-                    },
-                    _ = abort.recv() => {
-                        break;
-                    }
-                }
-                if bytes_read == 0 {
-                    break;
-                }
-                // While we ignore some read errors above, any error writing data we've already read to
-                // the other side is always treated as exceptional.
-                write.write_all(&buf[0..bytes_read]).await?;
-                write.flush().await?;
-                // copied += bytes_read;
-            }
-            Ok(())
-            // Ok(copied)
-        }
-
         let (cancel, _) = broadcast::channel::<()>(1);
         // how would two error can be reported consecutively under single handler? maybe we do it byo.
         let (ra, rb) = tokio::join! {
             copy_with_abort(&mut remote_read, &mut client_write, cancel.subscribe(),
                 move |u| {
-                    vr1.add(u, &[s2c.clone()]);
-                    pr1.add(1, &[s2c.clone()]);
+                    vr1.add(u, std::slice::from_ref(&c2s));
+                    pr1.add(1, std::slice::from_ref(&c2s));
                 }
             )
                 .then(|r| { let _ = cancel.send(()); async { r } }),
             copy_with_abort(&mut client_read, &mut remote_write, cancel.subscribe(),
                 move |u| {
-                    vr2.add(u, &[c2s.clone()]);
-                    pr2.add(1, &[c2s.clone()]);
+                    vr2.add(u, std::slice::from_ref(&s2c));
+                    pr2.add(1, std::slice::from_ref(&s2c));
                 }
             )
                 .then(|r| { let _ = cancel.send(()); async { r } }),

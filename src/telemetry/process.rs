@@ -29,7 +29,6 @@ struct UnstableMetrics {
     total_polls_count: Counter<u64>,
     max_polls_count: Counter<u64>,
     min_polls_count: Counter<u64>,
-    injection_queue_depth: Gauge<u64>,
     total_local_queue_depth: Gauge<u64>,
     max_local_queue_depth: Gauge<u64>,
     min_local_queue_depth: Gauge<u64>,
@@ -112,7 +111,6 @@ impl ProcessMetricsService {
             total_polls_count: meter.u64_counter("tokio_total_polls_count").build(),
             max_polls_count: meter.u64_counter("tokio_max_polls_count").build(),
             min_polls_count: meter.u64_counter("tokio_min_polls_count").build(),
-            injection_queue_depth: meter.u64_gauge("tokio_injection_queue_depth").build(),
             total_local_queue_depth: meter.u64_gauge("tokio_total_local_queue_depth").build(),
             max_local_queue_depth: meter.u64_gauge("tokio_max_local_queue_depth").build(),
             min_local_queue_depth: meter.u64_gauge("tokio_min_local_queue_depth").build(),
@@ -309,7 +307,7 @@ impl ProcessMetricsService {
                 .record(metrics.busy_ratio(), common_labels);
             self.unstable
                 .mean_polls_per_park
-                .record(metrics.mean_polls_per_park() as f64, common_labels);
+                .record(metrics.mean_polls_per_park(), common_labels);
         }
     }
 

@@ -41,6 +41,7 @@ mimalloc = { version = "0.1", optional = true }
 tonic = { version = "0.13", optional = true }
 tokio-metrics = "0.4"
 env_logger = "0.11"
+fake_serialize = "0.1.1"
 
 [features]
 # by default we build HTTP-only

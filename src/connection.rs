@@ -2,17 +2,19 @@ use std::{io, io::ErrorKind};
 
 use bytes::BytesMut;
 use opentelemetry::{
-    global,
     metrics::{Counter, Histogram, Meter},
     KeyValue,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    sync::broadcast,
+};
 use valence_protocol::{
     decode::PacketFrame, packets::login::LoginDisconnectS2c, Decode, Encode, Packet, PacketDecoder,
     PacketEncoder, Text,
 };
 
-use crate::{telemetry::get_meter, utils::Connection};
+use crate::{error::ReportableError, telemetry::get_meter, utils::Connection};
 
 pub struct EncodedConnection<'a> {
     enc: PacketEncoder,
@@ -27,9 +29,6 @@ pub struct EncodedConnection<'a> {
 pub enum SocketIntent {
     GreetToProxy,
     GreetToBackend,
-    PassthroughClientBound,
-    PassthroughServerBound,
-    Generic,
 }
 
 impl SocketIntent {
@@ -38,9 +37,6 @@ impl SocketIntent {
         let a = match self {
             Self::GreetToProxy => "frontbound",
             Self::GreetToBackend => "backbound",
-            Self::PassthroughClientBound => "s2c",
-            Self::PassthroughServerBound => "c2s",
-            Self::Generic => "generic",
         };
         KeyValue::new("intent", a)
     }
@@ -80,27 +76,12 @@ impl<'a> EncodedConnection<'a> {
     }
 
     fn packet_record(&self, size: usize) {
-        self.metric.packet_count.add(1, &[self.intent.clone()]);
+        self.metric
+            .packet_count
+            .add(1, std::slice::from_ref(&self.intent));
         self.metric
             .packet_size
-            .record(size as u64, &[self.intent.clone()]);
-    }
-
-    pub async fn connect(stream: &'a mut Connection) -> anyhow::Result<Self> {
-        let metric = global::meter("alure-conn");
-        let connection = EncodedConnection {
-            enc: PacketEncoder::new(),
-            dec: PacketDecoder::new(),
-            stream,
-            frame: PacketFrame {
-                id: 0,
-                body: BytesMut::new(),
-            },
-            metric: ConnectionMetric::new(&metric),
-            intent: SocketIntent::Generic.as_attr(),
-            _reserved_lifetime: std::marker::PhantomData,
-        };
-        Ok(connection)
+            .record(size as u64, std::slice::from_ref(&self.intent));
     }
 
     // pub fn enable_encryption(&mut self, key: &[u8; 16]) {
@@ -169,10 +150,62 @@ impl<'a> EncodedConnection<'a> {
     }
 
     pub fn as_inner_mut(&mut self) -> &mut Connection {
-        &mut self.stream
+        self.stream
     }
 
     pub fn as_inner(&self) -> &Connection {
-        &self.stream
+        self.stream
     }
+}
+
+// Borrowed from mqudsi/tcpproxy
+// https://github.com/mqudsi/tcpproxy/blob/e2d423b72898b497b129e8a58307934f9335974b/src/main.rs#L114C1-L159C6
+// Quote
+// Two instances of this function are spawned for each half of the connection: client-to-server,
+// server-to-client. We can't use tokio::io::copy() instead (no matter how convenient it might
+// be) because it doesn't give us a way to correlate the lifetimes of the two tcp read/write
+// loops: even after the client disconnects, tokio would keep the upstream connection to the
+// server alive until the connection's max client idle timeout is reached.
+// Unquote
+pub async fn copy_with_abort<R, W, L>(
+    read: &mut R,
+    write: &mut W,
+    mut abort: broadcast::Receiver<()>,
+    poll_size: L,
+) -> anyhow::Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+    L: Fn(u64),
+{
+    // let mut copied = 0;
+    let mut buf = [0u8; 1024];
+    loop {
+        let bytes_read;
+        tokio::select! {
+            res = read.read(&mut buf) => {
+                bytes_read = match res {
+                    Ok(n) => n,
+                    Err(e) => match e.kind() {
+                        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted => 0,
+                        _ => return Err(ReportableError::from(e).into()),
+                    },
+                };
+                poll_size(bytes_read as u64);
+            },
+            _ = abort.recv() => {
+                break;
+            }
+        }
+        if bytes_read == 0 {
+            break;
+        }
+        // While we ignore some read errors above, any error writing data we've already read to
+        // the other side is always treated as exceptional.
+        write.write_all(&buf[0..bytes_read]).await?;
+        write.flush().await?;
+        // copied += bytes_read;
+    }
+    Ok(())
+    // Ok(copied)
 }

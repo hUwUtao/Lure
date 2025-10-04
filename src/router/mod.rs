@@ -1,6 +1,7 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashMap, fmt::Debug, net::SocketAddr, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use fake_serialize::FakeSerialize;
 use log::debug;
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -13,37 +14,47 @@ use crate::{
     telemetry::{get_meter, EventEnvelope, EventServiceInstance, NonObj},
 };
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum HandshakeOption {
-    Vanilla,
-    HAProxy,
-}
+mod attr;
 
-impl Default for HandshakeOption {
-    fn default() -> Self {
-        Self::Vanilla
-    }
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Copy)]
+pub enum RouteFlags {
+    Disabled,
+    CacheQuery,
+    OverrideQuery,
+    ProxyProtocol,
 }
 
 /// Routing rule with matchers and endpoints, ordered by priority
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, FakeSerialize, Deserialize)]
 pub struct Route {
     pub id: u64,
+    /// Zone ID, to identify by a global group
+    pub zone: u64,
+    /// Route priority
+    pub priority: i32,
+    /// Route flags
+    pub flags: attr::RouteAttr,
     /// Domain patterns or hostnames this route matches
     pub matchers: Vec<String>,
     /// Available endpoint addresses for this route
     pub endpoints: Vec<SocketAddr>,
-    /// Zone ID, to identify by a global group
-    /// TODO: Not-null by the spec in the future
-    pub zone: Option<u64>,
-    /// Whether this route is currently disabled
-    pub disabled: bool,
-    /// Route priority (higher values take precedence)
-    pub priority: u32,
-    /// IP Fowarding
-    pub handshake: HandshakeOption,
-    /// Query override
-    pub override_query: bool,
+}
+
+impl Route {
+    #[inline]
+    fn read_flag(&self, flag: RouteFlags) -> bool {
+        self.flags.contains(flag)
+    }
+
+    #[inline]
+    pub fn disabled(&self) -> bool {
+        self.read_flag(RouteFlags::Disabled)
+    }
+
+    #[inline]
+    pub fn proxied(&self) -> bool {
+        self.read_flag(RouteFlags::ProxyProtocol)
+    }
 }
 
 /// Client session tracking source, destination, and associated route
@@ -258,7 +269,7 @@ impl RouterInstance {
             let best_route = route_ids
                 .iter()
                 .find_map(|&id| routes.get(&id))
-                .filter(|route| !route.disabled)?
+                .filter(|route| !route.disabled())?
                 .clone();
 
             let endpoint = *best_route.endpoints.first()?;
@@ -273,7 +284,7 @@ impl RouterInstance {
         let mut best: Option<ResolvedRoute> = None;
 
         for route in routes.values() {
-            if route.disabled {
+            if route.disabled() {
                 continue;
             }
             for matcher in &route.matchers {
@@ -347,21 +358,6 @@ impl RouterInstance {
         Ok((SessionHandle::new(self, session), resolved.route.clone()))
     }
 
-    /// Create a new session with optimized route lookup
-    pub async fn create_session(
-        &'static self,
-        hostname: &str,
-        client_addr: SocketAddr,
-    ) -> anyhow::Result<(SessionHandle, Arc<Route>)> {
-        let resolved = self
-            .resolve(hostname)
-            .await
-            .ok_or(anyhow::anyhow!("Resolve failed"))?;
-
-        self.create_session_with_resolved(&resolved, client_addr)
-            .await
-    }
-
     /// Terminate a session
     pub async fn terminate_session(&self, addr: &SocketAddr) -> anyhow::Result<()> {
         self.metrics.record_session_destroy();
@@ -387,11 +383,12 @@ impl RouterInstance {
         routes.len()
     }
 
-    /// Get session by client address
-    pub async fn get_session(&self, client_addr: &SocketAddr) -> Option<Arc<Session>> {
-        let sessions = self.active_sessions.read().await;
-        sessions.get(client_addr).cloned()
-    }
+    // No longer meant to emit
+    // /// Get session by client address
+    // pub async fn get_session(&self, client_addr: &SocketAddr) -> Option<Arc<Session>> {
+    //     let sessions = self.active_sessions.read().await;
+    //     sessions.get(client_addr).cloned()
+    // }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -420,6 +417,7 @@ impl crate::telemetry::event::EventHook<EventEnvelope, EventEnvelope> for Router
         match event {
             EventEnvelope::SetRoute(route) => {
                 debug!("Setting route: {:?}", route);
+                let route = route.to_owned();
                 self.apply_route(route.to_owned()).await;
             }
             EventEnvelope::FlushRoute(_) => {
@@ -464,14 +462,61 @@ mod tests {
             id: 1,
             matchers: vec!["10000-10245*.abc.xyz.com".to_string()],
             endpoints: vec!["123.245.122.21:0".parse().unwrap()],
-            disabled: false,
-            priority: 0,
-            zone: None,
-            handshake: HandshakeOption::default(),
-            override_query: false,
+            ..Default::default()
         };
         router.apply_route(route).await;
         let resolved = router.resolve("10241.abc.xyz.com").await.unwrap();
         assert_eq!(resolved.endpoint, "123.245.122.21:10241".parse().unwrap());
+    }
+    #[tokio::test]
+    async fn route_disabled_flag_works_correctly() {
+        let router = RouterInstance::new();
+
+        // Test disabled flag
+        let disabled_route = Route {
+            id: 1,
+            matchers: vec!["example.com".to_string()],
+            endpoints: vec!["127.0.0.1:8080".parse().unwrap()],
+            flags: attr::RouteAttr::from(RouteFlags::Disabled),
+            ..Default::default()
+        };
+        router.apply_route(disabled_route).await;
+
+        // Disabled route should not resolve
+        let resolved = router.resolve("example.com").await;
+        assert!(resolved.is_none());
+    }
+
+    #[tokio::test]
+    async fn route_proxy_and_normal_flags_work_correctly() {
+        let router = RouterInstance::new();
+
+        // Test proxy protocol flag
+        let proxied_route = Route {
+            id: 2,
+            matchers: vec!["proxy.example.com".to_string()],
+            endpoints: vec!["127.0.0.1:25565".parse().unwrap()],
+            flags: attr::RouteAttr::from(RouteFlags::ProxyProtocol),
+            ..Default::default()
+        };
+        router.apply_route(proxied_route).await;
+
+        let resolved = router.resolve("proxy.example.com").await.unwrap();
+        assert!(resolved.route.proxied());
+        assert!(!resolved.route.disabled());
+
+        // Test route with no flags
+        let normal_route = Route {
+            id: 3,
+            matchers: vec!["normal.example.com".to_string()],
+            endpoints: vec!["127.0.0.1:25565".parse().unwrap()],
+            flags: attr::RouteAttr::from_u64(0),
+            ..Default::default()
+        };
+        router.apply_route(normal_route).await;
+
+        let resolved = router.resolve("normal.example.com").await.unwrap();
+        assert!(!resolved.route.proxied());
+        assert!(!resolved.route.disabled());
     }
 }
