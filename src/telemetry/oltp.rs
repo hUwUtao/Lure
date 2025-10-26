@@ -3,12 +3,12 @@
 use std::{collections::HashMap, env, time::Duration};
 
 use log::info;
-use opentelemetry::{global, KeyValue};
+use opentelemetry::{KeyValue, global};
 use opentelemetry_otlp::{self, Protocol, WithExportConfig, WithHttpConfig};
 use opentelemetry_sdk::{
+    Resource,
     metrics::SdkMeterProvider,
     trace::{self, RandomIdGenerator, Sampler, SdkTracerProvider},
-    Resource,
 };
 
 /// Creates an OpenTelemetry Resource from environment variables following semantic conventions,

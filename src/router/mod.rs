@@ -11,7 +11,7 @@ use tokio::{
 
 use crate::{
     metrics::RouterMetrics,
-    telemetry::{get_meter, EventEnvelope, EventServiceInstance, NonObj},
+    telemetry::{EventEnvelope, EventServiceInstance, NonObj, get_meter},
 };
 
 mod attr;

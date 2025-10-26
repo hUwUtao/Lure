@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use log::{error, info};
 use reqwest::Client;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use tokio::{sync::RwLock, time::sleep};
 
 #[async_trait]

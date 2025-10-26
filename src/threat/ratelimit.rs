@@ -1,9 +1,9 @@
 use std::{hash::Hash, num::NonZeroU32, time::Duration};
 
 use governor::{
+    Quota, RateLimiter,
     clock::{Clock, DefaultClock},
     state::keyed::DashMapStateStore,
-    Quota, RateLimiter,
 };
 use log::warn;
 

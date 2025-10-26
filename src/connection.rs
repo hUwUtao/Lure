@@ -2,16 +2,16 @@ use std::{io, io::ErrorKind};
 
 use bytes::BytesMut;
 use opentelemetry::{
-    metrics::{Counter, Histogram, Meter},
     KeyValue,
+    metrics::{Counter, Histogram, Meter},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::broadcast,
 };
 use valence_protocol::{
-    decode::PacketFrame, packets::login::LoginDisconnectS2c, Decode, Encode, Packet, PacketDecoder,
-    PacketEncoder, Text,
+    Decode, Encode, Packet, PacketDecoder, PacketEncoder, Text, decode::PacketFrame,
+    packets::login::LoginDisconnectS2c,
 };
 
 use crate::{error::ReportableError, telemetry::get_meter, utils::Connection};
@@ -205,6 +205,7 @@ where
         write.write_all(&buf[0..bytes_read]).await?;
         write.flush().await?;
         // copied += bytes_read;
+        tokio::task::yield_now().await;
     }
     Ok(())
     // Ok(copied)

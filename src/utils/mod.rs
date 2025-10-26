@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::json;
 use tokio::net::TcpStream;
 
-use crate::telemetry::{event::EventHook, EventEnvelope, EventServiceInstance};
+use crate::telemetry::{EventEnvelope, EventServiceInstance, event::EventHook};
 
 #[cfg(feature = "mimalloc")]
 mod mimalloc {

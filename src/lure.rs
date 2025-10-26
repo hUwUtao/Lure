@@ -1,6 +1,9 @@
 use std::{
     net::{IpAddr, SocketAddr},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -13,31 +16,31 @@ use serde::{Deserialize, Serialize};
 use tokio::{
     io::AsyncReadExt,
     net::{TcpListener, TcpStream},
-    sync::{broadcast, Semaphore},
+    sync::{Semaphore, broadcast},
     time::{error::Elapsed, timeout},
 };
 use valence_protocol::{
+    Decode, Packet,
     packets::{
-        handshaking::{handshake_c2s::HandshakeNextState, HandshakeC2s},
+        handshaking::{HandshakeC2s, handshake_c2s::HandshakeNextState},
         status::{QueryPingC2s, QueryPongS2c, QueryRequestC2s, QueryResponseS2c},
     },
     var_int::{VarInt, VarIntDecodeError},
-    Decode, Packet,
 };
 
 use crate::{
     config::LureConfig,
-    connection::{copy_with_abort, EncodedConnection, SocketIntent},
+    connection::{EncodedConnection, SocketIntent, copy_with_abort},
     error::{ErrorResponder, ReportableError},
     logging::LureLogger,
     metrics::HandshakeMetrics,
-    packet::{create_proxy_protocol_header, OwnedHandshake, OwnedPacket},
+    packet::{OwnedHandshake, OwnedPacket, create_proxy_protocol_header},
     router::{ResolvedRoute, RouterInstance, Session},
-    telemetry::{event::EventHook, get_meter, init_event, EventEnvelope, EventServiceInstance},
+    telemetry::{EventEnvelope, EventServiceInstance, event::EventHook, get_meter, init_event},
     threat::{
-        ratelimit::RateLimiterController, ClientFail, ClientIntent, IntentTag, ThreatControlService,
+        ClientFail, ClientIntent, IntentTag, ThreatControlService, ratelimit::RateLimiterController,
     },
-    utils::{leak, placeholder_status_response, Connection, OwnedStatic},
+    utils::{Connection, OwnedStatic, leak, placeholder_status_response},
 };
 pub struct Lure {
     config: LureConfig,
@@ -129,10 +132,10 @@ impl Lure {
             // Try to acquire semaphore (non-blocking)
             match semaphore.clone().try_acquire_owned() {
                 Ok(permit) => {
-                    if dotenvy::var("NO_NODELAY").is_err() {
-                        if let Err(e) = client.as_ref().set_nodelay(true) {
-                            LureLogger::tcp_nodelay_failed(&e);
-                        }
+                    if dotenvy::var("NO_NODELAY").is_err()
+                        && let Err(e) = client.as_ref().set_nodelay(true)
+                    {
+                        LureLogger::tcp_nodelay_failed(&e);
                     }
 
                     let lure = self;
@@ -570,10 +573,10 @@ impl Lure {
     async fn open_backend_connection(&self, address: SocketAddr) -> anyhow::Result<Connection> {
         let stream = timeout(Duration::from_secs(3), TcpStream::connect(address)).await??;
 
-        if dotenvy::var("NO_NODELAY").is_err() {
-            if let Err(e) = stream.set_nodelay(true) {
-                LureLogger::tcp_nodelay_failed(&e);
-            }
+        if dotenvy::var("NO_NODELAY").is_err()
+            && let Err(e) = stream.set_nodelay(true)
+        {
+            LureLogger::tcp_nodelay_failed(&e);
         }
 
         Connection::try_from(stream)
@@ -600,22 +603,14 @@ impl Lure {
         client: &mut EncodedConnection<'a>,
         server: &mut EncodedConnection<'b>,
     ) -> anyhow::Result<()> {
-        let volume_record = get_meter()
-            .u64_counter("lure_proxy_transport_volume")
-            .with_unit("bytes")
-            .build();
-        let vr1 = volume_record.clone();
-        let vr2 = volume_record.clone();
-
-        let packet_record = get_meter()
-            .u64_counter("lure_proxy_transport_packet_count")
-            .with_unit("packets")
-            .build();
-        let pr1 = packet_record.clone();
-        let pr2 = packet_record.clone();
-
-        let s2c = KeyValue::new("intent", "s2c");
-        let c2s = KeyValue::new("intent", "c2s");
+        // Put all AtomicU64 in a fixed array so they are not moved.
+        // [0] = s2cp, [1] = c2sp, [2] = s2cb, [3] = c2sb
+        let counters: [AtomicU64; 4] = [
+            AtomicU64::new(0),
+            AtomicU64::new(0),
+            AtomicU64::new(0),
+            AtomicU64::new(0),
+        ];
 
         let client = client.as_inner_mut();
         let server = server.as_inner_mut();
@@ -625,23 +620,99 @@ impl Lure {
         let (mut remote_read, mut remote_write) = server.as_mut().split();
 
         let (cancel, _) = broadcast::channel::<()>(1);
-        // how would two error can be reported consecutively under single handler? maybe we do it byo.
-        let (ra, rb) = tokio::join! {
-            copy_with_abort(&mut remote_read, &mut client_write, cancel.subscribe(),
-                move |u| {
-                    vr1.add(u, std::slice::from_ref(&c2s));
-                    pr1.add(1, std::slice::from_ref(&c2s));
+        let record_cancel = cancel.subscribe();
+
+        // Allows lint & fmt
+        let (la, lb, lc) = (
+            {
+                let c2sp = &counters[1];
+                let c2sb = &counters[3];
+                copy_with_abort(
+                    &mut remote_read,
+                    &mut client_write,
+                    cancel.subscribe(),
+                    move |u| {
+                        c2sp.fetch_add(1, Ordering::Relaxed);
+                        c2sb.fetch_add(u, Ordering::Relaxed);
+                    },
+                )
+                .then(|r| {
+                    let _ = cancel.send(());
+                    async { r }
+                })
+            },
+            {
+                let s2cp = &counters[0];
+                let s2cb = &counters[2];
+                copy_with_abort(
+                    &mut client_read,
+                    &mut remote_write,
+                    cancel.subscribe(),
+                    move |u| {
+                        s2cp.fetch_add(1, Ordering::Relaxed);
+                        s2cb.fetch_add(u, Ordering::Relaxed);
+                    },
+                )
+                .then(|r| {
+                    let _ = cancel.send(());
+                    async { r }
+                })
+            },
+            // Meter report thread
+            {
+                let counters = &counters;
+                async move {
+                    let mut interval = tokio::time::interval(Duration::from_millis(100));
+                    let volume_record = get_meter()
+                        .u64_counter("lure_proxy_transport_volume")
+                        .with_unit("bytes")
+                        .build();
+
+                    let packet_record = get_meter()
+                        .u64_counter("lure_proxy_transport_packet_count")
+                        .with_unit("packets")
+                        .build();
+                    let mut abort = record_cancel;
+
+                    let s2ct = KeyValue::new("intent", "s2c");
+                    let c2st = KeyValue::new("intent", "c2s");
+
+                    let mut ls2cp = 0u64;
+                    let mut ls2cb = 0u64;
+                    let mut lc2sp = 0u64;
+                    let mut lc2sb = 0u64;
+
+                    loop {
+                        if abort.recv().await.is_err() {
+                            break;
+                        }
+
+                        let vr1 = volume_record.clone();
+                        let vr2 = volume_record.clone();
+                        let pr1 = packet_record.clone();
+                        let pr2 = packet_record.clone();
+
+                        let c2sb = counters[3].load(Ordering::Relaxed);
+                        let s2cb = counters[2].load(Ordering::Relaxed);
+                        let c2sp = counters[1].load(Ordering::Relaxed);
+                        let s2cp = counters[0].load(Ordering::Relaxed);
+
+                        vr1.add(c2sb - lc2sb, core::slice::from_ref(&c2st));
+                        vr2.add(s2cb - ls2cb, core::slice::from_ref(&s2ct));
+                        pr1.add(c2sp - lc2sp, core::slice::from_ref(&c2st));
+                        pr2.add(s2cp - ls2cp, core::slice::from_ref(&s2ct));
+
+                        lc2sb = c2sb;
+                        ls2cb = s2cb;
+                        lc2sp = c2sp;
+                        ls2cp = s2cp;
+
+                        interval.tick().await;
+                    }
                 }
-            )
-                .then(|r| { let _ = cancel.send(()); async { r } }),
-            copy_with_abort(&mut client_read, &mut remote_write, cancel.subscribe(),
-                move |u| {
-                    vr2.add(u, std::slice::from_ref(&s2c));
-                    pr2.add(1, std::slice::from_ref(&s2c));
-                }
-            )
-                .then(|r| { let _ = cancel.send(()); async { r } }),
-        };
+            },
+        );
+        let (ra, rb, _rc) = tokio::join!(la, lb, lc);
 
         if let Err(era) = ra {
             LureLogger::connection_error(&cad, Some(&rad), &era);

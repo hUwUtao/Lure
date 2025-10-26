@@ -2,16 +2,16 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 use bytes::BytesMut;
 use proxy_protocol::{
-    version2::{ProxyAddresses, ProxyCommand, ProxyTransportProtocol},
     ProxyHeader,
+    version2::{ProxyAddresses, ProxyCommand, ProxyTransportProtocol},
 };
 use valence_protocol::{
+    Bounded, Decode, Encode, Packet, VarInt,
     packets::{
-        handshaking::{handshake_c2s::HandshakeNextState, HandshakeC2s},
+        handshaking::{HandshakeC2s, handshake_c2s::HandshakeNextState},
         login::LoginHelloC2s,
     },
     uuid::Uuid,
-    Bounded, Decode, Encode, Packet, VarInt,
 };
 
 use crate::utils::sanitize_hostname;

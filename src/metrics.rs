@@ -1,6 +1,6 @@
 use opentelemetry::{
-    metrics::{Counter, Gauge, Histogram, Meter},
     KeyValue,
+    metrics::{Counter, Gauge, Histogram, Meter},
 };
 
 pub struct HandshakeMetrics {
