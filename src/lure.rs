@@ -669,8 +669,8 @@ impl Lure {
             // Meter report thread
             {
                 let counters = &counters;
-                let mut abort = cancel.subscribe();
-                let mut stop = self.stop.subscribe();
+                let abort = cancel.subscribe();
+                let stop = self.stop.subscribe();
 
                 async move {
                     let mut interval = tokio::time::interval(Duration::from_millis(100));
@@ -693,7 +693,7 @@ impl Lure {
                     let mut lc2sb = 0u64;
 
                     loop {
-                        if abort.recv().await.is_err() && stop.recv().await.is_err() {
+                        if !abort.is_empty() || !stop.is_empty() {
                             break;
                         }
 
