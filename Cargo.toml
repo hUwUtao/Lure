@@ -1,6 +1,6 @@
 [package]
 name = "lure"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -9,26 +9,15 @@ edition = "2024"
 anyhow = "1.0"
 bytes = "1.10"
 log = "0.4.27"
-opentelemetry = "0.30"
-opentelemetry-otlp = { version = "0.30", features = [
-    "tokio",
-    "http-proto",
-    "reqwest-rustls-webpki-roots",
-    "http-json",
-] }
+opentelemetry = "0.31"
+opentelemetry-otlp = { version = "0.31", features = ["tokio", "http-proto", "reqwest-rustls-webpki-roots", "http-json"] }
 dotenvy = "0.15"
-opentelemetry-stdout = "0.30.0"
-opentelemetry_sdk = { version = "0.30.0", features = [
-    "tokio",
-    "tokio-stream",
-    "rt-tokio",
-    "http",
-    "url",
-] }
+opentelemetry-stdout = "0.31"
+opentelemetry_sdk = { version = "0.31", features = ["tokio", "tokio-stream", "rt-tokio", "http", "url"] }
 proxy-protocol = "0.5.0"
 serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1.27", features = ["full", "rt-multi-thread", "tracing"] }
-toml = "0.8"
+toml = "0.9"
 valence_text = { git = "https://github.com/valence-rs/valence" }
 valence_protocol = { git = "https://github.com/valence-rs/valence" }
 async-trait = "0.1"
@@ -38,7 +27,7 @@ serde_json = "1.0"
 governor = "0.10"
 thiserror = "2.0"
 mimalloc = { version = "0.1", optional = true }
-tonic = { version = "0.13", optional = true }
+tonic = { version = "0.14", optional = true }
 tokio-metrics = "0.4"
 env_logger = "0.11"
 fake_serialize = "0.1.1"
