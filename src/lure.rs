@@ -116,13 +116,12 @@ impl Lure {
         let rate_limiter: RateLimiterController<IpAddr> =
             RateLimiterController::new(10, Duration::from_secs(3));
 
-        let mut stop = self.stop.subscribe();
+        let stop = self.stop.subscribe();
         loop {
-            if let Err(_) = stop.recv().await {
-                info!("^C terminated");
+            // Questionably not able to use .recv()
+            if !stop.is_empty() {
                 return Ok(());
             }
-
             // Accept connection first
             let (client, addr) = listener.accept().await?;
 
