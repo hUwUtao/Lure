@@ -15,6 +15,7 @@ use std::{env, error::Error};
 use anyhow::anyhow;
 use config::LureConfig;
 use lure::Lure;
+use tokio::sync::broadcast;
 
 use crate::{
     config::LureConfigLoadError,
@@ -67,11 +68,32 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let pmt = leak(ProcessMetricsService::new());
     pmt.start();
 
-    let lure = leak(Lure::new(config));
-    lure.start().await?;
-    if let Some(providers) = providers {
-        providers.0.shutdown()?;
-        // providers.1.shutdown()?;
+    let stop = leak(broadcast::channel(1).0);
+    let lure = leak(Lure::new(config, stop));
+    tokio::spawn(async move {
+        if let Err(e) = lure.start().await {
+            log::error!("{e}");
+        }
+        if let Some(providers) = providers {
+            providers.0.shutdown().unwrap();
+            // providers.1.shutdown()?;
+        }
+    });
+    {
+        use futures::future::{FutureExt, select_all};
+        use tokio::signal::unix::{SignalKind, signal};
+
+        // Create futures for SIGINT, SIGTERM, and SIGKILL
+        let mut sigint = signal(SignalKind::interrupt())?;
+        let mut sigterm = signal(SignalKind::terminate())?;
+
+        // Wait for any of the signals
+        let sigint_fut = sigint.recv().boxed();
+        let sigterm_fut = sigterm.recv().boxed();
+
+        let _ = select_all([sigint_fut, sigterm_fut]).await;
+        log::info!("Received signal, stopping...");
+        stop.send(())?;
     }
     Ok(())
 }

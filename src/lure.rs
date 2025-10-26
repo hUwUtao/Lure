@@ -17,6 +17,7 @@ use tokio::{
     io::AsyncReadExt,
     net::{TcpListener, TcpStream},
     sync::{Semaphore, broadcast},
+    task::yield_now,
     time::{error::Elapsed, timeout},
 };
 use valence_protocol::{
@@ -48,6 +49,7 @@ pub struct Lure {
     threat: &'static ThreatControlService,
     metrics: HandshakeMetrics,
     errors: ErrorResponder,
+    stop: &'static broadcast::Sender<()>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -78,7 +80,7 @@ impl EventHook<EventEnvelope, EventEnvelope> for EventIdent {
 }
 
 impl Lure {
-    pub fn new(config: LureConfig) -> Lure {
+    pub fn new(config: LureConfig, stop: &'static broadcast::Sender<()>) -> Lure {
         let router = leak(RouterInstance::new());
         Lure {
             config,
@@ -86,6 +88,7 @@ impl Lure {
             threat: leak(ThreatControlService::new()),
             metrics: HandshakeMetrics::new(&get_meter()),
             errors: ErrorResponder::new(),
+            stop,
         }
     }
 
@@ -113,7 +116,13 @@ impl Lure {
         let rate_limiter: RateLimiterController<IpAddr> =
             RateLimiterController::new(10, Duration::from_secs(3));
 
+        let mut stop = self.stop.subscribe();
         loop {
+            if let Err(_) = stop.recv().await {
+                info!("^C terminated");
+                return Ok(());
+            }
+
             // Accept connection first
             let (client, addr) = listener.accept().await?;
 
@@ -152,6 +161,7 @@ impl Lure {
                     drop(client);
                 }
             }
+            yield_now().await;
         }
     }
 
@@ -619,8 +629,7 @@ impl Lure {
         let (mut client_read, mut client_write) = client.as_mut().split();
         let (mut remote_read, mut remote_write) = server.as_mut().split();
 
-        let (cancel, _) = broadcast::channel::<()>(1);
-        let record_cancel = cancel.subscribe();
+        let (cancel, _) = broadcast::channel(1);
 
         // Allows lint & fmt
         let (la, lb, lc) = (
@@ -630,7 +639,7 @@ impl Lure {
                 copy_with_abort(
                     &mut remote_read,
                     &mut client_write,
-                    cancel.subscribe(),
+                    [cancel.subscribe(), self.stop.subscribe()],
                     move |u| {
                         c2sp.fetch_add(1, Ordering::Relaxed);
                         c2sb.fetch_add(u, Ordering::Relaxed);
@@ -647,7 +656,7 @@ impl Lure {
                 copy_with_abort(
                     &mut client_read,
                     &mut remote_write,
-                    cancel.subscribe(),
+                    [cancel.subscribe(), self.stop.subscribe()],
                     move |u| {
                         s2cp.fetch_add(1, Ordering::Relaxed);
                         s2cb.fetch_add(u, Ordering::Relaxed);
@@ -661,6 +670,9 @@ impl Lure {
             // Meter report thread
             {
                 let counters = &counters;
+                let mut abort = cancel.subscribe();
+                let mut stop = self.stop.subscribe();
+
                 async move {
                     let mut interval = tokio::time::interval(Duration::from_millis(100));
                     let volume_record = get_meter()
@@ -672,7 +684,6 @@ impl Lure {
                         .u64_counter("lure_proxy_transport_packet_count")
                         .with_unit("packets")
                         .build();
-                    let mut abort = record_cancel;
 
                     let s2ct = KeyValue::new("intent", "s2c");
                     let c2st = KeyValue::new("intent", "c2s");
@@ -683,7 +694,7 @@ impl Lure {
                     let mut lc2sb = 0u64;
 
                     loop {
-                        if abort.recv().await.is_err() {
+                        if abort.recv().await.is_err() && stop.recv().await.is_err() {
                             break;
                         }
 

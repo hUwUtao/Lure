@@ -170,7 +170,7 @@ impl<'a> EncodedConnection<'a> {
 pub async fn copy_with_abort<R, W, L>(
     read: &mut R,
     write: &mut W,
-    mut abort: broadcast::Receiver<()>,
+    mut abort: [broadcast::Receiver<()>; 2],
     poll_size: L,
 ) -> anyhow::Result<()>
 where
@@ -182,6 +182,9 @@ where
     let mut buf = [0u8; 1024];
     loop {
         let bytes_read;
+        let (a0, a1) = abort.split_at_mut(1);
+        let a0 = a0[0].recv();
+        let a1 = a1[0].recv();
         tokio::select! {
             res = read.read(&mut buf) => {
                 bytes_read = match res {
@@ -192,8 +195,11 @@ where
                     },
                 };
                 poll_size(bytes_read as u64);
-            },
-            _ = abort.recv() => {
+            }
+            _ = a0 => {
+                break;
+            }
+            _ = a1 => {
                 break;
             }
         }
