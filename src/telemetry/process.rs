@@ -376,7 +376,7 @@ impl ProcessMetricsService {
 
     pub fn start(&'static self) {
         // Spawn runtime metrics collection task
-        spawn_named("Runtime Metrics", async move {
+        spawn_named("Runtime metrics", async move {
             for metrics in self.runtime_monitor.intervals() {
                 self.update_runtime_metrics(&metrics);
                 // currently I have no idea how to change otel report rate

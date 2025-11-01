@@ -5,13 +5,14 @@ use fake_serialize::FakeSerialize;
 use log::debug;
 use serde::{Deserialize, Serialize};
 use tokio::{
-    sync::{RwLock, RwLockWriteGuard},
-    time::timeout,
+    sync::{RwLock, RwLockWriteGuard, mpsc},
+    time::{MissedTickBehavior, interval, timeout},
 };
 
 use crate::{
     metrics::RouterMetrics,
     telemetry::{EventEnvelope, EventServiceInstance, NonObj, get_meter},
+    utils::spawn_named,
 };
 
 mod attr;
@@ -130,16 +131,32 @@ pub struct RouterInstance {
     /// Domain to sorted route IDs mapping for fast resolution
     domain_index: RwLock<HashMap<String, Vec<u64>>>,
     /// Metrics
-    metrics: RouterMetrics,
+    metrics: Arc<RouterMetrics>,
+    metrics_tx: mpsc::UnboundedSender<RouterMetricsMessage>,
+}
+
+#[derive(Debug)]
+enum RouterMetricsMessage {
+    RoutesActive(u64),
+    SessionsActive(u64),
 }
 
 impl RouterInstance {
     pub fn new() -> Self {
+        let metrics = Arc::new(RouterMetrics::new(&get_meter()));
+        let (metrics_tx, metrics_rx) = mpsc::unbounded_channel();
+        spawn_named(
+            "Router metrics",
+            Self::drive_metrics(metrics.clone(), metrics_rx),
+        )
+        .expect("Cannot spawn task");
+
         RouterInstance {
             active_routes: RwLock::new(HashMap::new()),
             active_sessions: RwLock::new(HashMap::new()),
             domain_index: RwLock::new(HashMap::new()),
-            metrics: RouterMetrics::new(&get_meter()),
+            metrics,
+            metrics_tx,
         }
     }
 
@@ -163,12 +180,12 @@ impl RouterInstance {
         }
 
         // Store the route
-        {
+        let total = {
             let mut routes = self.active_routes.write().await;
             routes.insert(route_id, Arc::new(route));
-        }
-        self.metrics
-            .record_routes_active(self.routes_count().await as u64);
+            routes.len() as u64
+        };
+        self.publish_routes_active(total);
     }
 
     /// Add route to domain index with priority-based sorting
@@ -259,7 +276,8 @@ impl RouterInstance {
         &self,
         routes: &mut RwLockWriteGuard<'_, HashMap<u64, Arc<Route>>>,
     ) {
-        self.metrics.record_routes_active(routes.len() as u64);
+        let total = routes.len() as u64;
+        self.publish_routes_active(total);
     }
 
     /// Clear all routes and indices.
@@ -378,14 +396,13 @@ impl RouterInstance {
         });
 
         // Store session
-        {
+        let total = {
             let mut sessions = self.active_sessions.write().await;
             sessions.insert(client_addr, session.clone());
-            drop(sessions);
-        }
+            sessions.len() as u64
+        };
+        self.publish_sessions_active(total);
 
-        self.metrics
-            .record_sessions_active(self.session_count().await? as u64);
         Ok((SessionHandle::new(self, session), resolved.route.clone()))
     }
 
@@ -394,9 +411,9 @@ impl RouterInstance {
         self.metrics.record_session_destroy();
         let mut sessions = self.active_sessions.write().await;
         sessions.remove(addr);
+        let total = sessions.len() as u64;
         drop(sessions);
-        self.metrics
-            .record_sessions_active(self.session_count().await? as u64);
+        self.publish_sessions_active(total);
         Ok(())
     }
 
@@ -409,9 +426,67 @@ impl RouterInstance {
     }
 
     /// Get active route count for monitoring
-    pub async fn routes_count(&self) -> usize {
-        let routes = self.active_routes.read().await;
-        routes.len()
+    fn publish_routes_active(&self, total: u64) {
+        let _ = self
+            .metrics_tx
+            .send(RouterMetricsMessage::RoutesActive(total));
+    }
+
+    fn publish_sessions_active(&self, total: u64) {
+        let _ = self
+            .metrics_tx
+            .send(RouterMetricsMessage::SessionsActive(total));
+    }
+
+    async fn drive_metrics(
+        metrics: Arc<RouterMetrics>,
+        mut rx: mpsc::UnboundedReceiver<RouterMetricsMessage>,
+    ) {
+        let mut latest_routes: Option<u64> = None;
+        let mut latest_sessions: Option<u64> = None;
+        let mut dirty = false;
+        let mut ticker = interval(Duration::from_secs(30));
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+        loop {
+            tokio::select! {
+                msg = rx.recv() => {
+                    match msg {
+                        Some(RouterMetricsMessage::RoutesActive(total)) => {
+                            metrics.record_routes_active(total);
+                            latest_routes = Some(total);
+                            dirty = true;
+                        }
+                        Some(RouterMetricsMessage::SessionsActive(total)) => {
+                            metrics.record_sessions_active(total);
+                            latest_sessions = Some(total);
+                            dirty = true;
+                        }
+                        None => break,
+                    }
+                }
+                _ = ticker.tick() => {
+                    if dirty {
+                        let routes = latest_routes.unwrap_or(0);
+                        let sessions = latest_sessions.unwrap_or(0);
+                        debug!(
+                            "router metrics snapshot: routes_active={}, sessions_active={}",
+                            routes, sessions
+                        );
+                        dirty = false;
+                    }
+                }
+            }
+        }
+
+        if dirty {
+            let routes = latest_routes.unwrap_or(0);
+            let sessions = latest_sessions.unwrap_or(0);
+            debug!(
+                "router metrics snapshot (final): routes_active={}, sessions_active={}",
+                routes, sessions
+            );
+        }
     }
 
     // No longer meant to emit

@@ -66,7 +66,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let reload_path = config_file.clone();
     let reload_lure = lure;
-    spawn_named("Reload Listener", async move {
+    spawn_named("Reload handler", async move {
         use tokio::signal::unix::{SignalKind, signal};
 
         let mut sigcont = match signal(SignalKind::from_raw(SIGCONT)) {
@@ -96,7 +96,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     })?;
 
-    spawn_named("Main Thread", async move {
+    spawn_named("Main thread", async move {
         if let Err(e) = lure.start().await {
             log::error!("{e}");
         }

@@ -180,9 +180,9 @@ where
 {
     // let mut copied = 0;
     let mut buf = [0u8; 1024];
+    let (a0, a1) = abort.split_at_mut(1);
     loop {
         let bytes_read;
-        let (a0, a1) = abort.split_at_mut(1);
         let a0 = a0[0].recv();
         let a1 = a1[0].recv();
         tokio::select! {
@@ -209,9 +209,10 @@ where
         // While we ignore some read errors above, any error writing data we've already read to
         // the other side is always treated as exceptional.
         write.write_all(&buf[0..bytes_read]).await?;
-        write.flush().await?;
+        // Reduce poller wakes
+        // write.flush().await?;
         // copied += bytes_read;
-        tokio::task::yield_now().await;
+        // tokio::task::yield_now().await;
     }
     Ok(())
     // Ok(copied)
