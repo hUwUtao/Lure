@@ -10,10 +10,11 @@ pub(crate) mod telemetry;
 pub(crate) mod threat;
 pub(crate) mod utils;
 
-use std::{env, error::Error};
+use std::{env, error::Error, io::ErrorKind};
 
 use anyhow::anyhow;
 use config::LureConfig;
+use libc::SIGCONT;
 use lure::Lure;
 use tokio::sync::broadcast;
 
@@ -23,7 +24,7 @@ use crate::{
     utils::leak,
 };
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
     let _ = dotenvy::dotenv();
     #[cfg(debug_assertions)]
@@ -41,35 +42,62 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let current_dir = env::current_dir()?;
     let config_file = current_dir.join("settings.toml");
-    let config_file_path = config_file
+    let config_path = config_file
         .to_str()
-        .ok_or(anyhow!("Failed to get config file path"))?;
+        .ok_or(anyhow!("Failed to get config file path"))?
+        .to_string();
 
-    let config = match LureConfig::load(config_file_path) {
-        Ok(config) => {
-            // Save config to fill missing fields
-            let _ = config.save(config_file_path);
-            Ok(config)
-        }
-        Err(error) => {
-            match error {
-                LureConfigLoadError::Io(_) => {
-                    // If config loading fails we generate a default config
-                    let default_config = LureConfig::default();
-                    // Save the config to disk
-                    let _ = default_config.save(config_file_path);
-                    Ok(default_config)
-                }
-                LureConfigLoadError::Parse(parse_error) => Err(parse_error),
+    let config = match LureConfig::load(&config_path) {
+        Ok(config) => config,
+        Err(LureConfigLoadError::Io(io)) => {
+            if io.kind() == ErrorKind::NotFound {
+                LureConfig::default()
+            } else {
+                return Err(io.into());
             }
         }
-    }?;
+        Err(LureConfigLoadError::Parse(parse_error)) => return Err(parse_error.into()),
+    };
 
     let pmt = leak(ProcessMetricsService::new());
     pmt.start();
 
     let stop = leak(broadcast::channel(1).0);
     let lure = leak(Lure::new(config, stop));
+    lure.sync_routes_from_config().await?;
+
+    let reload_path = config_path.clone();
+    let reload_lure = lure;
+    tokio::spawn(async move {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let mut sigcont = match signal(SignalKind::from_raw(SIGCONT)) {
+            Ok(sig) => sig,
+            Err(err) => {
+                log::error!("Failed to register SIGCONT handler: {err}");
+                return;
+            }
+        };
+
+        while sigcont.recv().await.is_some() {
+            match LureConfig::load(&reload_path) {
+                Ok(cfg) => {
+                    if let Err(err) = reload_lure.reload_config(cfg).await {
+                        log::error!("Failed to apply reloaded config: {err:?}");
+                    }
+                }
+                Err(LureConfigLoadError::Io(io)) if io.kind() == ErrorKind::NotFound => {
+                    if let Err(err) = reload_lure.reload_config(LureConfig::default()).await {
+                        log::error!("Failed to apply default config during reload: {err:?}");
+                    }
+                }
+                Err(err) => {
+                    log::error!("Failed to load config during reload: {err}");
+                }
+            }
+        }
+    });
+
     tokio::spawn(async move {
         if let Err(e) = lure.start().await {
             log::error!("{e}");

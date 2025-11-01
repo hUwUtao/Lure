@@ -15,6 +15,7 @@ use crate::{
 };
 
 mod attr;
+pub use attr::RouteAttr;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Copy)]
 pub enum RouteFlags {
@@ -247,6 +248,19 @@ impl RouterInstance {
         routes: &mut RwLockWriteGuard<'_, HashMap<u64, Arc<Route>>>,
     ) {
         self.metrics.record_routes_active(routes.len() as u64);
+    }
+
+    /// Clear all routes and indices.
+    pub async fn clear_routes(&self) {
+        let keys = {
+            let routes = self.active_routes.read().await;
+            routes.keys().cloned().collect::<Vec<_>>()
+        };
+        let mut routes = self.active_routes.write().await;
+        for key in keys {
+            self.remote_route_unlocked(&mut routes, key).await;
+        }
+        self.collect_routes_count_unlocked(&mut routes);
     }
 
     /// Remove a route and clean up indices

@@ -1,158 +1,95 @@
-use std::{collections::HashMap, fs, fs::File, io::prelude::*};
+use std::{collections::HashMap, fs, fs::File, io::prelude::*, net::SocketAddr, str::FromStr};
 
 use serde::{Deserialize, Serialize};
-// v2
+
+use crate::router::{Route, RouteAttr, RouteFlags};
+
+const DEFAULT_ROUTE_ID_BASE: u64 = u64::MAX - u32::MAX as u64;
 
 /// Top-level configuration for the application, loaded from a TOML file.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LureConfig {
-    /// Unique instance name or identifier
+    /// Unique instance name or identifier.
+    #[serde(default = "default_inst")]
     pub inst: String,
 
-    /// Socket address to bind to, e.g. "0.0.0.0:25565"
+    /// Socket address to bind to, e.g. "0.0.0.0:25565".
+    #[serde(default = "default_bind")]
     pub bind: String,
 
-    /// Enable or disable proxy protocol support
-    #[serde(rename = "proxy_procol")]
+    /// Enable or disable proxy protocol support.
+    #[serde(default, rename = "proxy_procol")]
     pub proxy_protocol: bool,
 
-    /// Cache-related parameters
-    pub cache: CacheConfig,
+    /// Maximum concurrent downstream connections.
+    #[serde(default = "default_max_conn")]
+    pub max_conn: u32,
 
-    /// Threat protection and rate-limiting settings
-    ///
-    /// This section defines the L7 threat model controls:
-    /// - `ban`: total violation count before automatically banning an IP
-    /// - `stall`: thresholds for detecting login spam that stalls backend
-    /// - `hang`: inter-packet timeout thresholds to catch hanging connections
-    pub threat: ThreatConfig,
+    /// Cooldown interval (seconds) applied to connection rate limiter.
+    #[serde(default)]
+    pub cooldown: u64,
 
-    /// Connection limit semaphore thresholds
-    pub semaphore: SemaphoreConfig,
-
-    /// RPC and metrics endpoint configuration
-    pub control: ControlConfig,
-
-    /// Misc config
-    pub misc: MiscConfig,
-
-    /// List of localize strings, doesn't really matter
+    /// Localized string map used for placeholder responses.
+    #[serde(default)]
     pub strings: HashMap<Box<str>, Box<str>>,
 
-    // Mapping of route patterns to upstream endpoints
-    // pub routes: HashMap<String, RouteConfig>,
+    /// Default, statically-configured routes.
+    #[serde(default)]
+    pub route: Vec<RouteConfig>,
+
     #[serde(flatten)]
-    pub other_fields: HashMap<String, toml::value::Value>,
+    pub other_fields: HashMap<String, toml::Value>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-pub struct MiscConfig {
-    pub override_players: Option<Vec<String>>,
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct RouteConfig {
+    /// Optional single matcher helper.
+    pub matcher: Option<String>,
+    /// Matcher list; combined with `matcher` if present.
+    pub matchers: Vec<String>,
+    /// Optional single endpoint helper.
+    pub endpoint: Option<String>,
+    /// Endpoint list; combined with `endpoint` if present.
+    pub endpoints: Vec<String>,
+    /// Route priority.
+    pub priority: i32,
+    /// Additional flags to apply.
+    pub flags: Option<RouteFlagsConfig>,
 }
 
-/// Configuration for cache durations (in milliseconds)
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CacheConfig {
-    /// TTL for query cache
-    pub query: u64,
-
-    /// TTL for intelligence data cache
-    pub intelligence: u64,
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct RouteFlagsConfig {
+    pub disabled: bool,
+    pub proxy_protocol: bool,
+    pub cache_query: bool,
+    pub override_query: bool,
 }
 
-/// Top-level threat protection config
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ThreatConfig {
-    /// Number of violations before banning an IP permanently
-    ///
-    /// Used to enforce automated blacklisting after repeated abuse.
-    pub ban: u32,
-
-    /// Stall detection: high-volume login attempts in a short window
-    pub stall: StallConfig,
-
-    /// Hang detection: prolonged or silent connections
-    pub hang: HangConfig,
+fn default_inst() -> String {
+    "main".to_string()
 }
 
-/// Delay selective client whilst login to counterattack.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct StallConfig {
-    /// Killswitch
-    pub enable: bool,
-
-    /// Time should be delayed for selective client
-    pub login: u32,
+fn default_bind() -> String {
+    "0.0.0.0:25577".to_string()
 }
 
-/// Timeout checks between packets to avoid hangs
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct HangConfig {
-    /// Query timeout threshold (seconds)
-    /// If no full packet arrives within this time, consider the connection hung.
-    pub query: u64,
-
-    /// Login timeout threshold (seconds)
-    pub login: u64,
-
-    /// Transport-level timeout threshold (seconds)
-    pub transport: u64,
-}
-
-/// Semaphore thresholds for active connections
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SemaphoreConfig {
-    /// Soft limit for active sockets
-    pub acceptable: u32,
-
-    /// Critical ratio (0.0 - 1.0) for raising alerts or shedding load
-    pub critical: f32,
-}
-
-/// Control endpoints for RPC and metrics
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ControlConfig {
-    /// URL for RPC calls (subscribe/push socket control)
-    pub rpc: String,
-
-    /// URL for Prometheus metrics ingestion
-    pub metrics: String,
+fn default_max_conn() -> u32 {
+    65535
 }
 
 impl Default for LureConfig {
     fn default() -> Self {
         Self {
-            inst: "main".to_string(),
-            bind: "0.0.0.0:25577".to_string(),
+            inst: default_inst(),
+            bind: default_bind(),
             proxy_protocol: false,
-            cache: CacheConfig {
-                query: 5000,
-                intelligence: 60000,
-            },
-            threat: ThreatConfig {
-                ban: 10,
-                stall: StallConfig {
-                    enable: false,
-                    login: 1000,
-                },
-                hang: HangConfig {
-                    query: 100,
-                    login: 1000,
-                    transport: 30000,
-                },
-            },
-            semaphore: SemaphoreConfig {
-                acceptable: 65535,
-                critical: 0.9,
-            },
-            control: ControlConfig {
-                rpc: "".to_string(),
-                metrics: "".to_string(),
-            },
-            misc: Default::default(),
-            strings: Default::default(),
-            // routes: Default::default(),
-            other_fields: Default::default(),
+            max_conn: default_max_conn(),
+            cooldown: 3,
+            strings: HashMap::new(),
+            route: Vec::new(),
+            other_fields: HashMap::new(),
         }
     }
 }
@@ -177,6 +114,77 @@ impl LureConfig {
         let mut file = File::create(path)?;
         file.write_all(config_str.as_bytes())?;
         Ok(())
+    }
+
+    pub fn default_routes(&self) -> anyhow::Result<Vec<Route>> {
+        self.route
+            .iter()
+            .enumerate()
+            .map(|(idx, cfg)| cfg.to_route(idx))
+            .collect()
+    }
+}
+
+impl RouteConfig {
+    fn to_route(&self, offset: usize) -> anyhow::Result<Route> {
+        let mut matchers: Vec<String> = self.matchers.clone();
+        if let Some(single) = &self.matcher {
+            matchers.push(single.clone());
+        }
+        if matchers.is_empty() {
+            anyhow::bail!("route entry {offset} missing matchers");
+        }
+
+        let mut endpoint_specs: Vec<String> = self.endpoints.clone();
+        if let Some(single) = &self.endpoint {
+            endpoint_specs.push(single.clone());
+        }
+        if endpoint_specs.is_empty() {
+            anyhow::bail!("route entry {offset} missing endpoints");
+        }
+
+        let mut endpoints = Vec::with_capacity(endpoint_specs.len());
+        for spec in endpoint_specs {
+            let addr = SocketAddr::from_str(&spec)
+                .map_err(|err| anyhow::anyhow!("invalid endpoint '{spec}': {err}"))?;
+            endpoints.push(addr);
+        }
+
+        if offset >= u32::MAX as usize {
+            anyhow::bail!("route entry index {offset} exceeds reserved id range");
+        }
+
+        Ok(Route {
+            id: DEFAULT_ROUTE_ID_BASE + offset as u64,
+            zone: u64::MAX,
+            priority: self.priority,
+            flags: self
+                .flags
+                .as_ref()
+                .map(RouteFlagsConfig::to_attr)
+                .unwrap_or_default(),
+            matchers,
+            endpoints,
+        })
+    }
+}
+
+impl RouteFlagsConfig {
+    fn to_attr(&self) -> RouteAttr {
+        let mut attr = RouteAttr::default();
+        if self.disabled {
+            attr.set_flag(RouteFlags::Disabled);
+        }
+        if self.proxy_protocol {
+            attr.set_flag(RouteFlags::ProxyProtocol);
+        }
+        if self.cache_query {
+            attr.set_flag(RouteFlags::CacheQuery);
+        }
+        if self.override_query {
+            attr.set_flag(RouteFlags::OverrideQuery);
+        }
+        attr
     }
 }
 

@@ -1,7 +1,7 @@
 use std::{
     net::{IpAddr, SocketAddr},
     sync::{
-        Arc,
+        Arc, RwLock,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -36,7 +36,7 @@ use crate::{
     logging::LureLogger,
     metrics::HandshakeMetrics,
     packet::{OwnedHandshake, OwnedPacket, create_proxy_protocol_header},
-    router::{ResolvedRoute, RouterInstance, Session},
+    router::{ResolvedRoute, Route, RouterInstance, Session},
     telemetry::{EventEnvelope, EventServiceInstance, event::EventHook, get_meter, init_event},
     threat::{
         ClientFail, ClientIntent, IntentTag, ThreatControlService, ratelimit::RateLimiterController,
@@ -44,7 +44,7 @@ use crate::{
     utils::{Connection, OwnedStatic, leak, placeholder_status_response},
 };
 pub struct Lure {
-    config: LureConfig,
+    config: RwLock<LureConfig>,
     router: &'static RouterInstance,
     threat: &'static ThreatControlService,
     metrics: HandshakeMetrics,
@@ -83,7 +83,7 @@ impl Lure {
     pub fn new(config: LureConfig, stop: &'static broadcast::Sender<()>) -> Lure {
         let router = leak(RouterInstance::new());
         Lure {
-            config,
+            config: RwLock::new(config),
             router,
             threat: leak(ThreatControlService::new()),
             metrics: HandshakeMetrics::new(&get_meter()),
@@ -92,20 +92,50 @@ impl Lure {
         }
     }
 
+    fn config_snapshot(&self) -> LureConfig {
+        self.config.read().expect("config lock poisoned").clone()
+    }
+
+    async fn install_routes(&'static self, routes: Vec<Route>) {
+        self.router.clear_routes().await;
+        for route in routes {
+            self.router.apply_route(route).await;
+        }
+    }
+
+    pub async fn sync_routes_from_config(&'static self) -> anyhow::Result<()> {
+        let snapshot = self.config_snapshot();
+        let routes = snapshot.default_routes()?;
+        self.install_routes(routes).await;
+        Ok(())
+    }
+
+    pub async fn reload_config(&'static self, config: LureConfig) -> anyhow::Result<()> {
+        let routes = config.default_routes()?;
+        self.install_routes(routes).await;
+        {
+            *self
+                .config
+                .write()
+                .expect("config lock poisoned during reload") = config;
+        }
+        Ok(())
+    }
+
     pub async fn start(&'static self) -> anyhow::Result<()> {
         // Listener config.
-        let listener_cfg = self.config.bind.to_owned();
+        let config = self.config_snapshot();
+        let listener_cfg = config.bind.clone();
         LureLogger::preparing_socket(&listener_cfg);
         let address: SocketAddr = listener_cfg.parse()?;
-        let max_connections = self.config.semaphore.acceptable as usize;
+        let max_connections = config.max_conn as usize;
+        let cooldown = Duration::from_secs(config.cooldown);
+        let inst = config.inst.clone();
+        drop(config);
 
-        if !self.config.control.rpc.is_empty() {
-            let event = init_event(self.config.control.rpc.clone());
-            event
-                .hook(EventIdent {
-                    id: self.config.inst.clone(),
-                })
-                .await;
+        if let Ok(rpc_url) = dotenvy::var("LURE_RPC") {
+            let event = init_event(rpc_url);
+            event.hook(EventIdent { id: inst }).await;
             event.hook(OwnedStatic::from(self.router)).await;
             event.clone().start();
         }
@@ -113,8 +143,7 @@ impl Lure {
         // Start server.
         let listener = TcpListener::bind(address).await?;
         let semaphore = Arc::new(Semaphore::new(max_connections));
-        let rate_limiter: RateLimiterController<IpAddr> =
-            RateLimiterController::new(10, Duration::from_secs(3));
+        let rate_limiter: RateLimiterController<IpAddr> = RateLimiterController::new(10, cooldown);
 
         let stop = self.stop.subscribe();
         loop {
@@ -284,10 +313,12 @@ impl Lure {
 
     fn get_string(&self, key: &str) -> Box<str> {
         self.config
+            .read()
+            .expect("config lock poisoned")
             .strings
             .get(key)
-            .unwrap_or(&"".into())
-            .to_owned()
+            .cloned()
+            .unwrap_or_else(|| "".into())
     }
 
     fn placeholder_status_json(&self, label: &str) -> String {
