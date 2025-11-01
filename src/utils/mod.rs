@@ -101,3 +101,14 @@ impl Connection {
         &self.addr
     }
 }
+
+pub fn spawn_named<F>(
+    name: &str,
+    future: F,
+) -> Result<tokio::task::JoinHandle<F::Output>, std::io::Error>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    tokio::task::Builder::new().name(name).spawn(future)
+}

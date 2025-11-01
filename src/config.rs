@@ -1,4 +1,11 @@
-use std::{collections::HashMap, fs, fs::File, io::prelude::*, net::SocketAddr, str::FromStr};
+use std::{
+    collections::HashMap,
+    fs::{self, File},
+    io::prelude::*,
+    net::{SocketAddr, ToSocketAddrs},
+    path::PathBuf,
+    str::FromStr,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -65,6 +72,7 @@ pub struct RouteFlagsConfig {
     pub proxy_protocol: bool,
     pub cache_query: bool,
     pub override_query: bool,
+    pub preserve_host: bool,
 }
 
 fn default_inst() -> String {
@@ -95,7 +103,7 @@ impl Default for LureConfig {
 }
 
 impl LureConfig {
-    pub fn load(path: &str) -> anyhow::Result<Self, LureConfigLoadError> {
+    pub fn load(path: &PathBuf) -> anyhow::Result<Self, LureConfigLoadError> {
         let raw = fs::read_to_string(path).map_err(LureConfigLoadError::Io)?;
         let config: Self = toml::from_str(&raw).map_err(LureConfigLoadError::Parse)?;
 
@@ -109,7 +117,7 @@ impl LureConfig {
         Ok(config)
     }
 
-    pub fn save(&self, path: &str) -> anyhow::Result<()> {
+    pub fn save(&self, path: &PathBuf) -> anyhow::Result<()> {
         let config_str = toml::to_string(&self)?;
         let mut file = File::create(path)?;
         file.write_all(config_str.as_bytes())?;
@@ -144,10 +152,30 @@ impl RouteConfig {
         }
 
         let mut endpoints = Vec::with_capacity(endpoint_specs.len());
+        let mut endpoint_hosts = Vec::with_capacity(endpoint_specs.len());
         for spec in endpoint_specs {
-            let addr = SocketAddr::from_str(&spec)
-                .map_err(|err| anyhow::anyhow!("invalid endpoint '{spec}': {err}"))?;
-            endpoints.push(addr);
+            let spec = spec.trim();
+            let host_hint = extract_endpoint_host(spec)?;
+            match SocketAddr::from_str(spec) {
+                Ok(addr) => {
+                    endpoints.push(addr);
+                    endpoint_hosts.push(Some(host_hint.clone()));
+                }
+                Err(_) => {
+                    let mut resolved = spec
+                        .to_socket_addrs()
+                        .map_err(|err| anyhow::anyhow!("invalid endpoint '{spec}': {err}"))?;
+                    let mut found = false;
+                    for addr in resolved.by_ref() {
+                        endpoints.push(addr);
+                        endpoint_hosts.push(Some(host_hint.clone()));
+                        found = true;
+                    }
+                    if !found {
+                        anyhow::bail!("endpoint '{spec}' resolved to no addresses");
+                    }
+                }
+            }
         }
 
         if offset >= u32::MAX as usize {
@@ -165,6 +193,7 @@ impl RouteConfig {
                 .unwrap_or_default(),
             matchers,
             endpoints,
+            endpoint_hosts,
         })
     }
 }
@@ -184,8 +213,32 @@ impl RouteFlagsConfig {
         if self.override_query {
             attr.set_flag(RouteFlags::OverrideQuery);
         }
+        if self.preserve_host {
+            attr.set_flag(RouteFlags::PreserveHost);
+        }
         attr
     }
+}
+
+fn extract_endpoint_host(spec: &str) -> anyhow::Result<String> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        anyhow::bail!("endpoint specification is empty");
+    }
+    if let Some(start) = spec.strip_prefix('[') {
+        let end = start
+            .find(']')
+            .ok_or_else(|| anyhow::anyhow!("endpoint '{spec}' missing closing bracket"))?;
+        let host = &start[..end];
+        return Ok(host.to_string());
+    }
+    if let Some(idx) = spec.rfind(':') {
+        if idx == 0 {
+            anyhow::bail!("endpoint '{spec}' missing hostname before port");
+        }
+        return Ok(spec[..idx].to_string());
+    }
+    anyhow::bail!("endpoint '{spec}' missing port separator");
 }
 
 #[derive(Debug, thiserror::Error)]

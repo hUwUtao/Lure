@@ -6,7 +6,7 @@ use std::time::Duration;
 use opentelemetry::metrics::{Counter, Gauge};
 use tokio_metrics::RuntimeMonitor;
 
-use crate::telemetry::get_meter;
+use crate::{telemetry::get_meter, utils::spawn_named};
 
 #[cfg(feature = "tokio_unstable")]
 struct UnstableMetrics {
@@ -376,13 +376,14 @@ impl ProcessMetricsService {
 
     pub fn start(&'static self) {
         // Spawn runtime metrics collection task
-        tokio::spawn(async move {
+        spawn_named("Runtime Metrics", async move {
             for metrics in self.runtime_monitor.intervals() {
                 self.update_runtime_metrics(&metrics);
                 // currently I have no idea how to change otel report rate
                 tokio::time::sleep(Duration::from_secs(30)).await;
             }
-        });
+        })
+        .unwrap();
 
         // Spawn task metrics collection task
         // tokio::spawn(async move {

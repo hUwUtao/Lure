@@ -23,6 +23,7 @@ pub enum RouteFlags {
     CacheQuery,
     OverrideQuery,
     ProxyProtocol,
+    PreserveHost,
 }
 
 /// Routing rule with matchers and endpoints, ordered by priority
@@ -39,6 +40,9 @@ pub struct Route {
     pub matchers: Vec<String>,
     /// Available endpoint addresses for this route
     pub endpoints: Vec<SocketAddr>,
+    /// Optional original host strings aligned with `endpoints`
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoint_hosts: Vec<Option<String>>,
 }
 
 impl Route {
@@ -56,6 +60,11 @@ impl Route {
     pub fn proxied(&self) -> bool {
         self.read_flag(RouteFlags::ProxyProtocol)
     }
+
+    #[inline]
+    pub fn preserve_host(&self) -> bool {
+        self.read_flag(RouteFlags::PreserveHost)
+    }
 }
 
 /// Client session tracking source, destination, and associated route
@@ -65,6 +74,8 @@ pub struct Session {
     pub client_addr: SocketAddr,
     /// Selected destination address
     pub destination_addr: SocketAddr,
+    /// Resolved endpoint host name, if available
+    pub endpoint_host: Option<String>,
     /// ID of the route used for this session
     pub route_id: u64,
 }
@@ -105,6 +116,7 @@ impl Drop for SessionHandle {
 #[derive(Debug, Clone)]
 pub struct ResolvedRoute {
     pub endpoint: SocketAddr,
+    pub endpoint_host: Option<String>,
     pub route: Arc<Route>,
 }
 
@@ -287,8 +299,10 @@ impl RouterInstance {
                 .clone();
 
             let endpoint = *best_route.endpoints.first()?;
+            let endpoint_host = best_route.endpoint_hosts.get(0).cloned().flatten();
             return Some(ResolvedRoute {
                 endpoint,
+                endpoint_host,
                 route: best_route,
             });
         }
@@ -304,6 +318,7 @@ impl RouterInstance {
             for matcher in &route.matchers {
                 if let Some(port) = Self::match_wildcard(matcher, hostname) {
                     let mut endpoint = *route.endpoints.first()?;
+                    let endpoint_host = route.endpoint_hosts.get(0).cloned().flatten();
                     if endpoint.port() == 0 {
                         endpoint.set_port(port);
                     }
@@ -313,6 +328,7 @@ impl RouterInstance {
                         _ => {
                             best = Some(ResolvedRoute {
                                 endpoint,
+                                endpoint_host,
                                 route: route.clone(),
                             })
                         }
@@ -357,6 +373,7 @@ impl RouterInstance {
         let session = Arc::new(Session {
             client_addr,
             destination_addr: resolved.endpoint,
+            endpoint_host: resolved.endpoint_host.clone(),
             route_id: resolved.route.id,
         });
 

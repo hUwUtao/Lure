@@ -41,7 +41,9 @@ use crate::{
     threat::{
         ClientFail, ClientIntent, IntentTag, ThreatControlService, ratelimit::RateLimiterController,
     },
-    utils::{Connection, OwnedStatic, leak, placeholder_status_response},
+    utils::{
+        Connection, OwnedStatic, leak, placeholder_status_response, sanitize_hostname, spawn_named,
+    },
 };
 pub struct Lure {
     config: RwLock<LureConfig>,
@@ -122,6 +124,23 @@ impl Lure {
         Ok(())
     }
 
+    fn prepare_backend_handshake(
+        &self,
+        handshake: &OwnedHandshake,
+        endpoint_host: Option<&str>,
+        endpoint_port: u16,
+        preserve_host: bool,
+    ) -> OwnedHandshake {
+        let mut prepared = handshake.clone();
+        if !preserve_host {
+            if let Some(host) = endpoint_host {
+                prepared.server_address = sanitize_hostname(host);
+            }
+            prepared.server_port = endpoint_port;
+        }
+        prepared
+    }
+
     pub async fn start(&'static self) -> anyhow::Result<()> {
         // Listener config.
         let config = self.config_snapshot();
@@ -176,13 +195,13 @@ impl Lure {
                     }
 
                     let lure = self;
-                    tokio::spawn(async move {
+                    spawn_named("Connection handler", async move {
                         // Apply timeout to connection handling
                         if let Err(e) = lure.handle_connection(client, addr).await {
                             LureLogger::connection_closed(&addr, &e);
                         }
                         drop(permit);
-                    });
+                    })?;
                 }
                 Err(_) => {
                     // Too many connections, reject immediately
@@ -382,12 +401,18 @@ impl Lure {
 
         let mut server = EncodedConnection::new(&mut backend, SocketIntent::GreetToBackend);
 
+        let backend_handshake = self.prepare_backend_handshake(
+            handshake,
+            resolved.endpoint_host.as_deref(),
+            backend_addr.port(),
+            resolved.route.preserve_host(),
+        );
         if let Err(err) = self
             .initialize_backend_protocol(
                 &mut server,
                 resolved.route.proxied(),
                 client_addr,
-                handshake,
+                &backend_handshake,
             )
             .await
         {
@@ -519,7 +544,13 @@ impl Lure {
             Ok(Ok((session, route))) => {
                 let server_address = session.destination_addr;
                 if let Err(e) = self
-                    .handle_proxy_session(client, handshake, route.proxied(), &session)
+                    .handle_proxy_session(
+                        client,
+                        handshake,
+                        route.proxied(),
+                        route.preserve_host(),
+                        &session,
+                    )
                     .await
                 {
                     let re = ReportableError::from(e);
@@ -567,6 +598,7 @@ impl Lure {
         mut client: EncodedConnection<'_>,
         handshake: &OwnedHandshake,
         proxied: bool,
+        preserve_host: bool,
         session: &Session,
     ) -> anyhow::Result<()> {
         let server_address = session.destination_addr;
@@ -590,8 +622,14 @@ impl Lure {
         };
         let mut server = EncodedConnection::new(&mut owned_stream, SocketIntent::GreetToBackend);
 
+        let backend_handshake = self.prepare_backend_handshake(
+            handshake,
+            session.endpoint_host.as_deref(),
+            server_address.port(),
+            preserve_host,
+        );
         if let Err(err) = self
-            .initialize_backend_protocol(&mut server, proxied, client_addr, handshake)
+            .initialize_backend_protocol(&mut server, proxied, client_addr, &backend_handshake)
             .await
         {
             let err = ReportableError::from(err);

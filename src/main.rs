@@ -12,7 +12,6 @@ pub(crate) mod utils;
 
 use std::{env, error::Error, io::ErrorKind};
 
-use anyhow::anyhow;
 use config::LureConfig;
 use libc::SIGCONT;
 use lure::Lure;
@@ -21,12 +20,13 @@ use tokio::sync::broadcast;
 use crate::{
     config::LureConfigLoadError,
     telemetry::{oltp::init_meter, process::ProcessMetricsService},
-    utils::leak,
+    utils::{leak, spawn_named},
 };
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
     let _ = dotenvy::dotenv();
+    console_subscriber::init();
     #[cfg(debug_assertions)]
     env_logger::builder()
         .filter_level(log::LevelFilter::Debug)
@@ -42,16 +42,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let current_dir = env::current_dir()?;
     let config_file = current_dir.join("settings.toml");
-    let config_path = config_file
-        .to_str()
-        .ok_or(anyhow!("Failed to get config file path"))?
-        .to_string();
 
-    let config = match LureConfig::load(&config_path) {
+    let config = match LureConfig::load(&config_file) {
         Ok(config) => config,
         Err(LureConfigLoadError::Io(io)) => {
             if io.kind() == ErrorKind::NotFound {
-                LureConfig::default()
+                let config = LureConfig::default();
+                config.save(&config_file)?;
+                config
             } else {
                 return Err(io.into());
             }
@@ -66,9 +64,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let lure = leak(Lure::new(config, stop));
     lure.sync_routes_from_config().await?;
 
-    let reload_path = config_path.clone();
+    let reload_path = config_file.clone();
     let reload_lure = lure;
-    tokio::spawn(async move {
+    spawn_named("Reload Listener", async move {
         use tokio::signal::unix::{SignalKind, signal};
 
         let mut sigcont = match signal(SignalKind::from_raw(SIGCONT)) {
@@ -96,9 +94,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
         }
-    });
+    })?;
 
-    tokio::spawn(async move {
+    spawn_named("Main Thread", async move {
         if let Err(e) = lure.start().await {
             log::error!("{e}");
         }
@@ -106,7 +104,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             providers.0.shutdown().unwrap();
             // providers.1.shutdown()?;
         }
-    });
+    })?;
     {
         use futures::future::{FutureExt, select_all};
         use tokio::signal::unix::{SignalKind, signal};
