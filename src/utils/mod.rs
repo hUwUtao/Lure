@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use serde_json::json;
-use tokio::net::TcpStream;
+use tokio::{io, net::TcpStream};
 
 use crate::telemetry::{EventEnvelope, EventServiceInstance, event::EventHook};
 
@@ -76,9 +76,9 @@ pub struct Connection {
 }
 
 impl TryFrom<TcpStream> for Connection {
-    type Error = anyhow::Error;
+    type Error = io::Error;
 
-    fn try_from(stream: TcpStream) -> anyhow::Result<Self> {
+    fn try_from(stream: TcpStream) -> Result<Self, io::Error> {
         let addr = stream.peer_addr()?;
         Ok(Self { stream, addr })
     }

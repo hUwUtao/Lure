@@ -2,14 +2,12 @@ use std::{
     collections::HashMap,
     fs::{self, File},
     io::prelude::*,
-    net::{SocketAddr, ToSocketAddrs},
     path::PathBuf,
-    str::FromStr,
 };
 
 use serde::{Deserialize, Serialize};
 
-use crate::router::{Route, RouteAttr, RouteFlags};
+use crate::router::{Destination, Route, RouteAttr, RouteFlags};
 
 const DEFAULT_ROUTE_ID_BASE: u64 = u64::MAX - u32::MAX as u64;
 
@@ -151,31 +149,16 @@ impl RouteConfig {
             anyhow::bail!("route entry {offset} missing endpoints");
         }
 
-        let mut endpoints = Vec::with_capacity(endpoint_specs.len());
-        let mut endpoint_hosts = Vec::with_capacity(endpoint_specs.len());
+        let mut endpoints: Vec<Destination> = Vec::with_capacity(endpoint_specs.len());
         for spec in endpoint_specs {
-            let spec = spec.trim();
-            let host_hint = extract_endpoint_host(spec)?;
-            match SocketAddr::from_str(spec) {
-                Ok(addr) => {
-                    endpoints.push(addr);
-                    endpoint_hosts.push(Some(host_hint.clone()));
-                }
-                Err(_) => {
-                    let mut resolved = spec
-                        .to_socket_addrs()
-                        .map_err(|err| anyhow::anyhow!("invalid endpoint '{spec}': {err}"))?;
-                    let mut found = false;
-                    for addr in resolved.by_ref() {
-                        endpoints.push(addr);
-                        endpoint_hosts.push(Some(host_hint.clone()));
-                        found = true;
-                    }
-                    if !found {
-                        anyhow::bail!("endpoint '{spec}' resolved to no addresses");
-                    }
-                }
+            let trimmed = spec.trim();
+            if trimmed.is_empty() {
+                anyhow::bail!("route entry {offset} contains empty endpoint");
             }
+            let destination = Destination::parse_with_default(trimmed, 25565).map_err(|err| {
+                anyhow::anyhow!("invalid endpoint '{trimmed}' in route {offset}: {err}")
+            })?;
+            endpoints.push(destination);
         }
 
         if offset >= u32::MAX as usize {
@@ -193,7 +176,6 @@ impl RouteConfig {
                 .unwrap_or_default(),
             matchers,
             endpoints,
-            endpoint_hosts,
         })
     }
 }
@@ -218,27 +200,6 @@ impl RouteFlagsConfig {
         }
         attr
     }
-}
-
-fn extract_endpoint_host(spec: &str) -> anyhow::Result<String> {
-    let spec = spec.trim();
-    if spec.is_empty() {
-        anyhow::bail!("endpoint specification is empty");
-    }
-    if let Some(start) = spec.strip_prefix('[') {
-        let end = start
-            .find(']')
-            .ok_or_else(|| anyhow::anyhow!("endpoint '{spec}' missing closing bracket"))?;
-        let host = &start[..end];
-        return Ok(host.to_string());
-    }
-    if let Some(idx) = spec.rfind(':') {
-        if idx == 0 {
-            anyhow::bail!("endpoint '{spec}' missing hostname before port");
-        }
-        return Ok(spec[..idx].to_string());
-    }
-    anyhow::bail!("endpoint '{spec}' missing port separator");
 }
 
 #[derive(Debug, thiserror::Error)]

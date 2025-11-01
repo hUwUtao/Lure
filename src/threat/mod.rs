@@ -11,8 +11,6 @@ use crate::threat::ratelimit::RateLimitResult;
 pub enum IntentTag {
     Handshake,
     Query,
-    Login,
-    Transport,
 }
 
 #[derive(Debug, thiserror::Error)]

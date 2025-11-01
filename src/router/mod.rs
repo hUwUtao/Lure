@@ -1,4 +1,13 @@
-use std::{collections::HashMap, fmt::Debug, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    fmt::Debug,
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use fake_serialize::FakeSerialize;
@@ -16,7 +25,9 @@ use crate::{
 };
 
 mod attr;
+mod dest;
 pub use attr::RouteAttr;
+pub use dest::Destination;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Copy)]
 pub enum RouteFlags {
@@ -39,11 +50,8 @@ pub struct Route {
     pub flags: attr::RouteAttr,
     /// Domain patterns or hostnames this route matches
     pub matchers: Vec<String>,
-    /// Available endpoint addresses for this route
-    pub endpoints: Vec<SocketAddr>,
-    /// Optional original host strings aligned with `endpoints`
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub endpoint_hosts: Vec<Option<String>>,
+    /// Available endpoint specifications for this route
+    pub endpoints: Vec<Destination>,
 }
 
 impl Route {
@@ -75,8 +83,8 @@ pub struct Session {
     pub client_addr: SocketAddr,
     /// Selected destination address
     pub destination_addr: SocketAddr,
-    /// Resolved endpoint host name, if available
-    pub endpoint_host: Option<String>,
+    /// Resolved endpoint host name (unresolved form from config)
+    pub endpoint_host: String,
     /// ID of the route used for this session
     pub route_id: u64,
 }
@@ -117,7 +125,7 @@ impl Drop for SessionHandle {
 #[derive(Debug, Clone)]
 pub struct ResolvedRoute {
     pub endpoint: SocketAddr,
-    pub endpoint_host: Option<String>,
+    pub endpoint_host: String,
     pub route: Arc<Route>,
 }
 
@@ -133,6 +141,8 @@ pub struct RouterInstance {
     /// Metrics
     metrics: Arc<RouterMetrics>,
     metrics_tx: mpsc::UnboundedSender<RouterMetricsMessage>,
+    /// Incrementing cursor used for naïve load balancing over resolved endpoints
+    balancer_cursor: AtomicU64,
 }
 
 #[derive(Debug)]
@@ -157,6 +167,7 @@ impl RouterInstance {
             domain_index: RwLock::new(HashMap::new()),
             metrics,
             metrics_tx,
+            balancer_cursor: AtomicU64::new(0),
         }
     }
 
@@ -304,59 +315,91 @@ impl RouterInstance {
     /// Resolve hostname to endpoint and route pair
     pub async fn resolve(&self, hostname: &str) -> Option<ResolvedRoute> {
         self.metrics.record_routes_resolve();
-        // Try exact match first using domain index
-        if let Some(route_ids) = {
-            let domain_index = self.domain_index.read().await;
-            domain_index.get(hostname).cloned()
-        } {
-            let routes = self.active_routes.read().await;
-            let best_route = route_ids
-                .iter()
-                .find_map(|&id| routes.get(&id))
-                .filter(|route| !route.disabled())?
-                .clone();
-
-            let endpoint = *best_route.endpoints.first()?;
-            let endpoint_host = best_route.endpoint_hosts.get(0).cloned().flatten();
-            return Some(ResolvedRoute {
-                endpoint,
-                endpoint_host,
-                route: best_route,
-            });
-        }
-
-        // Fallback to wildcard matchers
         let routes = self.active_routes.read().await;
-        let mut best: Option<ResolvedRoute> = None;
 
-        for route in routes.values() {
-            if route.disabled() {
-                continue;
-            }
-            for matcher in &route.matchers {
-                if let Some(port) = Self::match_wildcard(matcher, hostname) {
-                    let mut endpoint = *route.endpoints.first()?;
-                    let endpoint_host = route.endpoint_hosts.get(0).cloned().flatten();
-                    if endpoint.port() == 0 {
-                        endpoint.set_port(port);
+        // Exact match via domain index (already sorted by priority)
+        if let Some(route_ids) = {
+            let index = self.domain_index.read().await;
+            index.get(hostname).cloned()
+        } {
+            for id in route_ids {
+                if let Some(route) = routes.get(&id).filter(|route| !route.disabled()) {
+                    if let Some(resolved) = self.resolve_with_route(route.clone(), None) {
+                        return Some(resolved);
                     }
-
-                    match &best {
-                        Some(existing) if existing.route.priority >= route.priority => {}
-                        _ => {
-                            best = Some(ResolvedRoute {
-                                endpoint,
-                                endpoint_host,
-                                route: route.clone(),
-                            })
-                        }
-                    }
-                    break;
                 }
             }
         }
 
-        best
+        // Wildcard match (prefer highest priority)
+        let mut best: Option<(i32, ResolvedRoute)> = None;
+        for route in routes.values() {
+            if route.disabled() {
+                continue;
+            }
+
+            let port_override = route
+                .matchers
+                .iter()
+                .find_map(|matcher| Self::match_wildcard(matcher, hostname));
+
+            if let Some(port) = port_override {
+                if let Some(resolved) = self.resolve_with_route(route.clone(), Some(port)) {
+                    let priority = resolved.route.priority;
+                    if best.as_ref().map_or(true, |(p, _)| priority > *p) {
+                        best = Some((priority, resolved));
+                    }
+                }
+            }
+        }
+
+        best.map(|(_, resolved)| resolved)
+    }
+
+    fn resolve_with_route(
+        &self,
+        route: Arc<Route>,
+        port_override: Option<u16>,
+    ) -> Option<ResolvedRoute> {
+        self.select_balanced_endpoint(route.as_ref(), port_override)
+            .map(|(endpoint_host, endpoint)| ResolvedRoute {
+                endpoint,
+                endpoint_host,
+                route,
+            })
+    }
+
+    fn next_balance_index(&self) -> u64 {
+        self.balancer_cursor.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn select_balanced_endpoint(
+        &self,
+        route: &Route,
+        port_override: Option<u16>,
+    ) -> Option<(String, SocketAddr)> {
+        let mut candidates: Vec<(Arc<str>, SocketAddr)> = Vec::new();
+
+        for destination in &route.endpoints {
+            if let Ok(resolved) = destination.resolve() {
+                for (host, mut addr) in resolved {
+                    if let Some(port) = port_override {
+                        if addr.port() == 0 {
+                            addr.set_port(port);
+                        }
+                    }
+                    candidates.push((host, addr));
+                }
+            }
+        }
+
+        if candidates.is_empty() {
+            return None;
+        }
+
+        let idx = (self.next_balance_index() % candidates.len() as u64) as usize;
+        let (host, addr) = &candidates[idx];
+        Some((host.as_ref().to_string(), *addr))
     }
 
     fn match_wildcard(matcher: &str, hostname: &str) -> Option<u16> {
@@ -567,7 +610,7 @@ mod tests {
         let route = Route {
             id: 1,
             matchers: vec!["10000-10245*.abc.xyz.com".to_string()],
-            endpoints: vec!["123.245.122.21:0".parse().unwrap()],
+            endpoints: vec![Destination::parse("123.245.122.21:0").unwrap()],
             ..Default::default()
         };
         router.apply_route(route).await;
@@ -582,7 +625,7 @@ mod tests {
         let disabled_route = Route {
             id: 1,
             matchers: vec!["example.com".to_string()],
-            endpoints: vec!["127.0.0.1:8080".parse().unwrap()],
+            endpoints: vec![Destination::parse("127.0.0.1:8080").unwrap()],
             flags: attr::RouteAttr::from(RouteFlags::Disabled),
             ..Default::default()
         };
@@ -601,7 +644,7 @@ mod tests {
         let proxied_route = Route {
             id: 2,
             matchers: vec!["proxy.example.com".to_string()],
-            endpoints: vec!["127.0.0.1:25565".parse().unwrap()],
+            endpoints: vec![Destination::parse("127.0.0.1:25565").unwrap()],
             flags: attr::RouteAttr::from(RouteFlags::ProxyProtocol),
             ..Default::default()
         };
@@ -615,7 +658,7 @@ mod tests {
         let normal_route = Route {
             id: 3,
             matchers: vec!["normal.example.com".to_string()],
-            endpoints: vec!["127.0.0.1:25565".parse().unwrap()],
+            endpoints: vec![Destination::parse("127.0.0.1:25565").unwrap()],
             flags: attr::RouteAttr::from_u64(0),
             ..Default::default()
         };
@@ -624,5 +667,26 @@ mod tests {
         let resolved = router.resolve("normal.example.com").await.unwrap();
         assert!(!resolved.route.proxied());
         assert!(!resolved.route.disabled());
+    }
+
+    #[tokio::test]
+    async fn resolve_load_balances_across_endpoints() {
+        let router = RouterInstance::new();
+        let route = Route {
+            id: 10,
+            matchers: vec!["balanced.example.com".to_string()],
+            endpoints: vec![
+                Destination::parse("10.0.0.1:25565").unwrap(),
+                Destination::parse("10.0.0.2:25565").unwrap(),
+            ],
+            ..Default::default()
+        };
+
+        router.apply_route(route).await;
+
+        let first = router.resolve("balanced.example.com").await.unwrap();
+        let second = router.resolve("balanced.example.com").await.unwrap();
+
+        assert_ne!(first.endpoint, second.endpoint);
     }
 }

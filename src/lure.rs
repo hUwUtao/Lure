@@ -403,7 +403,7 @@ impl Lure {
 
         let backend_handshake = self.prepare_backend_handshake(
             handshake,
-            resolved.endpoint_host.as_deref(),
+            Some(resolved.endpoint_host.as_str()),
             backend_addr.port(),
             resolved.route.preserve_host(),
         );
@@ -624,7 +624,7 @@ impl Lure {
 
         let backend_handshake = self.prepare_backend_handshake(
             handshake,
-            session.endpoint_host.as_deref(),
+            Some(session.endpoint_host.as_str()),
             server_address.port(),
             preserve_host,
         );
@@ -657,7 +657,7 @@ impl Lure {
             LureLogger::tcp_nodelay_failed(&e);
         }
 
-        Connection::try_from(stream)
+        Ok(Connection::try_from(stream)?)
     }
 
     async fn initialize_backend_protocol(
