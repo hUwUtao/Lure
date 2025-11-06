@@ -323,10 +323,10 @@ impl RouterInstance {
             index.get(hostname).cloned()
         } {
             for id in route_ids {
-                if let Some(route) = routes.get(&id).filter(|route| !route.disabled()) {
-                    if let Some(resolved) = self.resolve_with_route(route.clone(), None) {
-                        return Some(resolved);
-                    }
+                if let Some(route) = routes.get(&id).filter(|route| !route.disabled())
+                    && let Some(resolved) = self.resolve_with_route(route.clone(), None)
+                {
+                    return Some(resolved);
                 }
             }
         }
@@ -343,12 +343,12 @@ impl RouterInstance {
                 .iter()
                 .find_map(|matcher| Self::match_wildcard(matcher, hostname));
 
-            if let Some(port) = port_override {
-                if let Some(resolved) = self.resolve_with_route(route.clone(), Some(port)) {
-                    let priority = resolved.route.priority;
-                    if best.as_ref().map_or(true, |(p, _)| priority > *p) {
-                        best = Some((priority, resolved));
-                    }
+            if let Some(port) = port_override
+                && let Some(resolved) = self.resolve_with_route(route.clone(), Some(port))
+            {
+                let priority = resolved.route.priority;
+                if best.as_ref().is_none_or(|(p, _)| priority > *p) {
+                    best = Some((priority, resolved));
                 }
             }
         }
@@ -383,10 +383,10 @@ impl RouterInstance {
         for destination in &route.endpoints {
             if let Ok(resolved) = destination.resolve() {
                 for (host, mut addr) in resolved {
-                    if let Some(port) = port_override {
-                        if addr.port() == 0 {
-                            addr.set_port(port);
-                        }
+                    if let Some(port) = port_override
+                        && addr.port() == 0
+                    {
+                        addr.set_port(port);
                     }
                     candidates.push((host, addr));
                 }
@@ -399,7 +399,7 @@ impl RouterInstance {
 
         let idx = (self.next_balance_index() % candidates.len() as u64) as usize;
         let (host, addr) = &candidates[idx];
-        Some((host.as_ref().to_string(), *addr))
+        Some((host.to_string(), *addr))
     }
 
     fn match_wildcard(matcher: &str, hostname: &str) -> Option<u16> {

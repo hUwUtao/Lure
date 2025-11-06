@@ -41,9 +41,7 @@ use crate::{
     threat::{
         ClientFail, ClientIntent, IntentTag, ThreatControlService, ratelimit::RateLimiterController,
     },
-    utils::{
-        Connection, OwnedStatic, leak, placeholder_status_response, sanitize_hostname, spawn_named,
-    },
+    utils::{Connection, OwnedStatic, leak, placeholder_status_response, spawn_named},
 };
 pub struct Lure {
     config: RwLock<LureConfig>,
@@ -134,7 +132,7 @@ impl Lure {
         let mut prepared = handshake.clone();
         if !preserve_host {
             if let Some(host) = endpoint_host {
-                prepared.server_address = sanitize_hostname(host);
+                prepared.server_address = Arc::from(host);
             }
             prepared.server_port = endpoint_port;
         }
@@ -270,7 +268,7 @@ impl Lure {
 
         let resolved = match timeout(
             Duration::from_secs(1),
-            self.router.resolve(&hs.server_address),
+            self.router.resolve(&hs.get_stripped_hostname()),
         )
         .await
         {
@@ -280,7 +278,7 @@ impl Lure {
                     "router.resolve",
                     Duration::from_secs(1),
                     Some(&client_addr),
-                    Some(hs.server_address.as_str()),
+                    Some(&hs.server_address),
                 );
                 None
             }
@@ -518,7 +516,7 @@ impl Lure {
         resolved: Option<ResolvedRoute>,
     ) -> anyhow::Result<()> {
         let address = *client.as_inner().addr();
-        let hostname = handshake.server_address.as_str();
+        let hostname = &handshake.server_address;
 
         let Some(resolved) = resolved else {
             self.metrics.record_failure("login");
@@ -603,7 +601,7 @@ impl Lure {
     ) -> anyhow::Result<()> {
         let server_address = session.destination_addr;
         let client_addr = *client.as_inner().addr();
-        let hostname = handshake.server_address.as_str();
+        let hostname = &handshake.server_address;
 
         let mut owned_stream = match self.open_backend_connection(server_address).await {
             Ok(stream) => stream,

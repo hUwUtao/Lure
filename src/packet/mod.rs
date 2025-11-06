@@ -1,4 +1,7 @@
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::{
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
+    sync::Arc,
+};
 
 use bytes::BytesMut;
 use proxy_protocol::{
@@ -14,8 +17,6 @@ use valence_protocol::{
     uuid::Uuid,
 };
 
-use crate::utils::sanitize_hostname;
-
 pub trait OwnedPacket<'a, P: Packet + Decode<'a> + Encode> {
     fn from_packet(packet: P) -> Self;
     fn as_packet(&'a self) -> P;
@@ -25,16 +26,38 @@ pub trait OwnedPacket<'a, P: Packet + Decode<'a> + Encode> {
 /// Owned `HandshakeC2S`
 pub struct OwnedHandshake {
     pub protocol_version: VarInt,
-    pub server_address: String,
+    pub server_address: Arc<str>,
     pub server_port: u16,
     pub next_state: HandshakeNextState,
+}
+
+impl OwnedHandshake {
+    /// According to various spec including Forge
+    pub fn get_stripped_hostname(&self) -> Arc<str> {
+        const FALLBACK: &str = "unknown-host";
+        let mut ptr = &self.server_address[..];
+        // if it end with \0FML., strip it
+        if self.server_address.ends_with("\0FML\0") {
+            ptr = &self.server_address[..self.server_address.len() - 6]
+        }
+        let sanitized: String = ptr
+            .chars()
+            .filter(|c| c.is_ascii() && !c.is_ascii_control())
+            .take(255)
+            .collect();
+        if !sanitized.is_empty() {
+            Arc::from(sanitized)
+        } else {
+            Arc::from(FALLBACK)
+        }
+    }
 }
 
 impl<'a> OwnedPacket<'a, HandshakeC2s<'a>> for OwnedHandshake {
     fn from_packet(hs: HandshakeC2s<'a>) -> Self {
         Self {
             protocol_version: hs.protocol_version,
-            server_address: sanitize_hostname(hs.server_address.0),
+            server_address: Arc::from(hs.server_address.0),
             server_port: hs.server_port,
             next_state: hs.next_state,
         }

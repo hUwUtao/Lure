@@ -10,9 +10,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Address {
-    IPV4(Ipv4Addr),
-    IPV6(Ipv6Addr),
-    FQDN(Arc<str>),
+    Ipv4(Ipv4Addr),
+    Ipv6(Ipv6Addr),
+    Fqdn(Arc<str>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,18 +58,18 @@ impl Destination {
 
     pub fn resolve(&self) -> Result<Vec<(Arc<str>, SocketAddr)>, ParseDestinationError> {
         match &self.0 {
-            Address::IPV4(v4) => {
+            Address::Ipv4(v4) => {
                 // Ipv4Addr is Copy. Convert its textual form into Arc<str> without extra clones.
                 let host = Arc::from(v4.to_string().into_boxed_str());
                 let sa = SocketAddr::new(IpAddr::V4(*v4), self.1);
                 Ok(vec![(host, sa)])
             }
-            Address::IPV6(v6) => {
+            Address::Ipv6(v6) => {
                 let host = Arc::from(v6.to_string().into_boxed_str());
                 let sa = SocketAddr::new(IpAddr::V6(*v6), self.1);
                 Ok(vec![(host, sa)])
             }
-            Address::FQDN(s) => {
+            Address::Fqdn(s) => {
                 let addrs = (s.as_ref(), self.1)
                     .to_socket_addrs()
                     .map_err(ParseDestinationError::ResolveError)?;
@@ -82,16 +82,16 @@ impl Destination {
 impl fmt::Display for Destination {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.0 {
-            Address::IPV4(v4) => write!(f, "{}:{}", v4, self.1),
-            Address::IPV6(v6) => write!(f, "[{}]:{}", v6, self.1),
-            Address::FQDN(s) => write!(f, "{}:{}", s, self.1),
+            Address::Ipv4(v4) => write!(f, "{}:{}", v4, self.1),
+            Address::Ipv6(v6) => write!(f, "[{}]:{}", v6, self.1),
+            Address::Fqdn(s) => write!(f, "{}:{}", s, self.1),
         }
     }
 }
 
 impl Default for Destination {
     fn default() -> Self {
-        Destination(Address::IPV4(Ipv4Addr::UNSPECIFIED), 0)
+        Destination(Address::Ipv4(Ipv4Addr::UNSPECIFIED), 0)
     }
 }
 
@@ -248,16 +248,16 @@ fn parse_host_as_address(host: &str) -> Result<Address, ParseDestinationError> {
 
     // Try IPv4
     if let Ok(v4) = host.parse::<Ipv4Addr>() {
-        return Ok(Address::IPV4(v4));
+        return Ok(Address::Ipv4(v4));
     }
 
     // Try IPv6
     if let Ok(v6) = host.parse::<Ipv6Addr>() {
-        return Ok(Address::IPV6(v6));
+        return Ok(Address::Ipv6(v6));
     }
 
     // Fallback to FQDN. We keep it raw. Caller can validate further if needed.
-    Ok(Address::FQDN(Arc::from(host.to_string())))
+    Ok(Address::Fqdn(Arc::from(host.to_string())))
 }
 
 impl FromStr for Destination {
@@ -296,7 +296,7 @@ mod tests {
     fn parse_ipv4_with_port() {
         let d = Destination::parse("1.2.3.4:8080").unwrap();
         match d.address() {
-            Address::IPV4(ip) => assert_eq!(*ip, Ipv4Addr::new(1, 2, 3, 4)),
+            Address::Ipv4(ip) => assert_eq!(*ip, Ipv4Addr::new(1, 2, 3, 4)),
             _ => panic!("expected ipv4"),
         }
         assert_eq!(d.port(), 8080);
@@ -306,7 +306,7 @@ mod tests {
     fn parse_fqdn_with_port() {
         let d = Destination::parse("example.com:443").unwrap();
         match d.address() {
-            Address::FQDN(s) => assert_eq!(s.as_ref(), "example.com"),
+            Address::Fqdn(s) => assert_eq!(s.as_ref(), "example.com"),
             _ => panic!("expected fqdn"),
         }
         assert_eq!(d.port(), 443);
@@ -316,7 +316,7 @@ mod tests {
     fn parse_ipv6_bracketed_with_port() {
         let d = Destination::parse("[::1]:8080").unwrap();
         match d.address() {
-            Address::IPV6(ip) => assert_eq!(*ip, Ipv6Addr::from_str("::1").unwrap()),
+            Address::Ipv6(ip) => assert_eq!(*ip, Ipv6Addr::from_str("::1").unwrap()),
             _ => panic!("expected ipv6"),
         }
         assert_eq!(d.port(), 8080);
@@ -326,7 +326,7 @@ mod tests {
     fn parse_with_default_ipv4() {
         let d = Destination::parse_with_default("1.2.3.4", 80).unwrap();
         match d.address() {
-            Address::IPV4(ip) => assert_eq!(*ip, Ipv4Addr::new(1, 2, 3, 4)),
+            Address::Ipv4(ip) => assert_eq!(*ip, Ipv4Addr::new(1, 2, 3, 4)),
             _ => panic!("expected ipv4"),
         }
         assert_eq!(d.port(), 80);
@@ -336,7 +336,7 @@ mod tests {
     fn parse_with_default_ipv6_unbracketed() {
         let d = Destination::parse_with_default("2001:db8::1", 1234).unwrap();
         match d.address() {
-            Address::IPV6(ip) => assert_eq!(*ip, Ipv6Addr::from_str("2001:db8::1").unwrap()),
+            Address::Ipv6(ip) => assert_eq!(*ip, Ipv6Addr::from_str("2001:db8::1").unwrap()),
             _ => panic!("expected ipv6"),
         }
         assert_eq!(d.port(), 1234);
@@ -346,7 +346,7 @@ mod tests {
     fn parse_with_default_ipv6_bracketed_no_port() {
         let d = Destination::parse_with_default("[2001:db8::1]", 9000).unwrap();
         match d.address() {
-            Address::IPV6(ip) => assert_eq!(*ip, Ipv6Addr::from_str("2001:db8::1").unwrap()),
+            Address::Ipv6(ip) => assert_eq!(*ip, Ipv6Addr::from_str("2001:db8::1").unwrap()),
             _ => panic!("expected ipv6"),
         }
         assert_eq!(d.port(), 9000);
