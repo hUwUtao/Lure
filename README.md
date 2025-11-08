@@ -49,25 +49,55 @@ To extends features like runtime monitoring \(I have some jealousy with go that 
 Optional [mimalloc](https://github.com/microsoft/mimalloc) crate feature allocator reduces CPU usage (4% → 1%) at the
 cost of higher memory usage (~47MiB vs ~20MiB).
 
-### Incompatibility
+### Compatibility
 
-- [x] Client are disconnected after a while: The client will timeout. Tolerate handshake for bit longer. Seems like working!
+- Guaranteed to work with 1.7+
+- Since HaProxyProtocol plaintext is not very common, only v2 is supported, most immplemented.
+- FML (Forge) Handshake support is added
 
-- [x] **FIXED**, Known gimmick to actual protocol-use is `viaproxy`. On 1.20.6 server, there such a behavior of packet disorder 
-suspected because of async polling (or kind of?)
+### Quirks
 
-| Server Version | Client Version   | Observed                                                                            |
-|----------------|------------------|-------------------------------------------------------------------------------------|
-| Purpur 1.20.6  | 1.20.6           | Ok                                                                                  |
-| ^              | 1.21.1-4         | ~~Client is disconected by clientbound-entity_remove packet 1xx packet overestimation~~ |
-| Paper 1.20.6   | 1.21.5+          | ^                                                                                   |   
-| ^              | 1.20.6, 1.21.1-4 | Ok                                                                                  |
+- TL*uncher Guard seemingly causing trouble
+- Watch for any back-connect plugin like Geyser if proxy protocol is enabled. You have to enable both `proxy_protocol` key from desired plugin/paper config + geyser config
+- FML server must present "PreserveHost" (TODO: to support without)
+- 0.1.2 -> 0.1.3 has major config layout changes
 
-> Update: ViaVersion has an update.
+### Configuration
 
-- [ ] Does not connect well when native condition of Distant Horizon paper support is met. Currently investigating.
+The server can now be configured stand-alone without the need of RPC backend
 
-- [ ] "TL\*uncher Guard" (suspected) flatten hostname to ip. Result is mixed of people with TL\*ncher
+```toml
+# settings.toml
+inst = "main"
+bind = "0.0.0.0:25577"
+proxy_procol = false
+# key name to be changed
+max_conn = 65535
+cooldown = 3 
+# ---
+
+[strings]
+# vendor specific, all keys optional
+MESSAGE_CANNOT_CONNECT = "Cannot connect to destinated server:"
+ERROR = "Error"
+SERVER_OFFLINE = "Server is offline :("
+ROUTE_NOT_FOUND = "The destinated server is not registered"
+SERVER_LIST_BRAND = "oops"
+
+[[route]]
+matchers = ["mc.acme.co", "play.acme.co"]
+preserve_host = true # false by default
+proxy_protocol = true # false by default
+endpoints = ["craft-clust-1001.acme.co:25565", "craft-clust-1002.acme.co:25565"]
+
+[[route]]
+matcher = "eu.acme.co"
+preserve_host = false
+proxy_protocol = true
+endpoint = "craft-clust-1001.acme.co:25565"
+```
+
+> To configure RPC url, use `LURE_RPC` env
 
 ## Credits
 
