@@ -49,7 +49,6 @@ pub struct Lure {
     threat: &'static ThreatControlService,
     metrics: HandshakeMetrics,
     errors: ErrorResponder,
-    stop: &'static broadcast::Sender<()>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -80,7 +79,7 @@ impl EventHook<EventEnvelope, EventEnvelope> for EventIdent {
 }
 
 impl Lure {
-    pub fn new(config: LureConfig, stop: &'static broadcast::Sender<()>) -> Lure {
+    pub fn new(config: LureConfig) -> Lure {
         let router = leak(RouterInstance::new());
         Lure {
             config: RwLock::new(config),
@@ -88,7 +87,6 @@ impl Lure {
             threat: leak(ThreatControlService::new()),
             metrics: HandshakeMetrics::new(&get_meter()),
             errors: ErrorResponder::new(),
-            stop,
         }
     }
 
@@ -162,12 +160,7 @@ impl Lure {
         let semaphore = Arc::new(Semaphore::new(max_connections));
         let rate_limiter: RateLimiterController<IpAddr> = RateLimiterController::new(10, cooldown);
 
-        let stop = self.stop.subscribe();
         loop {
-            // Questionably not able to use .recv()
-            if !stop.is_empty() {
-                return Ok(());
-            }
             // Accept connection first
             let (client, addr) = listener.accept().await?;
 
@@ -705,7 +698,7 @@ impl Lure {
                 copy_with_abort(
                     &mut remote_read,
                     &mut client_write,
-                    [cancel.subscribe(), self.stop.subscribe()],
+                    cancel.subscribe(),
                     move |u| {
                         c2sp.fetch_add(1, Ordering::Relaxed);
                         c2sb.fetch_add(u, Ordering::Relaxed);
@@ -722,7 +715,7 @@ impl Lure {
                 copy_with_abort(
                     &mut client_read,
                     &mut remote_write,
-                    [cancel.subscribe(), self.stop.subscribe()],
+                    cancel.subscribe(),
                     move |u| {
                         s2cp.fetch_add(1, Ordering::Relaxed);
                         s2cb.fetch_add(u, Ordering::Relaxed);
@@ -737,7 +730,6 @@ impl Lure {
             {
                 let counters = &counters;
                 let abort = cancel.subscribe();
-                let stop = self.stop.subscribe();
 
                 async move {
                     let mut interval = tokio::time::interval(Duration::from_millis(100));
@@ -760,7 +752,7 @@ impl Lure {
                     let mut lc2sb = 0u64;
 
                     loop {
-                        if !abort.is_empty() || !stop.is_empty() {
+                        if !abort.is_empty() {
                             break;
                         }
 

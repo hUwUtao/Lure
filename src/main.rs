@@ -60,8 +60,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let pmt = leak(ProcessMetricsService::new());
     pmt.start();
 
-    let stop = leak(broadcast::channel(1).0);
-    let lure = leak(Lure::new(config, stop));
+    let lure = leak(Lure::new(config));
     lure.sync_routes_from_config().await?;
 
     let reload_path = config_file.clone();
@@ -119,7 +118,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         let _ = select_all([sigint_fut, sigterm_fut]).await;
         log::info!("Received signal, stopping...");
-        stop.send(())?;
     }
     Ok(())
 }
