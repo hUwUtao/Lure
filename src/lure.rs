@@ -166,6 +166,8 @@ impl Lure {
 
             let client = Connection::new(client, addr);
 
+            self.metrics.record_open();
+
             // Apply IP-based rate limiting
             let ip = addr.ip();
             if let crate::threat::ratelimit::RateLimitResult::Disallowed { retry_after: _ra } =

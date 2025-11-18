@@ -15,7 +15,6 @@ use std::{env, error::Error, io::ErrorKind};
 use config::LureConfig;
 use libc::SIGCONT;
 use lure::Lure;
-use tokio::sync::broadcast;
 
 use crate::{
     config::LureConfigLoadError,

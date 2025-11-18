@@ -4,6 +4,7 @@ use opentelemetry::{
 };
 
 pub struct HandshakeMetrics {
+    open: Counter<u64>,
     attempts: Counter<u64>,
     failures: Counter<u64>,
     duration: Histogram<u64>,
@@ -12,10 +13,15 @@ pub struct HandshakeMetrics {
 impl HandshakeMetrics {
     pub fn new(meter: &Meter) -> Self {
         Self {
+            open: meter.u64_counter("lure_socket_open_total").build(),
             attempts: meter.u64_counter("lure_handshake_total").build(),
             failures: meter.u64_counter("lure_handshake_fail_total").build(),
             duration: meter.u64_histogram("lure_handshake_time_ms").build(),
         }
+    }
+
+    pub fn record_open(&self) {
+        self.open.add(1, &[]);
     }
 
     pub fn record_attempt(&self, state: &str) {
