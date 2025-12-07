@@ -37,7 +37,15 @@ impl OwnedHandshake {
         const FALLBACK: &str = "unknown-host";
         let mut ptr = &self.server_address[..];
         // if it end with \0FML., strip it
-        if self.server_address.ends_with("\0FML\0") {
+        if self.server_address.len() >= 6
+            && self.server_address[self.server_address.len() - 6..].starts_with("\0FML")
+            && self.server_address.ends_with("\0")
+            && self
+                .server_address
+                .chars()
+                .nth(self.server_address.len() - 2)
+                .map_or(false, |c| c.is_ascii_digit())
+        {
             ptr = &self.server_address[..self.server_address.len() - 6]
         }
         let sanitized: String = ptr

@@ -129,9 +129,32 @@ impl Lure {
     ) -> OwnedHandshake {
         let mut prepared = handshake.clone();
         if !preserve_host {
+            let mut new_server_address = String::new();
             if let Some(host) = endpoint_host {
-                prepared.server_address = Arc::from(host);
+                new_server_address.push_str(host);
             }
+
+            // Extract FML postfix from client handshake if present
+            // Looking for \0FMLx\0 where x is a digit
+            if handshake.server_address.len() >= 6
+                && handshake.server_address[handshake.server_address.len() - 6..]
+                    .starts_with("\0FML")
+                && handshake.server_address.ends_with("\0")
+            {
+                if let Some(x) = handshake
+                    .server_address
+                    .chars()
+                    .nth(handshake.server_address.len() - 2)
+                {
+                    if x.is_ascii_digit() {
+                        new_server_address.push_str(
+                            &handshake.server_address[handshake.server_address.len() - 6..],
+                        );
+                    }
+                }
+            }
+
+            prepared.server_address = Arc::from(new_server_address);
             prepared.server_port = endpoint_port;
         }
         prepared
