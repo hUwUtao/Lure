@@ -1,7 +1,7 @@
 use std::{
     net::{IpAddr, SocketAddr},
     sync::{
-        Arc, RwLock,
+        Arc,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use tokio::{
     io::AsyncReadExt,
     net::{TcpListener, TcpStream},
-    sync::{Semaphore, broadcast},
+    sync::{RwLock, Semaphore, broadcast},
     task::yield_now,
     time::{error::Elapsed, timeout},
 };
@@ -90,8 +90,8 @@ impl Lure {
         }
     }
 
-    fn config_snapshot(&self) -> LureConfig {
-        self.config.read().expect("config lock poisoned").clone()
+    async fn config_snapshot(&self) -> LureConfig {
+        self.config.read().await.clone()
     }
 
     async fn install_routes(&'static self, routes: Vec<Route>) {
@@ -102,7 +102,7 @@ impl Lure {
     }
 
     pub async fn sync_routes_from_config(&'static self) -> anyhow::Result<()> {
-        let snapshot = self.config_snapshot();
+        let snapshot = self.config_snapshot().await;
         let routes = snapshot.default_routes()?;
         self.install_routes(routes).await;
         Ok(())
@@ -112,10 +112,7 @@ impl Lure {
         let routes = config.default_routes()?;
         self.install_routes(routes).await;
         {
-            *self
-                .config
-                .write()
-                .expect("config lock poisoned during reload") = config;
+            *self.config.write().await = config;
         }
         Ok(())
     }
@@ -154,7 +151,7 @@ impl Lure {
                 }
             }
 
-            prepared.server_address = Arc::from(new_server_address);
+            prepared.server_address = Arc::from(new_server_address.as_str());
             prepared.server_port = endpoint_port;
         }
         prepared
@@ -162,7 +159,7 @@ impl Lure {
 
     pub async fn start(&'static self) -> anyhow::Result<()> {
         // Listener config.
-        let config = self.config_snapshot();
+        let config = self.config_snapshot().await;
         let listener_cfg = config.bind.clone();
         LureLogger::preparing_socket(&listener_cfg);
         let address: SocketAddr = listener_cfg.parse()?;
@@ -346,19 +343,19 @@ impl Lure {
         Ok(OwnedHandshake::from_packet(handshake_packet))
     }
 
-    fn get_string(&self, key: &str) -> Box<str> {
+    async fn get_string(&self, key: &str) -> Box<str> {
         self.config
             .read()
-            .expect("config lock poisoned")
+            .await
             .strings
             .get(key)
             .cloned()
             .unwrap_or_else(|| "".into())
     }
 
-    fn placeholder_status_json(&self, label: &str) -> String {
-        let brand = self.get_string("SERVER_LIST_BRAND");
-        let target_label = self.get_string(label);
+    async fn placeholder_status_json(&self, label: &str) -> String {
+        let brand = self.get_string("SERVER_LIST_BRAND").await;
+        let target_label = self.get_string(label).await;
         placeholder_status_response(brand.as_ref(), target_label.as_ref())
     }
 
@@ -367,7 +364,7 @@ impl Lure {
         client: &mut EncodedConnection<'_>,
         label: &str,
     ) -> anyhow::Result<()> {
-        let placeholder = self.placeholder_status_json(label);
+        let placeholder = self.placeholder_status_json(label).await;
         client
             .send(&QueryResponseS2c { json: &placeholder })
             .await?;

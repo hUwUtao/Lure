@@ -59,7 +59,6 @@ cost of higher memory usage (~47MiB vs ~20MiB).
 
 - TL*uncher Guard seemingly causing trouble
 - Watch for any back-connect plugin like Geyser if proxy protocol is enabled. You have to enable both `proxy_protocol` key from desired plugin/paper config + geyser config
-- FML server must present "PreserveHost" (TODO: to support without)
 - 0.1.2 -> 0.1.3 has major config layout changes
 
 ### Configuration
