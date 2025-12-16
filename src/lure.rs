@@ -130,25 +130,8 @@ impl Lure {
             if let Some(host) = endpoint_host {
                 new_server_address.push_str(host);
             }
-
-            // Extract FML postfix from client handshake if present
-            // Looking for \0FMLx\0 where x is a digit
-            if handshake.server_address.len() >= 6
-                && handshake.server_address[handshake.server_address.len() - 6..]
-                    .starts_with("\0FML")
-                && handshake.server_address.ends_with("\0")
-            {
-                if let Some(x) = handshake
-                    .server_address
-                    .chars()
-                    .nth(handshake.server_address.len() - 2)
-                {
-                    if x.is_ascii_digit() {
-                        new_server_address.push_str(
-                            &handshake.server_address[handshake.server_address.len() - 6..],
-                        );
-                    }
-                }
+            if let Some(nul) = handshake.server_address.find('\0') {
+                new_server_address.push_str(&handshake.server_address[nul..]);
             }
 
             prepared.server_address = Arc::from(new_server_address.as_str());
@@ -531,7 +514,8 @@ impl Lure {
         resolved: Option<ResolvedRoute>,
     ) -> anyhow::Result<()> {
         let address = *client.as_inner().addr();
-        let hostname = &handshake.server_address;
+        let hostname = handshake.get_stripped_hostname();
+        let hostname = hostname.as_ref();
 
         let Some(resolved) = resolved else {
             self.metrics.record_failure("login");
@@ -813,5 +797,40 @@ impl Lure {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn handshake_with_addr(addr: &str) -> OwnedHandshake {
+        OwnedHandshake {
+            protocol_version: VarInt(0),
+            server_address: Arc::from(addr),
+            server_port: 25565,
+            next_state: HandshakeNextState::Login,
+        }
+    }
+
+    #[tokio::test]
+    async fn backend_handshake_preserves_suffix_after_first_nul() {
+        let lure = Lure::new(LureConfig::default());
+        let hs = handshake_with_addr("example.com\0FML2\0");
+        let prepared = lure.prepare_backend_handshake(&hs, Some("backend.local"), 25565, false);
+        assert_eq!(prepared.server_address.as_ref(), "backend.local\0FML2\0");
+
+        let hs = handshake_with_addr("example.com\0FORGE\0");
+        let prepared = lure.prepare_backend_handshake(&hs, Some("backend.local"), 25565, false);
+        assert_eq!(prepared.server_address.as_ref(), "backend.local\0FORGE\0");
+    }
+
+    #[tokio::test]
+    async fn backend_handshake_keeps_raw_host_when_preserved() {
+        let lure = Lure::new(LureConfig::default());
+        let hs = handshake_with_addr("example.com\0FORGE\0");
+        let prepared = lure.prepare_backend_handshake(&hs, Some("backend.local"), 25565, true);
+        assert_eq!(prepared.server_address.as_ref(), hs.server_address.as_ref());
+        assert_eq!(prepared.server_port, hs.server_port);
     }
 }

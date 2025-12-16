@@ -94,7 +94,27 @@ impl<'a> EncodedConnection<'a> {
             reason: reason.into(),
         };
         self.send(&kick).await?;
+        self.drain_pending_inbound();
+        let _ = self.stream.as_mut().shutdown().await;
         Ok(())
+    }
+
+    fn drain_pending_inbound(&mut self) {
+        let mut buf = [0u8; 1024];
+        let mut drained = 0usize;
+        loop {
+            match self.stream.as_mut().try_read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    drained = drained.saturating_add(n);
+                    if drained >= 64 * 1024 {
+                        break;
+                    }
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                Err(_) => break,
+            }
+        }
     }
 
     /// Valence packet recv

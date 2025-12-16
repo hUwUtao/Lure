@@ -35,19 +35,11 @@ impl OwnedHandshake {
     /// According to various spec including Forge
     pub fn get_stripped_hostname(&self) -> Arc<str> {
         const FALLBACK: &str = "unknown-host";
-        let mut ptr = &self.server_address[..];
-        // if it end with \0FML., strip it
-        if self.server_address.len() >= 6
-            && self.server_address[self.server_address.len() - 6..].starts_with("\0FML")
-            && self.server_address.ends_with("\0")
-            && self
-                .server_address
-                .chars()
-                .nth(self.server_address.len() - 2)
-                .map_or(false, |c| c.is_ascii_digit())
-        {
-            ptr = &self.server_address[..self.server_address.len() - 6]
-        }
+        let ptr = self
+            .server_address
+            .find('\0')
+            .map(|nul| &self.server_address[..nul])
+            .unwrap_or(self.server_address.as_ref());
         let sanitized: String = ptr
             .chars()
             .filter(|c| c.is_ascii() && !c.is_ascii_control())
@@ -119,4 +111,33 @@ pub fn create_proxy_protocol_header(socket: SocketAddr) -> anyhow::Result<BytesM
         },
     };
     Ok(proxy_protocol::encode(proxy_header)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn handshake_with_addr(addr: &str) -> OwnedHandshake {
+        OwnedHandshake {
+            protocol_version: VarInt(0),
+            server_address: Arc::from(addr),
+            server_port: 25565,
+            next_state: HandshakeNextState::Login,
+        }
+    }
+
+    #[test]
+    fn stripped_hostname_stops_at_first_nul() {
+        let hs = handshake_with_addr("example.com\0FML2\0");
+        assert_eq!(hs.get_stripped_hostname().as_ref(), "example.com");
+
+        let hs = handshake_with_addr("example.com\0FORGE\0");
+        assert_eq!(hs.get_stripped_hostname().as_ref(), "example.com");
+    }
+
+    #[test]
+    fn stripped_hostname_falls_back_on_empty() {
+        let hs = handshake_with_addr("\0FML2\0");
+        assert_eq!(hs.get_stripped_hostname().as_ref(), "unknown-host");
+    }
 }
