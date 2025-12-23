@@ -1,8 +1,6 @@
 use std::net::SocketAddr;
 
 use anyhow::Result;
-use valence_text::{Color, IntoText};
-
 use crate::{connection::EncodedConnection, logging::LureLogger, threat::ClientFail};
 
 #[derive(thiserror::Error, Debug)]
@@ -39,9 +37,7 @@ impl ErrorResponder {
         let public_reason = public_reason.into();
         let log_reason = log_reason.into();
         LureLogger::disconnect_warning(&addr, &log_reason);
-        client
-            .disconnect_player(public_reason.into_text().color(Color::RED))
-            .await
+        client.disconnect_player(&public_reason).await
     }
 
     pub async fn disconnect_with_error(

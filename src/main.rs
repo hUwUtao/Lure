@@ -1,6 +1,7 @@
 pub(crate) mod config;
 pub(crate) mod connection;
 pub(crate) mod error;
+pub(crate) mod inspect;
 pub(crate) mod logging;
 pub(crate) mod lure;
 pub(crate) mod metrics;

@@ -1,4 +1,5 @@
 pub mod event;
+pub mod inspect;
 pub(crate) mod oltp;
 pub(crate) mod process;
 
@@ -8,6 +9,7 @@ use opentelemetry::{global, global::BoxedTracer, metrics::Meter, trace::TracerPr
 use serde::{Deserialize, Serialize};
 
 use crate::{lure::EventIdent, router::RouteReport, telemetry::event::EventService};
+use crate::telemetry::inspect::{InspectRequest, ListSessionsResponse, ListStatsResponse};
 
 pub fn get_meter() -> Meter {
     global::meter_provider().meter("alure")
@@ -43,6 +45,10 @@ pub enum EventEnvelope {
     RemoveRoute(Id),
     ListRouteRequest(Empty),
     ListRouteResponse(NonObj<Vec<crate::router::Route>>),
+    ListSessionsRequest(InspectRequest),
+    ListSessionsResponse(ListSessionsResponse),
+    ListStatsRequest(InspectRequest),
+    ListStatsResponse(ListStatsResponse),
     FlushRoute(Empty),
     HandshakeRoute(RouteReport),
     HandshakeIdent(EventIdent),

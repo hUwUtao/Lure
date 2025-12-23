@@ -12,6 +12,7 @@ use std::{
 use async_trait::async_trait;
 use fake_serialize::FakeSerialize;
 use log::debug;
+use net::Uuid;
 use serde::{Deserialize, Serialize};
 use tokio::{
     sync::{RwLock, RwLockWriteGuard, mpsc},
@@ -26,6 +27,7 @@ use crate::{
 
 mod attr;
 mod dest;
+pub(crate) mod inspect;
 pub use attr::RouteAttr;
 pub use dest::Destination;
 
@@ -76,9 +78,17 @@ impl Route {
     }
 }
 
+#[derive(Debug)]
+pub struct Profile {
+    pub name: Arc<str>,
+    pub uuid: Option<Uuid>,
+}
+
 /// Client session tracking source, destination, and associated route
 #[derive(Debug)]
 pub struct Session {
+    /// Session ID (monotonic per instance)
+    pub id: u64,
     /// Client's source address
     pub client_addr: SocketAddr,
     /// Selected destination address
@@ -87,6 +97,12 @@ pub struct Session {
     pub endpoint_host: String,
     /// ID of the route used for this session
     pub route_id: u64,
+    /// Tenant/zone ID
+    pub zone: u64,
+    /// Per-session inspection state (traffic + attributes)
+    pub inspect: Arc<inspect::SessionInspectState>,
+    /// Profile
+    pub profile: Arc<Profile>,
 }
 
 /// RAII handle that terminates the session when dropped
@@ -143,6 +159,8 @@ pub struct RouterInstance {
     metrics_tx: mpsc::UnboundedSender<RouterMetricsMessage>,
     /// Incrementing cursor used for naïve load balancing over resolved endpoints
     balancer_cursor: AtomicU64,
+    /// Inspection registry and fast-path counters
+    inspect: Arc<inspect::InspectRegistry>,
 }
 
 #[derive(Debug)]
@@ -168,12 +186,18 @@ impl RouterInstance {
             metrics,
             metrics_tx,
             balancer_cursor: AtomicU64::new(0),
+            inspect: Arc::new(inspect::InspectRegistry::new()),
         }
+    }
+
+    pub fn set_instance_name(&self, inst: String) {
+        self.inspect.set_instance_name(inst);
     }
 
     /// Apply or update a route configuration
     pub async fn apply_route(&self, route: Route) {
         let route_id = route.id;
+        let zone_id = route.zone;
         let new_matchers = route.matchers.clone();
 
         // Check if route exists and get old matchers
@@ -196,6 +220,8 @@ impl RouterInstance {
             routes.insert(route_id, Arc::new(route));
             routes.len() as u64
         };
+        let _ = self.inspect.ensure_route(route_id, zone_id).await;
+        let _ = self.inspect.ensure_tenant(zone_id).await;
         self.publish_routes_active(total);
     }
 
@@ -429,13 +455,37 @@ impl RouterInstance {
         &'static self,
         resolved: &ResolvedRoute,
         client_addr: SocketAddr,
+        hostname: &str,
+        profile: Arc<Profile>,
     ) -> anyhow::Result<(SessionHandle, Arc<Route>)> {
         self.metrics.record_session_create();
+        let id = self.inspect.next_session_id();
+        let zone = resolved.route.zone;
+        let route_stats = self.inspect.ensure_route(resolved.route.id, zone).await;
+        let tenant_stats = self.inspect.ensure_tenant(zone).await;
+
+        route_stats.inc_active();
+        tenant_stats.inc_active();
+
+        let inspect_state = Arc::new(inspect::SessionInspectState::new(
+            id,
+            zone,
+            resolved.route.id,
+            hostname.to_string(),
+            route_stats,
+            tenant_stats,
+            self.inspect.instance(),
+        ));
+
         let session = Arc::new(Session {
+            id,
+            zone,
             client_addr,
             destination_addr: resolved.endpoint,
             endpoint_host: resolved.endpoint_host.clone(),
             route_id: resolved.route.id,
+            inspect: inspect_state,
+            profile,
         });
 
         // Store session
@@ -453,7 +503,10 @@ impl RouterInstance {
     pub async fn terminate_session(&self, addr: &SocketAddr) -> anyhow::Result<()> {
         self.metrics.record_session_destroy();
         let mut sessions = self.active_sessions.write().await;
-        sessions.remove(addr);
+        if let Some(session) = sessions.remove(addr) {
+            session.inspect.route.dec_active();
+            session.inspect.tenant.dec_active();
+        }
         let total = sessions.len() as u64;
         drop(sessions);
         self.publish_sessions_active(total);
@@ -468,14 +521,68 @@ impl RouterInstance {
         Ok(count)
     }
 
+    pub async fn inspect_sessions(&self) -> Vec<crate::telemetry::inspect::SessionInspect> {
+        let sessions = match timeout(Duration::from_millis(500), self.active_sessions.read()).await
+        {
+            Ok(sessions) => sessions,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut views = Vec::with_capacity(sessions.len());
+        for session in sessions.values() {
+            let attributes = session.inspect.attributes.read().await.clone();
+            views.push(inspect::inspect_session_to_view(
+                session,
+                session.client_addr.to_string(),
+                session.destination_addr.to_string(),
+                session.endpoint_host.clone(),
+                attributes,
+            ));
+        }
+        views
+    }
+
+    pub async fn inspect_stats(&self) -> inspect::StatsSnapshot {
+        let instance = self.inspect.snapshot_instance();
+        let tenants = self.inspect.snapshot_tenants().await;
+        let routes = self.inspect.snapshot_routes().await;
+
+        let sessions_lock =
+            match timeout(Duration::from_millis(500), self.active_sessions.read()).await {
+                Ok(sessions) => sessions,
+                Err(_) => {
+                    return inspect::StatsSnapshot {
+                        instance,
+                        tenants,
+                        routes,
+                        sessions: Vec::new(),
+                    };
+                }
+            };
+
+        let sessions = sessions_lock
+            .values()
+            .map(|session| session.inspect.session_stats_snapshot())
+            .collect();
+
+        inspect::StatsSnapshot {
+            instance,
+            tenants,
+            routes,
+            sessions,
+        }
+    }
+
     /// Get active route count for monitoring
     fn publish_routes_active(&self, total: u64) {
+        self.inspect.instance().set_routes_active(total);
         let _ = self
             .metrics_tx
             .send(RouterMetricsMessage::RoutesActive(total));
     }
 
     fn publish_sessions_active(&self, total: u64) {
+        self.inspect.instance().set_sessions_active(total);
         let _ = self
             .metrics_tx
             .send(RouterMetricsMessage::SessionsActive(total));

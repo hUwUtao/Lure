@@ -1,14 +1,18 @@
 [package]
 name = "lure"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[workspace]
+members = ["net"]
 
 [dependencies]
 anyhow = "1.0"
 bytes = "1.10"
 log = "0.4.27"
+net = { path = "net" }
 opentelemetry = "0.31"
 opentelemetry-otlp = { version = "0.31", features = ["tokio", "http-proto", "reqwest-rustls-webpki-roots", "http-json"] }
 dotenvy = "0.15"
@@ -16,10 +20,9 @@ opentelemetry-stdout = "0.31"
 opentelemetry_sdk = { version = "0.31", features = ["tokio", "tokio-stream", "rt-tokio", "http", "url"] }
 proxy-protocol = "0.5.0"
 serde = { version = "1.0", features = ["derive"] }
-tokio = { version = "1.27", features = ["full", "rt-multi-thread", "tracing"] }
+# tokio = { version = "1.27", features = ["full", "rt-multi-thread", "tracing"] }
+tokio = { version = "1.48", features = ["full", "rt-multi-thread", "tracing"] }
 toml = "0.9"
-valence_text = { git = "https://github.com/valence-rs/valence" }
-valence_protocol = { git = "https://github.com/valence-rs/valence" }
 async-trait = "0.1"
 libc = "0.2"
 futures = "0.3"
@@ -46,6 +49,7 @@ grpc-tonic = [
 mimalloc = ["dep:mimalloc"]
 tokio_unstable = []
 verbose = []
+packet-debug = ["net/packet-debug"]
 
 [profile.release]
 incremental = true

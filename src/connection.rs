@@ -1,22 +1,25 @@
-use std::{io, io::ErrorKind};
+use std::{
+    fmt::Debug,
+    io::{self, ErrorKind},
+};
 
-use bytes::BytesMut;
+use net::{
+    LoginDisconnectS2c, PacketDecode, PacketDecoder, PacketEncode, PacketEncoder, PacketFrame,
+    ProtoError,
+};
 use opentelemetry::{
     KeyValue,
     metrics::{Counter, Histogram, Meter},
 };
+use serde_json::to_string as json_string;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::broadcast,
 };
-use valence_protocol::{
-    Decode, Encode, Packet, PacketDecoder, PacketEncoder, Text, decode::PacketFrame,
-    packets::login::LoginDisconnectS2c,
-};
 
 use crate::{error::ReportableError, telemetry::get_meter, utils::Connection};
 
-pub struct EncodedConnection<'a> {
+pub(crate) struct EncodedConnection<'a> {
     enc: PacketEncoder,
     dec: PacketDecoder,
     frame: PacketFrame,
@@ -67,7 +70,7 @@ impl<'a> EncodedConnection<'a> {
             stream,
             frame: PacketFrame {
                 id: 0,
-                body: BytesMut::new(),
+                body: Vec::new(),
             },
             metric: ConnectionMetric::new(&metric),
             intent: intent.as_attr(),
@@ -89,9 +92,10 @@ impl<'a> EncodedConnection<'a> {
     //     self.dec.enable_encryption(key);
     // }
 
-    pub async fn disconnect_player(&mut self, reason: Text) -> anyhow::Result<()> {
+    pub async fn disconnect_player(&mut self, reason: &str) -> anyhow::Result<()> {
+        let reason_json = json_string(reason)?;
         let kick = LoginDisconnectS2c {
-            reason: reason.into(),
+            reason: &reason_json,
         };
         self.send(&kick).await?;
         self.drain_pending_inbound();
@@ -117,36 +121,33 @@ impl<'a> EncodedConnection<'a> {
         }
     }
 
-    /// Valence packet recv
-    /// https://github.com/valence-rs/valence/blob/main/crates/valence_network/src/packet_io.rs#L53
+    /// Packet recv.
     pub async fn recv<'b, P>(&'b mut self) -> anyhow::Result<P>
     where
-        P: Packet + Decode<'b>,
+        P: PacketDecode<'b> + Debug,
     {
         loop {
             if let Some(frame) = self.dec.try_next_packet()? {
                 let size = frame.body.len();
                 self.frame = frame;
                 self.packet_record(size);
-                return self.frame.decode();
+                return decode_frame::<P>(&self.frame);
             }
 
-            self.dec.reserve(MAX_CHUNK_SIZE);
-            let mut buf = self.dec.take_capacity();
-
-            if self.stream.as_mut().read_buf(&mut buf).await? == 0 {
+            let mut buf = [0u8; MAX_CHUNK_SIZE];
+            let read_len = self.stream.as_mut().read(&mut buf).await?;
+            if read_len == 0 {
                 return Err(io::Error::from(ErrorKind::UnexpectedEof).into());
             }
-
-            self.dec.queue_bytes(buf);
+            self.dec.queue_slice(&buf[..read_len]);
         }
     }
 
     pub async fn send<P>(&mut self, pkt: &P) -> anyhow::Result<()>
     where
-        P: Encode + Packet,
+        P: PacketEncode,
     {
-        self.enc.append_packet::<P>(pkt)?;
+        self.enc.write_packet(pkt)?;
         let bytes = self.enc.take();
         let size = bytes.len();
         self.packet_record(size);
@@ -176,6 +177,37 @@ impl<'a> EncodedConnection<'a> {
     pub fn as_inner(&self) -> &Connection {
         self.stream
     }
+
+    pub fn take_pending_inbound(&mut self) -> Vec<u8> {
+        self.dec.take_pending_bytes()
+    }
+}
+
+fn decode_frame<'a, P>(frame: &'a PacketFrame) -> anyhow::Result<P>
+where
+    P: PacketDecode<'a> + Debug,
+{
+    let _ctx = format_args!("type={} id=0x{:02x}", std::any::type_name::<P>(), frame.id);
+
+    if frame.id != P::ID {
+        return Err(anyhow::anyhow!(
+            "unexpected packet id {} (expected {})",
+            frame.id,
+            P::ID
+        ));
+    }
+
+    let mut body = frame.body.as_slice();
+    let pkt = match P::decode_body(&mut body) {
+        Ok(pkt) => pkt,
+        Err(err) => {
+            return Err(err.into());
+        }
+    };
+    if !body.is_empty() {
+        return Err(ProtoError::TrailingBytes(body.len()).into());
+    }
+    Ok(pkt)
 }
 
 // Borrowed from mqudsi/tcpproxy
@@ -211,7 +243,6 @@ where
                         _ => return Err(ReportableError::from(e).into()),
                     },
                 };
-                poll_size(bytes_read as u64);
             }
             _ = cancel.recv() => {
                 break;
@@ -220,6 +251,7 @@ where
         if bytes_read == 0 {
             break;
         }
+        poll_size(bytes_read as u64);
         // While we ignore some read errors above, any error writing data we've already read to
         // the other side is always treated as exceptional.
         write.write_all(&buf[0..bytes_read]).await?;
