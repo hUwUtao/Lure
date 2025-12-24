@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use super::{
     error::{ProtoError, Result, debug_log_error},
     varint::{read_varint, read_varint_partial, varint_len, write_varint},
@@ -33,6 +35,26 @@ impl Uuid {
     }
 }
 
+impl Display for Uuid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let b = &self.0;
+        let part1 = u32::from_be_bytes(b[0..4].try_into().unwrap());
+        let part2 = u16::from_be_bytes(b[4..6].try_into().unwrap());
+        let part3 = u16::from_be_bytes(b[6..8].try_into().unwrap());
+        let part4 = u16::from_be_bytes(b[8..10].try_into().unwrap());
+
+        let mut last_bytes = [0u8; 8];
+        last_bytes[2..].copy_from_slice(&b[10..16]);
+        let part5 = u64::from_be_bytes(last_bytes) & 0xFFFFFFFFFFFFu64;
+
+        write!(
+            f,
+            "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+            part1, part2, part3, part4, part5
+        )
+    }
+}
+
 /// Clientbound or serverbound packet body encoding.
 pub trait PacketEncode {
     const ID: i32;
@@ -64,6 +86,12 @@ pub struct PacketDecoder {
 pub struct PacketEncoder {
     buf: Vec<u8>,
     scratch: Vec<u8>,
+}
+
+impl Default for PacketDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PacketDecoder {
@@ -161,6 +189,12 @@ impl PacketDecoder {
             self.buf.drain(..self.pos);
             self.pos = 0;
         }
+    }
+}
+
+impl Default for PacketEncoder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

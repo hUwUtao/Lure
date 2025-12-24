@@ -1,9 +1,9 @@
-use super::packets::{
-    HandshakeC2s, LoginDisconnectS2c, LoginStartC2s, ServerboundPacket, StatusPingC2s,
+use super::{
+    packets::{HandshakeC2s, LoginDisconnectS2c, LoginStartC2s, ServerboundPacket, StatusPingC2s},
+    state::{HandshakeNextState, PacketState},
+    types::{PacketDecoder, PacketEncoder, Uuid},
+    varint::{read_varint, write_varint},
 };
-use super::state::{HandshakeNextState, PacketState};
-use super::types::{PacketDecoder, PacketEncoder, Uuid};
-use super::varint::{read_varint, write_varint};
 
 #[test]
 fn varint_roundtrip() {
@@ -34,9 +34,7 @@ fn handshake_roundtrip() {
     let mut dec = PacketDecoder::new();
     dec.queue_slice(&bytes);
     let frame = dec.try_next_packet().unwrap().unwrap();
-    let decoded = frame
-        .decode_serverbound(PacketState::Handshaking)
-        .unwrap();
+    let decoded = frame.decode_serverbound(PacketState::Handshaking).unwrap();
 
     match decoded {
         ServerboundPacket::Handshake(actual) => assert_eq!(actual, packet),

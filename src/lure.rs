@@ -1,5 +1,4 @@
 use std::{
-    borrow::Cow,
     net::{IpAddr, SocketAddr},
     sync::Arc,
     time::{Duration, Instant},
@@ -12,29 +11,30 @@ use net::{
     HandshakeC2s, HandshakeNextState, LoginStartC2s, StatusPingC2s, StatusPongS2c,
     StatusRequestC2s, StatusResponseS2c,
 };
-use opentelemetry::KeyValue;
 use serde::{Deserialize, Serialize};
 use tokio::{
-    net::{TcpListener, TcpStream},
-    sync::{RwLock, Semaphore, broadcast},
+    net::TcpListener,
+    sync::{RwLock, Semaphore},
     task::yield_now,
     time::{error::Elapsed, timeout},
 };
 
 use crate::{
     config::LureConfig,
-    connection::{EncodedConnection, SocketIntent, copy_with_abort},
+    connection::{EncodedConnection, SocketIntent, passthrough_now},
     error::{ErrorResponder, ReportableError},
     logging::LureLogger,
     metrics::HandshakeMetrics,
-    packet::{OwnedHandshake, OwnedLoginStart, OwnedPacket, create_proxy_protocol_header},
+    packet::{OwnedHandshake, OwnedLoginStart, OwnedPacket},
     router::{Profile, ResolvedRoute, Route, RouterInstance, Session, SessionHandle},
     telemetry::{EventEnvelope, EventServiceInstance, event::EventHook, get_meter, init_event},
     threat::{
         ClientFail, ClientIntent, IntentTag, ThreatControlService, ratelimit::RateLimiterController,
     },
-    utils::{Connection, OwnedStatic, leak, placeholder_status_response, spawn_named},
+    utils::{Connection, OwnedStatic, leak, spawn_named},
 };
+mod backend;
+mod query;
 pub struct Lure {
     config: RwLock<LureConfig>,
     router: &'static RouterInstance,
@@ -110,61 +110,6 @@ impl Lure {
         Ok(())
     }
 
-    /// Builds the backend handshake address, preserving any post-NUL suffixes.
-    fn backend_handshake_parts<'a>(
-        &self,
-        handshake: &'a OwnedHandshake,
-        endpoint_host: Option<&str>,
-        endpoint_port: u16,
-        preserve_host: bool,
-    ) -> (Cow<'a, str>, u16) {
-        if !preserve_host {
-            let mut new_server_address = String::new();
-            if let Some(host) = endpoint_host {
-                new_server_address.push_str(host);
-            }
-            if let Some(nul) = handshake.server_address.find('\0') {
-                new_server_address.push_str(&handshake.server_address[nul..]);
-            }
-            return (Cow::Owned(new_server_address), endpoint_port);
-        }
-
-        (
-            Cow::Borrowed(handshake.server_address.as_ref()),
-            handshake.server_port,
-        )
-    }
-
-    async fn init_backend_handshake(
-        &self,
-        server: &mut EncodedConnection<'_>,
-        handshake: &OwnedHandshake,
-        endpoint_host: Option<&str>,
-        endpoint_port: u16,
-        preserve_host: bool,
-        proxied: bool,
-        client_addr: SocketAddr,
-    ) -> anyhow::Result<()> {
-        if proxied {
-            let pkt = create_proxy_protocol_header(client_addr)?;
-            server.send_raw(&pkt).await?;
-            debug!("PP Sent");
-        }
-
-        let (server_address, server_port) =
-            self.backend_handshake_parts(handshake, endpoint_host, endpoint_port, preserve_host);
-        let packet = HandshakeC2s {
-            protocol_version: handshake.protocol_version,
-            server_address: server_address.as_ref(),
-            server_port,
-            next_state: handshake.next_state,
-        };
-
-        server.send(&packet).await?;
-        debug!("HS Sent");
-        Ok(())
-    }
-
     pub async fn start(&'static self) -> anyhow::Result<()> {
         // Listener config.
         let config = self.config_snapshot().await;
@@ -236,7 +181,7 @@ impl Lure {
         }
     }
 
-    pub async fn handle_connection(
+    async fn handle_connection(
         &self,
         client_socket: Connection,
         address: SocketAddr,
@@ -247,7 +192,7 @@ impl Lure {
         Ok(())
     }
 
-    pub async fn handle_handshake(&self, mut connection: Connection) -> anyhow::Result<()> {
+    async fn handle_handshake(&self, mut connection: Connection) -> anyhow::Result<()> {
         let start = Instant::now();
         let client_addr = *connection.addr();
         const HANDSHAKE_INTENT: ClientIntent = ClientIntent {
@@ -261,13 +206,13 @@ impl Lure {
                 async {
                     handler
                         .recv::<HandshakeC2s>()
+                        .map(|f| f.map(OwnedHandshake::from_packet))
                         .await
-                        .map(OwnedHandshake::from_packet)
                 },
                 HANDSHAKE_INTENT,
             )
             .await
-            .map_err(|err| {
+            .inspect_err(|err| {
                 if let Some(ClientFail::Timeout { intent, .. }) = err.downcast_ref::<ClientFail>() {
                     LureLogger::deadline_missed(
                         "client handshake",
@@ -276,13 +221,11 @@ impl Lure {
                         None,
                     );
                 } else {
-                    LureLogger::parser_failure(&client_addr, "client handshake", &err);
+                    LureLogger::parser_failure(&client_addr, "client handshake", err);
                 }
-                err
             })?
-            .map_err(|err| {
-                LureLogger::parser_failure(&client_addr, "client handshake", &err);
-                err
+            .inspect_err(|err| {
+                LureLogger::parser_failure(&client_addr, "client handshake", err);
             })?;
         let state_attr = match hs.next_state {
             HandshakeNextState::Status => "status",
@@ -317,35 +260,7 @@ impl Lure {
         }
     }
 
-    async fn get_string(&self, key: &str) -> Box<str> {
-        self.config
-            .read()
-            .await
-            .strings
-            .get(key)
-            .cloned()
-            .unwrap_or_else(|| "".into())
-    }
-
-    async fn placeholder_status_json(&self, label: &str) -> String {
-        let brand = self.get_string("SERVER_LIST_BRAND").await;
-        let target_label = self.get_string(label).await;
-        placeholder_status_response(brand.as_ref(), target_label.as_ref())
-    }
-
-    async fn send_status_failure(
-        &self,
-        client: &mut EncodedConnection<'_>,
-        label: &str,
-    ) -> anyhow::Result<()> {
-        let placeholder = self.placeholder_status_json(label).await;
-        client
-            .send(&StatusResponseS2c { json: &placeholder })
-            .await?;
-        Ok(())
-    }
-
-    pub async fn handle_status(
+    async fn handle_status(
         &self,
         mut client: EncodedConnection<'_>,
         handshake: &OwnedHandshake,
@@ -356,19 +271,28 @@ impl Lure {
             duration: Duration::from_secs(1),
         };
         let client_addr = *client.as_inner().addr();
+        let config = self.config_snapshot().await;
         let Some(resolved) = resolved else {
-            self.metrics.record_failure("status");
-            self.send_status_failure(&mut client, "ROUTE_NOT_FOUND")
-                .await?;
+            self.status_error(&mut client, &config).await?;
             return Ok(());
         };
 
         let backend_addr = resolved.endpoint;
         let backend_label = backend_addr.to_string();
 
-        let mut backend = match self.open_backend_connection(backend_addr).await {
+        let mut backend = match backend::connect(
+            backend_addr,
+            handshake,
+            Some(resolved.endpoint_host.as_str()),
+            backend_addr.port(),
+            resolved.route.preserve_host(),
+            resolved.route.proxied(),
+            client_addr,
+        )
+        .await
+        {
             Ok(connection) => connection,
-            Err(err) => {
+            Err(backend::BackendConnectError::Connect(err)) => {
                 if err.downcast_ref::<Elapsed>().is_some() {
                     LureLogger::deadline_missed(
                         "backend connect",
@@ -379,42 +303,31 @@ impl Lure {
                 } else {
                     LureLogger::backend_failure(Some(&client_addr), backend_addr, "connect", &err);
                 }
-                self.metrics.record_failure("status");
-                self.send_status_failure(&mut client, "SERVER_OFFLINE")
-                    .await?;
+                self.status_error(&mut client, &config).await?;
+                return Ok(());
+            }
+            Err(backend::BackendConnectError::Handshake(err)) => {
+                if err.downcast_ref::<Elapsed>().is_some() {
+                    LureLogger::deadline_missed(
+                        "backend handshake",
+                        Duration::from_secs(1),
+                        Some(&client_addr),
+                        Some(&backend_label),
+                    );
+                } else {
+                    LureLogger::backend_failure(
+                        Some(&client_addr),
+                        backend_addr,
+                        "handshake",
+                        &err,
+                    );
+                }
+                self.status_error(&mut client, &config).await?;
                 return Ok(());
             }
         };
 
         let mut server = EncodedConnection::new(&mut backend, SocketIntent::GreetToBackend);
-
-        if let Err(err) = self
-            .init_backend_handshake(
-                &mut server,
-                handshake,
-                Some(resolved.endpoint_host.as_str()),
-                backend_addr.port(),
-                resolved.route.preserve_host(),
-                resolved.route.proxied(),
-                client_addr,
-            )
-            .await
-        {
-            if err.downcast_ref::<Elapsed>().is_some() {
-                LureLogger::deadline_missed(
-                    "backend handshake",
-                    Duration::from_secs(1),
-                    Some(&client_addr),
-                    Some(&backend_label),
-                );
-            } else {
-                LureLogger::backend_failure(Some(&client_addr), backend_addr, "handshake", &err);
-            }
-            self.metrics.record_failure("status");
-            self.send_status_failure(&mut client, "SERVER_OFFLINE")
-                .await?;
-            return Ok(());
-        }
 
         let req = match self
             .threat
@@ -447,9 +360,7 @@ impl Lure {
             Ok(r) => r,
             Err(err) => {
                 LureLogger::parser_failure(&client_addr, "backend status response", &err);
-                self.metrics.record_failure("status");
-                self.send_status_failure(&mut client, "SERVER_OFFLINE")
-                    .await?;
+                self.status_error(&mut client, &config).await?;
                 return Ok(());
             }
         };
@@ -495,7 +406,7 @@ impl Lure {
         Ok(())
     }
 
-    pub async fn handle_proxy<'a>(
+    async fn handle_proxy<'a>(
         &self,
         mut client: EncodedConnection<'a>,
         handshake: &OwnedHandshake,
@@ -521,10 +432,13 @@ impl Lure {
         let hostname = hostname.as_ref();
 
         let Some(resolved) = resolved else {
-            let display = format!("Route not found for {hostname}");
-            let log_reason = format!("route '{hostname}' not found");
-            self.disconnect_login(&mut client, address, display, log_reason)
-                .await;
+            self.disconnect_login(&mut client, address, |config| {
+                (
+                    config.string_value("ROUTE_NOT_FOUND"),
+                    format!("ROUTE_NOT_FOUND: route '{hostname}' not found"),
+                )
+            })
+            .await;
             return Ok(());
         };
 
@@ -536,18 +450,19 @@ impl Lure {
         };
 
         let server_address = session.destination_addr;
-        if let Err(e) = self
+        let _ = self
             .handle_proxy_session(client, handshake, route.as_ref(), &session, &login)
             .await
-        {
-            let re = ReportableError::from(e);
-            LureLogger::connection_error(&address, Some(&server_address), &re);
-        }
+            .map_err(|e| {
+                let re = ReportableError::from(e);
+                LureLogger::connection_error(&address, Some(&server_address), &re);
+                re
+            });
 
         Ok(())
     }
 
-    pub async fn handle_proxy_session(
+    async fn handle_proxy_session(
         &self,
         mut client: EncodedConnection<'_>,
         handshake: &OwnedHandshake,
@@ -559,9 +474,19 @@ impl Lure {
         let client_addr = session.client_addr;
         let hostname = handshake.server_address.as_ref();
 
-        let mut owned_stream = match self.open_backend_connection(server_address).await {
+        let mut owned_stream = match backend::connect(
+            server_address,
+            handshake,
+            Some(session.endpoint_host.as_str()),
+            server_address.port(),
+            route.preserve_host(),
+            route.proxied(),
+            client_addr,
+        )
+        .await
+        {
             Ok(stream) => stream,
-            Err(err) => {
+            Err(backend::BackendConnectError::Connect(err)) => {
                 let err = self
                     .disconnect_backend_error(
                         &mut client,
@@ -574,33 +499,21 @@ impl Lure {
                     .await?;
                 return Err(err.into());
             }
+            Err(backend::BackendConnectError::Handshake(err)) => {
+                let err = self
+                    .disconnect_backend_error(
+                        &mut client,
+                        client_addr,
+                        server_address,
+                        hostname,
+                        "handshake",
+                        err,
+                    )
+                    .await?;
+                return Err(err.into());
+            }
         };
         let mut server = EncodedConnection::new(&mut owned_stream, SocketIntent::GreetToBackend);
-
-        if let Err(err) = self
-            .init_backend_handshake(
-                &mut server,
-                handshake,
-                Some(session.endpoint_host.as_str()),
-                server_address.port(),
-                route.preserve_host(),
-                route.proxied(),
-                client_addr,
-            )
-            .await
-        {
-            let err = self
-                .disconnect_backend_error(
-                    &mut client,
-                    client_addr,
-                    server_address,
-                    hostname,
-                    "handshake",
-                    err,
-                )
-                .await?;
-            return Err(err.into());
-        }
         server.send(&login.as_packet()).await?;
 
         let pending = client.take_pending_inbound();
@@ -608,22 +521,35 @@ impl Lure {
             server.send_raw(&pending).await?;
         }
 
-        self.passthrough_now(&mut client, &mut server, session)
-            .await?;
+        passthrough_now(&mut client, &mut server, session).await?;
         Ok(())
     }
 
-    async fn disconnect_login(
+    async fn status_error(
+        &self,
+        client: &mut EncodedConnection<'_>,
+        config: &LureConfig,
+    ) -> anyhow::Result<()> {
+        self.metrics.record_failure("status");
+        query::send_status_failure(client, config, "ERROR").await
+    }
+
+    async fn disconnect_login<F, S, L>(
         &self,
         client: &mut EncodedConnection<'_>,
         address: SocketAddr,
-        display: String,
-        log_reason: String,
-    ) {
+        make_reason: F,
+    ) where
+        F: FnOnce(&LureConfig) -> (S, L),
+        S: AsRef<str>,
+        L: AsRef<str>,
+    {
+        let config = self.config_snapshot().await;
+        let (public_reason, log_reason) = make_reason(&config);
         self.metrics.record_failure("login");
         if let Err(err) = self
             .errors
-            .disconnect_with_log(client, address, display, log_reason)
+            .disconnect_with_log(client, address, || (public_reason, log_reason))
             .await
         {
             LureLogger::disconnect_failure(&address, &err);
@@ -649,10 +575,13 @@ impl Lure {
             Ok(Ok((session, route))) => Some((session, route)),
             Ok(Err(e)) => {
                 LureLogger::session_creation_failed(&address, hostname, &e);
-                let display = format!("Failed to create session for {hostname}");
-                let log_reason = format!("session creation failed for host '{hostname}': {e}");
-                self.disconnect_login(client, address, display, log_reason)
-                    .await;
+                self.disconnect_login(client, address, |config| {
+                    (
+                        config.string_value("ERROR"),
+                        format!("ERROR: session creation failed for host '{hostname}': {e}"),
+                    )
+                })
+                .await;
                 None
             }
             Err(_) => {
@@ -663,10 +592,13 @@ impl Lure {
                     Some(hostname),
                 );
                 LureLogger::session_creation_timeout(&address, hostname);
-                let display = format!("Session creation timed out for {hostname}");
-                let log_reason = format!("session creation timed out for host '{hostname}'");
-                self.disconnect_login(client, address, display, log_reason)
-                    .await;
+                self.disconnect_login(client, address, |config| {
+                    (
+                        config.string_value("ERROR"),
+                        format!("ERROR: session creation timed out for host '{hostname}'"),
+                    )
+                })
+                .await;
                 None
             }
         }
@@ -681,180 +613,19 @@ impl Lure {
         stage: &str,
         err: anyhow::Error,
     ) -> anyhow::Result<ReportableError> {
+        let config = self.config_snapshot().await;
         let err = ReportableError::from(err);
+        let key = "MESSAGE_CANNOT_CONNECT";
         self.errors
-            .disconnect_with_error(
-                client,
-                client_addr,
-                &err,
-                format!("backend {stage} to {server_address} for host '{hostname}'"),
-            )
+            .disconnect_with_log(client, client_addr, || {
+                (
+                    config.string_value(key),
+                    format!(
+                        "{key}: backend {stage} to {server_address} for host '{hostname}': {err}"
+                    ),
+                )
+            })
             .await?;
         Ok(err)
-    }
-
-    async fn open_backend_connection(&self, address: SocketAddr) -> anyhow::Result<Connection> {
-        let stream = timeout(Duration::from_secs(3), TcpStream::connect(address)).await??;
-        debug!("Connected to backend: {}", address);
-
-        if dotenvy::var("NO_NODELAY").is_err()
-            && let Err(e) = stream.set_nodelay(true)
-        {
-            LureLogger::tcp_nodelay_failed(&e);
-        }
-
-        Ok(Connection::try_from(stream)?)
-    }
-
-    async fn passthrough_now<'a, 'b>(
-        &self,
-        client: &mut EncodedConnection<'a>,
-        server: &mut EncodedConnection<'b>,
-        session: &Session,
-    ) -> anyhow::Result<()> {
-        let client = client.as_inner_mut();
-        let server = server.as_inner_mut();
-        let cad = *client.addr();
-        let rad = *server.addr();
-        let (mut client_read, mut client_write) = client.as_mut().split();
-        let (mut remote_read, mut remote_write) = server.as_mut().split();
-
-        let (cancel, _) = broadcast::channel(1);
-        let inspect = session.inspect.clone();
-
-        // Allows lint & fmt
-        let (la, lb, lc) = (
-            {
-                let inspect = inspect.clone();
-                copy_with_abort(
-                    &mut remote_read,
-                    &mut client_write,
-                    cancel.subscribe(),
-                    move |u| {
-                        inspect.record_s2c(u);
-                    },
-                )
-                .then(|r| {
-                    let _ = cancel.send(());
-                    async { r }
-                })
-            },
-            {
-                let inspect = inspect.clone();
-                copy_with_abort(
-                    &mut client_read,
-                    &mut remote_write,
-                    cancel.subscribe(),
-                    move |u| {
-                        inspect.record_c2s(u);
-                    },
-                )
-                .then(|r| {
-                    let _ = cancel.send(());
-                    async { r }
-                })
-            },
-            // Meter report thread
-            {
-                let abort = cancel.subscribe();
-
-                async move {
-                    let mut interval = tokio::time::interval(Duration::from_millis(100));
-                    let volume_record = get_meter()
-                        .u64_counter("lure_proxy_transport_volume")
-                        .with_unit("bytes")
-                        .build();
-
-                    let packet_record = get_meter()
-                        .u64_counter("lure_proxy_transport_packet_count")
-                        .with_unit("packets")
-                        .build();
-
-                    let s2ct = KeyValue::new("intent", "s2c");
-                    let c2st = KeyValue::new("intent", "c2s");
-
-                    let mut last = inspect.traffic.snapshot();
-
-                    loop {
-                        if !abort.is_empty() {
-                            break;
-                        }
-
-                        let vr1 = volume_record.clone();
-                        let vr2 = volume_record.clone();
-                        let pr1 = packet_record.clone();
-                        let pr2 = packet_record.clone();
-
-                        let snap = inspect.traffic.snapshot();
-
-                        vr1.add(
-                            snap.c2s_bytes - last.c2s_bytes,
-                            core::slice::from_ref(&c2st),
-                        );
-                        vr2.add(
-                            snap.s2c_bytes - last.s2c_bytes,
-                            core::slice::from_ref(&s2ct),
-                        );
-                        pr1.add(
-                            snap.c2s_chunks - last.c2s_chunks,
-                            core::slice::from_ref(&c2st),
-                        );
-                        pr2.add(
-                            snap.s2c_chunks - last.s2c_chunks,
-                            core::slice::from_ref(&s2ct),
-                        );
-
-                        last = snap;
-
-                        interval.tick().await;
-                    }
-                }
-            },
-        );
-        let (ra, rb, _rc) = tokio::join!(la, lb, lc);
-
-        if let Err(era) = ra {
-            LureLogger::connection_error(&cad, Some(&rad), &era);
-        }
-        if let Err(erb) = rb {
-            LureLogger::connection_error(&cad, Some(&rad), &erb);
-        }
-
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn handshake_with_addr(addr: &str) -> OwnedHandshake {
-        OwnedHandshake {
-            protocol_version: 0,
-            server_address: Arc::from(addr),
-            server_port: 25565,
-            next_state: HandshakeNextState::Login,
-        }
-    }
-
-    #[tokio::test]
-    async fn backend_handshake_preserves_suffix_after_first_nul() {
-        let lure = Lure::new(LureConfig::default());
-        let hs = handshake_with_addr("example.com\0FML2\0");
-        let (address, _) = lure.backend_handshake_parts(&hs, Some("backend.local"), 25565, false);
-        assert_eq!(address.as_ref(), "backend.local\0FML2\0");
-
-        let hs = handshake_with_addr("example.com\0FORGE\0");
-        let (address, _) = lure.backend_handshake_parts(&hs, Some("backend.local"), 25565, false);
-        assert_eq!(address.as_ref(), "backend.local\0FORGE\0");
-    }
-
-    #[tokio::test]
-    async fn backend_handshake_keeps_raw_host_when_preserved() {
-        let lure = Lure::new(LureConfig::default());
-        let hs = handshake_with_addr("example.com\0FORGE\0");
-        let (address, port) = lure.backend_handshake_parts(&hs, Some("backend.local"), 25565, true);
-        assert_eq!(address.as_ref(), hs.server_address.as_ref());
-        assert_eq!(port, hs.server_port);
     }
 }

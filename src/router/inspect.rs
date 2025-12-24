@@ -4,9 +4,10 @@ use std::{
         Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
-    time::Instant,
+    time::{Instant, SystemTime},
 };
 
+use serde::Serialize;
 use tokio::sync::RwLock;
 
 use crate::telemetry::inspect::{
@@ -20,6 +21,9 @@ pub struct TrafficCountersAtomic {
     s2c_bytes: AtomicU64,
     c2s_chunks: AtomicU64,
     s2c_chunks: AtomicU64,
+    last_sample_ms: AtomicU64,
+    last_c2s_bytes: AtomicU64,
+    last_s2c_bytes: AtomicU64,
 }
 
 impl TrafficCountersAtomic {
@@ -29,6 +33,9 @@ impl TrafficCountersAtomic {
             s2c_bytes: AtomicU64::new(0),
             c2s_chunks: AtomicU64::new(0),
             s2c_chunks: AtomicU64::new(0),
+            last_sample_ms: AtomicU64::new(0),
+            last_c2s_bytes: AtomicU64::new(0),
+            last_s2c_bytes: AtomicU64::new(0),
         }
     }
 
@@ -43,11 +50,32 @@ impl TrafficCountersAtomic {
     }
 
     pub fn snapshot(&self) -> TrafficCounters {
+        let now_ms = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or(std::time::Duration::ZERO)
+            .as_millis() as u64;
+        let c2s_bytes = self.c2s_bytes.load(Ordering::Relaxed);
+        let s2c_bytes = self.s2c_bytes.load(Ordering::Relaxed);
+
+        let prev_ms = self.last_sample_ms.swap(now_ms, Ordering::Relaxed);
+        let prev_c2s = self.last_c2s_bytes.swap(c2s_bytes, Ordering::Relaxed);
+        let prev_s2c = self.last_s2c_bytes.swap(s2c_bytes, Ordering::Relaxed);
+
+        let (c2s_bps, s2c_bps) = if prev_ms == 0 || now_ms <= prev_ms {
+            (0, 0)
+        } else {
+            let delta_ms = now_ms - prev_ms;
+            let c2s = c2s_bytes.saturating_sub(prev_c2s).saturating_mul(1000) / delta_ms;
+            let s2c = s2c_bytes.saturating_sub(prev_s2c).saturating_mul(1000) / delta_ms;
+            (c2s, s2c)
+        };
         TrafficCounters {
-            c2s_bytes: self.c2s_bytes.load(Ordering::Relaxed),
-            s2c_bytes: self.s2c_bytes.load(Ordering::Relaxed),
+            c2s_bytes,
+            s2c_bytes,
             c2s_chunks: self.c2s_chunks.load(Ordering::Relaxed),
             s2c_chunks: self.s2c_chunks.load(Ordering::Relaxed),
+            c2s_bps,
+            s2c_bps,
         }
     }
 }
@@ -219,6 +247,40 @@ pub struct SessionInspectState {
     pub instance: Arc<InstanceStatsAtomic>,
 }
 
+#[derive(Serialize)]
+struct SessionInspectReportFormat {
+    id: u64,
+    zone: u64,
+    route_id: u64,
+    hostname: String,
+    created_at_ms: u64,
+    last_activity_ms: u64,
+    traffic: TrafficCounters,
+}
+
+impl From<&SessionInspectState> for SessionInspectReportFormat {
+    fn from(state: &SessionInspectState) -> Self {
+        Self {
+            id: state.id,
+            zone: state.zone,
+            route_id: state.route_id,
+            hostname: state.hostname.clone(),
+            created_at_ms: state.created_at_ms,
+            last_activity_ms: state.last_activity_ms.load(Ordering::Relaxed),
+            traffic: state.traffic.snapshot(),
+        }
+    }
+}
+
+impl Serialize for SessionInspectState {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        SessionInspectReportFormat::from(self).serialize(serializer)
+    }
+}
+
 impl SessionInspectState {
     pub fn new(
         id: u64,
@@ -367,5 +429,6 @@ pub fn inspect_session_to_view(
         last_activity_ms: state.last_activity_ms.load(Ordering::Relaxed),
         traffic: state.traffic.snapshot(),
         attributes,
+        profile: (*session.profile).clone(),
     }
 }

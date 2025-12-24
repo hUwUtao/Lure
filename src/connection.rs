@@ -1,8 +1,10 @@
 use std::{
     fmt::Debug,
     io::{self, ErrorKind},
+    time::Duration,
 };
 
+use futures::FutureExt;
 use net::{
     LoginDisconnectS2c, PacketDecode, PacketDecoder, PacketEncode, PacketEncoder, PacketFrame,
     ProtoError,
@@ -17,7 +19,10 @@ use tokio::{
     sync::broadcast,
 };
 
-use crate::{error::ReportableError, telemetry::get_meter, utils::Connection};
+use crate::{
+    error::ReportableError, logging::LureLogger, router::Session, telemetry::get_meter,
+    utils::Connection,
+};
 
 pub(crate) struct EncodedConnection<'a> {
     enc: PacketEncoder,
@@ -262,4 +267,120 @@ where
     }
     Ok(())
     // Ok(copied)
+}
+
+pub(crate) async fn passthrough_now<'a, 'b>(
+    client: &mut EncodedConnection<'a>,
+    server: &mut EncodedConnection<'b>,
+    session: &Session,
+) -> anyhow::Result<()> {
+    let client = client.as_inner_mut();
+    let server = server.as_inner_mut();
+    let cad = *client.addr();
+    let rad = *server.addr();
+    let (mut client_read, mut client_write) = client.as_mut().split();
+    let (mut remote_read, mut remote_write) = server.as_mut().split();
+
+    let (cancel, _) = broadcast::channel(1);
+    let inspect = session.inspect.clone();
+
+    // Allows lint & fmt
+    let (la, lb, lc) = (
+        {
+            let inspect = inspect.clone();
+            copy_with_abort(
+                &mut remote_read,
+                &mut client_write,
+                cancel.subscribe(),
+                move |u| {
+                    inspect.record_s2c(u);
+                },
+            )
+            .then(|r| {
+                let _ = cancel.send(());
+                async { r }
+            })
+        },
+        {
+            let inspect = inspect.clone();
+            copy_with_abort(
+                &mut client_read,
+                &mut remote_write,
+                cancel.subscribe(),
+                move |u| {
+                    inspect.record_c2s(u);
+                },
+            )
+            .then(|r| {
+                let _ = cancel.send(());
+                async { r }
+            })
+        },
+        // Meter report thread
+        {
+            let abort = cancel.subscribe();
+
+            async move {
+                let mut interval = tokio::time::interval(Duration::from_millis(100));
+                let volume_record = get_meter()
+                    .u64_counter("lure_proxy_transport_volume")
+                    .with_unit("bytes")
+                    .build();
+
+                let packet_record = get_meter()
+                    .u64_counter("lure_proxy_transport_packet_count")
+                    .with_unit("packets")
+                    .build();
+
+                let s2ct = KeyValue::new("intent", "s2c");
+                let c2st = KeyValue::new("intent", "c2s");
+
+                let mut last = inspect.traffic.snapshot();
+
+                loop {
+                    if !abort.is_empty() {
+                        break;
+                    }
+
+                    let vr1 = volume_record.clone();
+                    let vr2 = volume_record.clone();
+                    let pr1 = packet_record.clone();
+                    let pr2 = packet_record.clone();
+
+                    let snap = inspect.traffic.snapshot();
+
+                    vr1.add(
+                        snap.c2s_bytes - last.c2s_bytes,
+                        core::slice::from_ref(&c2st),
+                    );
+                    vr2.add(
+                        snap.s2c_bytes - last.s2c_bytes,
+                        core::slice::from_ref(&s2ct),
+                    );
+                    pr1.add(
+                        snap.c2s_chunks - last.c2s_chunks,
+                        core::slice::from_ref(&c2st),
+                    );
+                    pr2.add(
+                        snap.s2c_chunks - last.s2c_chunks,
+                        core::slice::from_ref(&s2ct),
+                    );
+
+                    last = snap;
+
+                    interval.tick().await;
+                }
+            }
+        },
+    );
+    let (ra, rb, _rc) = tokio::join!(la, lb, lc);
+
+    if let Err(era) = ra {
+        LureLogger::connection_error(&cad, Some(&rad), &era);
+    }
+    if let Err(erb) = rb {
+        LureLogger::connection_error(&cad, Some(&rad), &erb);
+    }
+
+    Ok(())
 }

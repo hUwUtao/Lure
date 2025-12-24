@@ -17,6 +17,6 @@ pub use packets::{
 };
 pub use state::{HandshakeNextState, PacketState};
 pub use types::{
-    encode_packet, PacketDecode, PacketDecoder, PacketEncoder, PacketEncode, PacketFrame, Uuid,
-    MAX_PACKET_SIZE,
+    MAX_PACKET_SIZE, PacketDecode, PacketDecoder, PacketEncode, PacketEncoder, PacketFrame, Uuid,
+    encode_packet,
 };

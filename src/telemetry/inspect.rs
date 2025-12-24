@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::router::Profile;
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct InspectRequest {
     pub req: u64,
@@ -11,6 +13,8 @@ pub struct TrafficCounters {
     pub s2c_bytes: u64,
     pub c2s_chunks: u64,
     pub s2c_chunks: u64,
+    pub c2s_bps: u64,
+    pub s2c_bps: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -29,6 +33,7 @@ pub struct SessionInspect {
     pub last_activity_ms: u64,
     pub traffic: TrafficCounters,
     pub attributes: SessionAttributes,
+    pub profile: Profile,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

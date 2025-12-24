@@ -8,8 +8,14 @@ use std::{sync::Arc, time::Duration};
 use opentelemetry::{global, global::BoxedTracer, metrics::Meter, trace::TracerProvider};
 use serde::{Deserialize, Serialize};
 
-use crate::{lure::EventIdent, router::RouteReport, telemetry::event::EventService};
-use crate::telemetry::inspect::{InspectRequest, ListSessionsResponse, ListStatsResponse};
+use crate::{
+    lure::EventIdent,
+    router::RouteReport,
+    telemetry::{
+        event::EventService,
+        inspect::{InspectRequest, ListSessionsResponse, ListStatsResponse},
+    },
+};
 
 pub fn get_meter() -> Meter {
     global::meter_provider().meter("alure")

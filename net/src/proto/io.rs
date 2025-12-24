@@ -1,6 +1,8 @@
-use super::error::{ProtoError, Result};
-use super::varint::read_varint;
-use super::Uuid;
+use super::{
+    Uuid,
+    error::{ProtoError, Result},
+    varint::read_varint,
+};
 
 #[inline]
 pub(crate) fn take<'a>(input: &mut &'a [u8], len: usize) -> Result<&'a [u8]> {
@@ -80,10 +82,7 @@ pub(crate) fn write_uuid(out: &mut Vec<u8>, value: &Uuid) {
     write_u64_be(out, lsb);
 }
 
-pub(crate) fn read_string_bounded<'a>(
-    input: &mut &'a [u8],
-    max_chars: usize,
-) -> Result<&'a str> {
+pub(crate) fn read_string_bounded<'a>(input: &mut &'a [u8], max_chars: usize) -> Result<&'a str> {
     let byte_len = read_varint(input)?;
     if byte_len < 0 {
         return Err(ProtoError::NegativeLength(byte_len));

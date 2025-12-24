@@ -10,9 +10,8 @@ use std::{
 };
 
 use async_trait::async_trait;
-use fake_serialize::FakeSerialize;
+use fake_serialize::{FakeDeserialize, FakeSerialize};
 use log::debug;
-use net::Uuid;
 use serde::{Deserialize, Serialize};
 use tokio::{
     sync::{RwLock, RwLockWriteGuard, mpsc},
@@ -28,8 +27,10 @@ use crate::{
 mod attr;
 mod dest;
 pub(crate) mod inspect;
+mod profile;
 pub use attr::RouteAttr;
 pub use dest::Destination;
+pub use profile::Profile;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Copy)]
 pub enum RouteFlags {
@@ -78,14 +79,8 @@ impl Route {
     }
 }
 
-#[derive(Debug)]
-pub struct Profile {
-    pub name: Arc<str>,
-    pub uuid: Option<Uuid>,
-}
-
 /// Client session tracking source, destination, and associated route
-#[derive(Debug)]
+#[derive(Debug, FakeDeserialize)]
 pub struct Session {
     /// Session ID (monotonic per instance)
     pub id: u64,
@@ -103,6 +98,29 @@ pub struct Session {
     pub inspect: Arc<inspect::SessionInspectState>,
     /// Profile
     pub profile: Arc<Profile>,
+}
+
+impl Serialize for Session {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let attributes = self
+            .inspect
+            .attributes
+            .try_read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+
+        let view = inspect::inspect_session_to_view(
+            self,
+            self.client_addr.to_string(),
+            self.destination_addr.to_string(),
+            self.endpoint_host.clone(),
+            attributes,
+        );
+        view.serialize(serializer)
+    }
 }
 
 /// RAII handle that terminates the session when dropped

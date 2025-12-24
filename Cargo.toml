@@ -1,9 +1,10 @@
 [package]
 name = "lure"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[workspace.metadata.cargo-shear]
+ignored = ["tonic"]
 
 [workspace]
 members = ["net"]
@@ -19,7 +20,7 @@ dotenvy = "0.15"
 opentelemetry-stdout = "0.31"
 opentelemetry_sdk = { version = "0.31", features = ["tokio", "tokio-stream", "rt-tokio", "http", "url"] }
 proxy-protocol = "0.5.0"
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive", "rc"] }
 # tokio = { version = "1.27", features = ["full", "rt-multi-thread", "tracing"] }
 tokio = { version = "1.48", features = ["full", "rt-multi-thread", "tracing"] }
 toml = "0.9"

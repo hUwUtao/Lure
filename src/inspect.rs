@@ -60,10 +60,11 @@ impl EventHook<EventEnvelope, EventEnvelope> for InspectHook {
         event: &'_ EventEnvelope,
     ) -> anyhow::Result<()> {
         match event {
-            EventEnvelope::ListSessionsRequest(req) => self.handle_list_sessions(service, req).await,
+            EventEnvelope::ListSessionsRequest(req) => {
+                self.handle_list_sessions(service, req).await
+            }
             EventEnvelope::ListStatsRequest(req) => self.handle_list_stats(service, req).await,
             _ => Ok(()),
         }
     }
 }
-

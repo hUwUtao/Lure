@@ -3,6 +3,7 @@ use std::{
     fs::{self, File},
     io::prelude::*,
     path::PathBuf,
+    sync::Arc,
 };
 
 use serde::{Deserialize, Serialize};
@@ -36,7 +37,7 @@ pub struct LureConfig {
 
     /// Localized string map used for placeholder responses.
     #[serde(default)]
-    pub strings: HashMap<Box<str>, Box<str>>,
+    pub strings: HashMap<Box<str>, Arc<str>>,
 
     /// Default, statically-configured routes.
     #[serde(default)]
@@ -128,6 +129,13 @@ impl LureConfig {
             .enumerate()
             .map(|(idx, cfg)| cfg.to_route(idx))
             .collect()
+    }
+
+    pub fn string_value(&self, key: &str) -> Arc<str> {
+        self.strings
+            .get(key)
+            .cloned()
+            .unwrap_or(Arc::from(format!("{key}-is-not-written")))
     }
 }
 
