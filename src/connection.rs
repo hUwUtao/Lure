@@ -8,7 +8,7 @@ use futures::FutureExt;
 // use futures::FutureExt;
 use net::{
     LoginDisconnectS2c, LoginStartC2s, PacketDecode, PacketDecoder, PacketEncode, PacketEncoder,
-    PacketFrame, ProtoError,
+    PacketFrame, ProtoError, encode_raw_packet,
 };
 use opentelemetry::{
     KeyValue,
@@ -33,6 +33,11 @@ pub(crate) struct EncodedConnection<'a> {
     metric: ConnectionMetric,
     intent: KeyValue,
     _reserved_lifetime: std::marker::PhantomData<&'a ()>,
+}
+
+pub struct LoginStartFrame<'a> {
+    pub packet: LoginStartC2s<'a>,
+    pub raw: Vec<u8>,
 }
 
 pub enum SocketIntent {
@@ -166,13 +171,16 @@ impl<'a> EncodedConnection<'a> {
     pub async fn recv_login_start<'b>(
         &'b mut self,
         protocol_version: i32,
-    ) -> anyhow::Result<LoginStartC2s<'b>> {
+    ) -> anyhow::Result<LoginStartFrame<'b>> {
         loop {
             if let Some(frame) = self.dec.try_next_packet()? {
                 let size = frame.body.len();
                 self.frame = frame;
                 self.packet_record(size);
-                return decode_login_start_frame(&self.frame, protocol_version);
+                let mut raw = Vec::new();
+                encode_raw_packet(&mut raw, self.frame.id, &self.frame.body)?;
+                let packet = decode_login_start_frame(&self.frame, protocol_version)?;
+                return Ok(LoginStartFrame { packet, raw });
             }
 
             let mut buf = [0u8; MAX_CHUNK_SIZE];

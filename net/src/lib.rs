@@ -12,5 +12,5 @@ pub use mc::{
     HandshakeC2s, HandshakeNextState, LoginDisconnectS2c, LoginStartC2s, LoginStartSigData,
     MAX_PACKET_SIZE, PacketDecode, PacketDecoder, PacketEncode, PacketEncoder, PacketFrame,
     PacketState, ProtoError, ServerboundPacket, StatusPingC2s, StatusPongS2c, StatusRequestC2s,
-    StatusResponseS2c, Uuid, encode_packet,
+    StatusResponseS2c, Uuid, encode_packet, encode_raw_packet,
 };

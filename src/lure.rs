@@ -418,11 +418,13 @@ impl Lure {
             duration: Duration::from_secs(5),
         };
 
-        let login = self
-            .threat
-            .nuisance(client.recv_login_start(handshake.protocol_version), INTENT)
-            .await??;
-        let login = OwnedLoginStart::from_packet(login);
+        let (login, login_raw) = {
+            let login_frame = self
+                .threat
+                .nuisance(client.recv_login_start(handshake.protocol_version), INTENT)
+                .await??;
+            (OwnedLoginStart::from_packet(login_frame.packet), login_frame.raw)
+        };
         let profile = Arc::new(Profile {
             name: Arc::clone(&login.username),
             uuid: login.profile_id,
@@ -452,7 +454,7 @@ impl Lure {
 
         let server_address = session.destination_addr;
         let _ = self
-            .handle_proxy_session(client, handshake, route.as_ref(), &session, &login)
+            .handle_proxy_session(client, handshake, route.as_ref(), &session, &login_raw)
             .await
             .map_err(|e| {
                 let re = ReportableError::from(e);
@@ -469,7 +471,7 @@ impl Lure {
         handshake: &OwnedHandshake,
         route: &Route,
         session: &Session,
-        login: &OwnedLoginStart,
+        login_raw: &[u8],
     ) -> anyhow::Result<()> {
         let config = self.config_snapshot().await;
         let server_address = session.destination_addr;
@@ -517,9 +519,7 @@ impl Lure {
             }
         };
         let mut server = EncodedConnection::new(&mut owned_stream, SocketIntent::GreetToBackend);
-        server
-            .send_login_start(&login.as_packet(), handshake.protocol_version)
-            .await?;
+        server.send_raw(login_raw).await?;
 
         let pending = client.take_pending_inbound();
         if !pending.is_empty() {

@@ -234,7 +234,7 @@ pub fn encode_packet<P: PacketEncode>(out: &mut Vec<u8>, pkt: &P) -> Result<()> 
     encode_raw_packet(out, P::ID, &body)
 }
 
-fn encode_raw_packet(out: &mut Vec<u8>, id: i32, body: &[u8]) -> Result<()> {
+pub fn encode_raw_packet(out: &mut Vec<u8>, id: i32, body: &[u8]) -> Result<()> {
     let packet_len = varint_len(id) + body.len();
     if packet_len > MAX_PACKET_SIZE {
         return Err(ProtoError::PacketTooLarge { len: packet_len });
