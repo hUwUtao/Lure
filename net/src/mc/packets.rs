@@ -1,8 +1,8 @@
 use super::{
     error::{ProtoError, Result, debug_log_error},
     io::{
-        read_bool, read_i64_be, read_string_bounded, read_u16_be, read_uuid, write_bool,
-        write_i64_be, write_string_bounded, write_u16_be, write_uuid,
+        read_i64_be, read_string_bounded, read_u16_be, read_uuid, write_i64_be,
+        write_string_bounded, write_u16_be, write_uuid,
     },
     state::{HandshakeNextState, PacketState},
     types::{PacketDecode, PacketEncode, PacketFrame, Uuid},
@@ -304,12 +304,12 @@ impl<'a> LoginStartC2s<'a> {
 
     pub fn decode_body(input: &mut &'a [u8]) -> Result<Self> {
         let username = read_string_bounded(input, 16)?;
-        let has_uuid = read_bool(input)?;
-        let profile_id = if has_uuid {
+        let profile_id = if input.len() >= 16 {
             Some(read_uuid(input)?)
         } else {
             None
         };
+        *input = &[];
 
         Ok(Self {
             username,
@@ -331,12 +331,8 @@ impl<'a> PacketEncode for LoginStartC2s<'a> {
 
     fn encode_body(&self, out: &mut Vec<u8>) -> Result<()> {
         write_string_bounded(out, self.username, 16)?;
-        match &self.profile_id {
-            Some(uuid) => {
-                write_bool(out, true);
-                write_uuid(out, uuid);
-            }
-            None => write_bool(out, false),
+        if let Some(uuid) = &self.profile_id {
+            write_uuid(out, uuid);
         }
         Ok(())
     }

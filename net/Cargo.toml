@@ -6,5 +6,16 @@ edition = "2024"
 [dependencies]
 log = "0.4.22"
 
+[dev-dependencies]
+criterion = "0.5"
+
 [features]
 packet-debug = []
+
+[[bench]]
+name = "mc"
+harness = false
+
+[[bench]]
+name = "ha"
+harness = false
