@@ -1,9 +1,25 @@
 use super::{
     packets::{HandshakeC2s, LoginDisconnectS2c, LoginStartC2s, ServerboundPacket, StatusPingC2s},
     state::{HandshakeNextState, PacketState},
-    types::{PacketDecoder, PacketEncoder, Uuid},
+    types::{PacketDecoder, PacketEncode, PacketEncoder, Uuid},
     varint::{read_varint, write_varint},
 };
+
+const PROTOCOL_VERSION: i32 = 763;
+
+struct VersionedLoginStart<'a> {
+    packet: &'a LoginStartC2s<'a>,
+    protocol_version: i32,
+}
+
+impl<'a> PacketEncode for VersionedLoginStart<'a> {
+    const ID: i32 = LoginStartC2s::ID;
+
+    fn encode_body(&self, out: &mut Vec<u8>) -> super::error::Result<()> {
+        self.packet
+            .encode_body_with_version(out, self.protocol_version)
+    }
+}
 
 #[test]
 fn varint_roundtrip() {
@@ -21,7 +37,7 @@ fn varint_roundtrip() {
 #[test]
 fn handshake_roundtrip() {
     let packet = HandshakeC2s {
-        protocol_version: 763,
+        protocol_version: PROTOCOL_VERSION,
         server_address: "localhost",
         server_port: 25565,
         next_state: HandshakeNextState::Login,
@@ -34,7 +50,9 @@ fn handshake_roundtrip() {
     let mut dec = PacketDecoder::new();
     dec.queue_slice(&bytes);
     let frame = dec.try_next_packet().unwrap().unwrap();
-    let decoded = frame.decode_serverbound(PacketState::Handshaking).unwrap();
+    let decoded = frame
+        .decode_serverbound(PacketState::Handshaking, PROTOCOL_VERSION)
+        .unwrap();
 
     match decoded {
         ServerboundPacket::Handshake(actual) => assert_eq!(actual, packet),
@@ -53,13 +71,19 @@ fn login_start_roundtrip() {
     };
 
     let mut enc = PacketEncoder::new();
-    enc.write_packet(&packet).unwrap();
+    let versioned = VersionedLoginStart {
+        packet: &packet,
+        protocol_version: PROTOCOL_VERSION,
+    };
+    enc.write_packet(&versioned).unwrap();
     let bytes = enc.take();
 
     let mut dec = PacketDecoder::new();
     dec.queue_slice(&bytes);
     let frame = dec.try_next_packet().unwrap().unwrap();
-    let decoded = frame.decode_serverbound(PacketState::Login).unwrap();
+    let decoded = frame
+        .decode_serverbound(PacketState::Login, PROTOCOL_VERSION)
+        .unwrap();
 
     match decoded {
         ServerboundPacket::LoginStart(actual) => assert_eq!(actual, packet),
@@ -78,7 +102,9 @@ fn status_ping_roundtrip() {
     let mut dec = PacketDecoder::new();
     dec.queue_slice(&bytes);
     let frame = dec.try_next_packet().unwrap().unwrap();
-    let decoded = frame.decode_serverbound(PacketState::Status).unwrap();
+    let decoded = frame
+        .decode_serverbound(PacketState::Status, PROTOCOL_VERSION)
+        .unwrap();
 
     match decoded {
         ServerboundPacket::StatusPing(actual) => assert_eq!(actual, packet),

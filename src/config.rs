@@ -6,11 +6,66 @@ use std::{
     sync::Arc,
 };
 
-use serde::{Deserialize, Serialize};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use log::warn;
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::router::{Destination, Route, RouteAttr, RouteFlags};
 
 const DEFAULT_ROUTE_ID_BASE: u64 = u64::MAX - u32::MAX as u64;
+
+#[derive(Debug, Clone)]
+pub struct ProxySigningKey(Vec<u8>);
+
+impl ProxySigningKey {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    pub fn from_base64(value: &str) -> Result<Self, base64::DecodeError> {
+        STANDARD.decode(value.trim()).map(Self)
+    }
+}
+
+impl Serialize for ProxySigningKey {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ProxySigningKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum ProxySigningKeyRepr {
+            Base64(String),
+            Raw(Vec<u8>),
+        }
+
+        let repr = ProxySigningKeyRepr::deserialize(deserializer)?;
+        let bytes = match repr {
+            ProxySigningKeyRepr::Base64(value) => match ProxySigningKey::from_base64(&value) {
+                Ok(key) => return Ok(key),
+                Err(err) => {
+                    warn!("proxy_signing_key is not valid base64: {err}");
+                    Vec::new()
+                }
+            },
+            ProxySigningKeyRepr::Raw(bytes) => bytes,
+        };
+        Ok(ProxySigningKey(bytes))
+    }
+}
 
 /// Top-level configuration for the application, loaded from a TOML file.
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -26,6 +81,10 @@ pub struct LureConfig {
     /// Enable or disable proxy protocol support.
     #[serde(default, rename = "proxy_procol")]
     pub proxy_protocol: bool,
+
+    /// Optional Ed25519 private key (base64 string or byte array) for signing proxy headers.
+    #[serde(default)]
+    pub proxy_signing_key: Option<ProxySigningKey>,
 
     /// Maximum concurrent downstream connections.
     #[serde(default = "default_max_conn")]
@@ -92,6 +151,7 @@ impl Default for LureConfig {
             inst: default_inst(),
             bind: default_bind(),
             proxy_protocol: false,
+            proxy_signing_key: None,
             max_conn: default_max_conn(),
             cooldown: 3,
             strings: HashMap::new(),

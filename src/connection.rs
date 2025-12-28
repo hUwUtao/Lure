@@ -5,9 +5,10 @@ use std::{
 };
 
 use futures::FutureExt;
+// use futures::FutureExt;
 use net::{
-    LoginDisconnectS2c, PacketDecode, PacketDecoder, PacketEncode, PacketEncoder, PacketFrame,
-    ProtoError,
+    LoginDisconnectS2c, LoginStartC2s, PacketDecode, PacketDecoder, PacketEncode, PacketEncoder,
+    PacketFrame, ProtoError,
 };
 use opentelemetry::{
     KeyValue,
@@ -65,6 +66,20 @@ impl ConnectionMetric {
 }
 
 const MAX_CHUNK_SIZE: usize = 1024;
+
+struct VersionedLoginStart<'a, 'b> {
+    packet: &'a LoginStartC2s<'b>,
+    protocol_version: i32,
+}
+
+impl<'a, 'b> PacketEncode for VersionedLoginStart<'a, 'b> {
+    const ID: i32 = LoginStartC2s::ID;
+
+    fn encode_body(&self, out: &mut Vec<u8>) -> net::mc::Result<()> {
+        self.packet
+            .encode_body_with_version(out, self.protocol_version)
+    }
+}
 
 impl<'a> EncodedConnection<'a> {
     pub fn new(stream: &'a mut Connection, intent: SocketIntent) -> Self {
@@ -148,6 +163,27 @@ impl<'a> EncodedConnection<'a> {
         }
     }
 
+    pub async fn recv_login_start<'b>(
+        &'b mut self,
+        protocol_version: i32,
+    ) -> anyhow::Result<LoginStartC2s<'b>> {
+        loop {
+            if let Some(frame) = self.dec.try_next_packet()? {
+                let size = frame.body.len();
+                self.frame = frame;
+                self.packet_record(size);
+                return decode_login_start_frame(&self.frame, protocol_version);
+            }
+
+            let mut buf = [0u8; MAX_CHUNK_SIZE];
+            let read_len = self.stream.as_mut().read(&mut buf).await?;
+            if read_len == 0 {
+                return Err(io::Error::from(ErrorKind::UnexpectedEof).into());
+            }
+            self.dec.queue_slice(&buf[..read_len]);
+        }
+    }
+
     pub async fn send<P>(&mut self, pkt: &P) -> anyhow::Result<()>
     where
         P: PacketEncode,
@@ -157,6 +193,24 @@ impl<'a> EncodedConnection<'a> {
         let size = bytes.len();
         self.packet_record(size);
         // timeout(Duration::from_millis(5000), self.write.write_all(&bytes)).await??;
+        self.stream.as_mut().write_all(&bytes).await?;
+        self.flush().await?;
+        Ok(())
+    }
+
+    pub async fn send_login_start(
+        &mut self,
+        pkt: &LoginStartC2s<'_>,
+        protocol_version: i32,
+    ) -> anyhow::Result<()> {
+        let versioned = VersionedLoginStart {
+            packet: pkt,
+            protocol_version,
+        };
+        self.enc.write_packet(&versioned)?;
+        let bytes = self.enc.take();
+        let size = bytes.len();
+        self.packet_record(size);
         self.stream.as_mut().write_all(&bytes).await?;
         self.flush().await?;
         Ok(())
@@ -212,6 +266,29 @@ where
     if !body.is_empty() {
         return Err(ProtoError::TrailingBytes(body.len()).into());
     }
+    Ok(pkt)
+}
+
+fn decode_login_start_frame<'a>(
+    frame: &'a PacketFrame,
+    protocol_version: i32,
+) -> anyhow::Result<LoginStartC2s<'a>> {
+    let _ctx = format_args!(
+        "type={} id=0x{:02x}",
+        std::any::type_name::<LoginStartC2s<'a>>(),
+        frame.id
+    );
+
+    if frame.id != LoginStartC2s::ID {
+        return Err(anyhow::anyhow!(
+            "unexpected packet id {} (expected {})",
+            frame.id,
+            LoginStartC2s::ID
+        ));
+    }
+
+    let mut body = frame.body.as_slice();
+    let pkt = LoginStartC2s::decode_body_with_version(&mut body, protocol_version)?;
     Ok(pkt)
 }
 

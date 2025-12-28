@@ -14,11 +14,10 @@ pub(crate) mod utils;
 use std::{env, error::Error, io::ErrorKind};
 
 use config::LureConfig;
-use libc::SIGCONT;
 use lure::Lure;
 
 use crate::{
-    config::LureConfigLoadError,
+    config::{LureConfigLoadError, ProxySigningKey},
     telemetry::{oltp::init_meter, process::ProcessMetricsService},
     utils::{leak, spawn_named},
 };
@@ -43,19 +42,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let current_dir = env::current_dir()?;
     let config_file = current_dir.join("settings.toml");
 
-    let config = match LureConfig::load(&config_file) {
+    let mut should_save = false;
+    let mut config = match LureConfig::load(&config_file) {
         Ok(config) => config,
         Err(LureConfigLoadError::Io(io)) => {
             if io.kind() == ErrorKind::NotFound {
-                let config = LureConfig::default();
-                config.save(&config_file)?;
-                config
+                should_save = true;
+                LureConfig::default()
             } else {
                 return Err(io.into());
             }
         }
         Err(LureConfigLoadError::Parse(parse_error)) => return Err(parse_error.into()),
     };
+    apply_proxy_signing_key(&mut config);
+    if should_save {
+        config.save(&config_file)?;
+    }
 
     let pmt = leak(ProcessMetricsService::new());
     pmt.start();
@@ -68,7 +71,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     spawn_named("Reload handler", async move {
         use tokio::signal::unix::{SignalKind, signal};
 
-        let mut sigcont = match signal(SignalKind::from_raw(SIGCONT)) {
+        // SIGCONT=18
+        let mut sigcont = match signal(SignalKind::from_raw(18)) {
             Ok(sig) => sig,
             Err(err) => {
                 log::error!("Failed to register SIGCONT handler: {err}");
@@ -120,4 +124,35 @@ async fn main() -> Result<(), Box<dyn Error>> {
         log::info!("Received signal, stopping...");
     }
     Ok(())
+}
+
+fn apply_proxy_signing_key(config: &mut LureConfig) {
+    if let Ok(value) = env::var("LURE_PROXY_SIGNING_KEY") {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        match ProxySigningKey::from_base64(trimmed) {
+            Ok(key) => {
+                config.proxy_signing_key = Some(key);
+                log::info!("proxy signing key loaded from env");
+            }
+            Err(err) => {
+                log::warn!("LURE_PROXY_SIGNING_KEY is not valid base64: {err}");
+            }
+        }
+        return;
+    }
+
+    if config.proxy_signing_key.is_some() {
+        return;
+    }
+
+    let mut seed = [0u8; 32];
+    if let Err(err) = getrandom::fill(&mut seed) {
+        log::warn!("failed to generate proxy signing key: {err}");
+        return;
+    }
+    config.proxy_signing_key = Some(ProxySigningKey::from_bytes(seed.to_vec()));
+    log::info!("generated ephemeral proxy signing key");
 }

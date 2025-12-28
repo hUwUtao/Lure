@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use futures::FutureExt;
 use log::{debug, info};
 use net::{
-    HandshakeC2s, HandshakeNextState, LoginStartC2s, StatusPingC2s, StatusPongS2c,
-    StatusRequestC2s, StatusResponseS2c,
+    HandshakeC2s, HandshakeNextState, StatusPingC2s, StatusPongS2c, StatusRequestC2s,
+    StatusResponseS2c,
 };
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -287,6 +287,7 @@ impl Lure {
             backend_addr.port(),
             resolved.route.preserve_host(),
             resolved.route.proxied(),
+            &config,
             client_addr,
         )
         .await
@@ -419,7 +420,7 @@ impl Lure {
 
         let login = self
             .threat
-            .nuisance(client.recv::<LoginStartC2s>(), INTENT)
+            .nuisance(client.recv_login_start(handshake.protocol_version), INTENT)
             .await??;
         let login = OwnedLoginStart::from_packet(login);
         let profile = Arc::new(Profile {
@@ -470,6 +471,7 @@ impl Lure {
         session: &Session,
         login: &OwnedLoginStart,
     ) -> anyhow::Result<()> {
+        let config = self.config_snapshot().await;
         let server_address = session.destination_addr;
         let client_addr = session.client_addr;
         let hostname = handshake.server_address.as_ref();
@@ -481,6 +483,7 @@ impl Lure {
             server_address.port(),
             route.preserve_host(),
             route.proxied(),
+            &config,
             client_addr,
         )
         .await
@@ -514,7 +517,9 @@ impl Lure {
             }
         };
         let mut server = EncodedConnection::new(&mut owned_stream, SocketIntent::GreetToBackend);
-        server.send(&login.as_packet()).await?;
+        server
+            .send_login_start(&login.as_packet(), handshake.protocol_version)
+            .await?;
 
         let pending = client.take_pending_inbound();
         if !pending.is_empty() {

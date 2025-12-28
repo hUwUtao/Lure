@@ -1,6 +1,6 @@
 [package]
 name = "lure"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 
 [workspace.metadata.cargo-shear]
@@ -19,18 +19,19 @@ opentelemetry-otlp = { version = "0.31", features = ["tokio", "http-proto", "req
 dotenvy = "0.15"
 opentelemetry-stdout = "0.31"
 opentelemetry_sdk = { version = "0.31", features = ["tokio", "tokio-stream", "rt-tokio", "http", "url"] }
-proxy-protocol = "0.5.0"
 serde = { version = "1.0", features = ["derive", "rc"] }
 # tokio = { version = "1.27", features = ["full", "rt-multi-thread", "tracing"] }
 tokio = { version = "1.48", features = ["full", "rt-multi-thread", "tracing"] }
 toml = "0.9"
 async-trait = "0.1"
-libc = "0.2"
 futures = "0.3"
 reqwest = { version = "0.12", features = ["stream", "gzip"] }
 serde_json = "1.0"
 governor = "0.10"
 thiserror = "2.0"
+base64 = "0.22"
+ed25519-dalek = { version = "2.1", features = ["std"] }
+getrandom = "0.3"
 mimalloc = { version = "0.1", optional = true }
 tonic = { version = "0.14", optional = true }
 tokio-metrics = "0.4"

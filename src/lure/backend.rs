@@ -6,10 +6,13 @@ use tokio::{net::TcpStream, time::timeout};
 use crate::{
     connection::{EncodedConnection, SocketIntent},
     logging::LureLogger,
-    packet::{OwnedHandshake, create_proxy_protocol_header, encode_uncompressed_packet},
+    packet::{OwnedHandshake, encode_uncompressed_packet},
+    config::LureConfig,
     utils::Connection,
 };
 
+mod headers;
+use headers::create_proxy_protocol_header;
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum BackendConnectError {
     #[error("backend connect failed")]
@@ -25,6 +28,7 @@ pub(crate) async fn connect(
     endpoint_port: u16,
     preserve_host: bool,
     proxied: bool,
+    config: &LureConfig,
     client_addr: SocketAddr,
 ) -> Result<Connection, BackendConnectError> {
     let mut backend = open_backend_connection(address)
@@ -40,6 +44,7 @@ pub(crate) async fn connect(
             endpoint_port,
             preserve_host,
             proxied,
+            config,
             client_addr,
         )
         .await
@@ -79,10 +84,11 @@ async fn init_handshake(
     endpoint_port: u16,
     preserve_host: bool,
     proxied: bool,
+    config: &LureConfig,
     client_addr: SocketAddr,
 ) -> anyhow::Result<()> {
     if proxied {
-        let pkt = create_proxy_protocol_header(client_addr)?;
+        let pkt = create_proxy_protocol_header(client_addr, config)?;
         server.send_raw(&pkt).await?;
         debug!("PP Sent");
     }

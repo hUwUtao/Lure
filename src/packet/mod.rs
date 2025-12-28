@@ -1,14 +1,6 @@
-use std::{
-    net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
-    sync::Arc,
-};
+use std::sync::Arc;
 
-use bytes::BytesMut;
 use net::{HandshakeC2s, HandshakeNextState, LoginStartC2s, PacketEncode, Uuid};
-use proxy_protocol::{
-    ProxyHeader,
-    version2::{ProxyAddresses, ProxyCommand, ProxyTransportProtocol},
-};
 
 pub trait OwnedPacket<'a, P> {
     fn from_packet(packet: P) -> Self;
@@ -85,24 +77,6 @@ impl<'a> OwnedPacket<'a, LoginStartC2s<'a>> for OwnedLoginStart {
             profile_id: self.profile_id,
         }
     }
-}
-
-pub fn create_proxy_protocol_header(socket: SocketAddr) -> anyhow::Result<BytesMut> {
-    let proxy_header = ProxyHeader::Version2 {
-        command: ProxyCommand::Proxy,
-        transport_protocol: ProxyTransportProtocol::Stream,
-        addresses: match socket {
-            SocketAddr::V4(addr) => ProxyAddresses::Ipv4 {
-                source: addr,
-                destination: SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0),
-            },
-            SocketAddr::V6(addr) => ProxyAddresses::Ipv6 {
-                source: addr,
-                destination: SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0),
-            },
-        },
-    };
-    Ok(proxy_protocol::encode(proxy_header)?)
 }
 
 pub fn encode_uncompressed_packet<P: PacketEncode>(packet: &P) -> anyhow::Result<Vec<u8>> {

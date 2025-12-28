@@ -1,8 +1,8 @@
 use super::{
     error::{ProtoError, Result, debug_log_error},
     io::{
-        read_i64_be, read_string_bounded, read_u16_be, read_uuid, write_i64_be,
-        write_string_bounded, write_u16_be, write_uuid,
+        read_bool, read_i64_be, read_string_bounded, read_u16_be, read_uuid, write_bool,
+        write_i64_be, write_string_bounded, write_u16_be, write_uuid,
     },
     state::{HandshakeNextState, PacketState},
     types::{PacketDecode, PacketEncode, PacketFrame, Uuid},
@@ -53,6 +53,8 @@ pub struct LoginStartC2s<'a> {
     pub profile_id: Option<Uuid>,
 }
 
+const LOGIN_START_UUID_WITHOUT_BOOL_PROTOCOL: i32 = 759;
+
 /// Any serverbound packet supported by this crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerboundPacket<'a> {
@@ -63,13 +65,21 @@ pub enum ServerboundPacket<'a> {
 }
 
 impl PacketFrame {
-    pub fn decode_serverbound<'a>(&'a self, state: PacketState) -> Result<ServerboundPacket<'a>> {
-        ServerboundPacket::decode(state, self)
+    pub fn decode_serverbound<'a>(
+        &'a self,
+        state: PacketState,
+        protocol_version: i32,
+    ) -> Result<ServerboundPacket<'a>> {
+        ServerboundPacket::decode(state, protocol_version, self)
     }
 }
 
 impl<'a> ServerboundPacket<'a> {
-    pub fn decode(state: PacketState, frame: &'a PacketFrame) -> Result<Self> {
+    pub fn decode(
+        state: PacketState,
+        protocol_version: i32,
+        frame: &'a PacketFrame,
+    ) -> Result<Self> {
         let mut input = frame.body.as_slice();
         let packet = match state {
             PacketState::Handshaking => {
@@ -94,9 +104,11 @@ impl<'a> ServerboundPacket<'a> {
                 }),
             },
             PacketState::Login => match frame.id {
-                LoginStartC2s::ID => {
-                    LoginStartC2s::decode_body(&mut input).map(ServerboundPacket::LoginStart)
-                }
+                LoginStartC2s::ID => LoginStartC2s::decode_body_with_version(
+                    &mut input,
+                    protocol_version,
+                )
+                .map(ServerboundPacket::LoginStart),
                 _ => Err(ProtoError::InvalidPacketId {
                     state,
                     id: frame.id,
@@ -302,12 +314,22 @@ impl<'a> PacketEncode for LoginDisconnectS2c<'a> {
 impl<'a> LoginStartC2s<'a> {
     pub const ID: i32 = 0x00;
 
-    pub fn decode_body(input: &mut &'a [u8]) -> Result<Self> {
+    pub fn decode_body_with_version(input: &mut &'a [u8], protocol_version: i32) -> Result<Self> {
         let username = read_string_bounded(input, 16)?;
-        let profile_id = if input.len() >= 16 {
+        let profile_id = if protocol_version >= LOGIN_START_UUID_WITHOUT_BOOL_PROTOCOL {
+            if input.len() < 16 {
+                return Err(ProtoError::UnexpectedEof);
+            }
             Some(read_uuid(input)?)
-        } else {
+        } else if input.is_empty() {
             None
+        } else {
+            let has_uuid = read_bool(input)?;
+            if has_uuid {
+                Some(read_uuid(input)?)
+            } else {
+                None
+            }
         };
         *input = &[];
 
@@ -316,24 +338,43 @@ impl<'a> LoginStartC2s<'a> {
             profile_id,
         })
     }
+
+    pub fn encode_body_with_version(&self, out: &mut Vec<u8>, protocol_version: i32) -> Result<()> {
+        write_string_bounded(out, self.username, 16)?;
+        if protocol_version >= LOGIN_START_UUID_WITHOUT_BOOL_PROTOCOL {
+            let uuid = self
+                .profile_id
+                .ok_or(ProtoError::MissingField("login_start.uuid"))?;
+            write_uuid(out, &uuid);
+        } else {
+            match &self.profile_id {
+                Some(uuid) => {
+                    write_bool(out, true);
+                    write_uuid(out, uuid);
+                }
+                None => write_bool(out, false),
+            }
+        }
+        Ok(())
+    }
 }
 
 impl<'a> PacketDecode<'a> for LoginStartC2s<'a> {
     const ID: i32 = LoginStartC2s::ID;
 
-    fn decode_body(input: &mut &'a [u8]) -> Result<Self> {
-        LoginStartC2s::decode_body(input)
+    fn decode_body(_input: &mut &'a [u8]) -> Result<Self> {
+        Err(ProtoError::MissingField(
+            "login_start.protocol_version",
+        ))
     }
 }
 
 impl<'a> PacketEncode for LoginStartC2s<'a> {
     const ID: i32 = LoginStartC2s::ID;
 
-    fn encode_body(&self, out: &mut Vec<u8>) -> Result<()> {
-        write_string_bounded(out, self.username, 16)?;
-        if let Some(uuid) = &self.profile_id {
-            write_uuid(out, uuid);
-        }
-        Ok(())
+    fn encode_body(&self, _out: &mut Vec<u8>) -> Result<()> {
+        Err(ProtoError::MissingField(
+            "login_start.protocol_version",
+        ))
     }
 }

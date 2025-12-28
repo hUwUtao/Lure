@@ -5,8 +5,10 @@ use net::{
     StatusResponseS2c, Uuid, encode_packet,
 };
 use net::mc::Result as McResult;
+use net::PacketEncode;
 
 const L7_TRUNCATE_LEN: usize = 16;
+const PROTOCOL_VERSION: i32 = 763;
 
 const STATUS_JSON: &str =
     "{\"version\":{\"name\":\"1.20.4\",\"protocol\":763},\"players\":{\"max\":10,\"online\":0},\"description\":{\"text\":\"Lure\"}}";
@@ -32,7 +34,7 @@ impl<'a> PacketRef<'a> {
             PacketRef::StatusResponse(packet) => encode_packet(out, packet),
             PacketRef::StatusPong(packet) => encode_packet(out, packet),
             PacketRef::LoginDisconnect(packet) => encode_packet(out, packet),
-            PacketRef::LoginStart(packet) => encode_packet(out, packet),
+            PacketRef::LoginStart(packet) => encode_login_start(out, packet),
         }
     }
 }
@@ -47,26 +49,48 @@ struct EncodedPacket {
     decode: fn(&PacketFrame) -> McResult<()>,
 }
 
+struct VersionedLoginStart<'a> {
+    packet: &'a LoginStartC2s<'a>,
+    protocol_version: i32,
+}
+
+impl<'a> PacketEncode for VersionedLoginStart<'a> {
+    const ID: i32 = LoginStartC2s::ID;
+
+    fn encode_body(&self, out: &mut Vec<u8>) -> McResult<()> {
+        self.packet
+            .encode_body_with_version(out, self.protocol_version)
+    }
+}
+
+fn encode_login_start(out: &mut Vec<u8>, packet: &LoginStartC2s<'_>) -> McResult<()> {
+    let versioned = VersionedLoginStart {
+        packet,
+        protocol_version: PROTOCOL_VERSION,
+    };
+    encode_packet(out, &versioned)
+}
+
 fn decode_handshake(frame: &PacketFrame) -> McResult<()> {
-    let decoded = frame.decode_serverbound(PacketState::Handshaking)?;
+    let decoded = frame.decode_serverbound(PacketState::Handshaking, PROTOCOL_VERSION)?;
     black_box(decoded);
     Ok(())
 }
 
 fn decode_status_request(frame: &PacketFrame) -> McResult<()> {
-    let decoded = frame.decode_serverbound(PacketState::Status)?;
+    let decoded = frame.decode_serverbound(PacketState::Status, PROTOCOL_VERSION)?;
     black_box(decoded);
     Ok(())
 }
 
 fn decode_status_ping(frame: &PacketFrame) -> McResult<()> {
-    let decoded = frame.decode_serverbound(PacketState::Status)?;
+    let decoded = frame.decode_serverbound(PacketState::Status, PROTOCOL_VERSION)?;
     black_box(decoded);
     Ok(())
 }
 
 fn decode_login_start(frame: &PacketFrame) -> McResult<()> {
-    let decoded = frame.decode_serverbound(PacketState::Login)?;
+    let decoded = frame.decode_serverbound(PacketState::Login, PROTOCOL_VERSION)?;
     black_box(decoded);
     Ok(())
 }
@@ -105,7 +129,7 @@ fn packet_entries() -> Vec<PacketEntry<'static>> {
     vec![
         PacketEntry {
             packet: PacketRef::Handshake(HandshakeC2s {
-                protocol_version: 763,
+                protocol_version: PROTOCOL_VERSION,
                 server_address: "localhost",
                 server_port: 25565,
                 next_state: HandshakeNextState::Login,

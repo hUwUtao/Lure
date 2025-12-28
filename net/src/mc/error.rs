@@ -14,6 +14,7 @@ pub enum ProtoError {
     StringTooLong { max: usize, actual: usize },
     LengthTooLarge { max: usize, actual: usize },
     TrailingBytes(usize),
+    MissingField(&'static str),
     InvalidPacketId { state: PacketState, id: i32 },
     InvalidHandshakeState(i32),
 }
