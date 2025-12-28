@@ -83,7 +83,7 @@ jobs:
         id: check
         run: |
           CHANGED_FILES=$(git diff --name-only HEAD^ HEAD || true)
-          if echo "$CHANGED_FILES" | grep -qE '^(src/|Cargo\.toml|Cargo\.lock|\.github/workflows/|Dockerfile\.copy)'; then
+          if echo "$CHANGED_FILES" | grep -qE '^(src/|net/|Cargo\.toml|Cargo\.lock|\.github/workflows/|Dockerfile\.copy)'; then
             echo "docker_needed=true" >> $GITHUB_OUTPUT
           else
             echo "docker_needed=false" >> $GITHUB_OUTPUT
