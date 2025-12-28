@@ -1,6 +1,7 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use net::ha::{AddressInfo, Command, Family, Header, Protocol, Tlv, parse};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
+
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use net::ha::{AddressInfo, Command, Family, Header, Protocol, Tlv, parse};
 
 fn header_ipv4() -> Header {
     Header {

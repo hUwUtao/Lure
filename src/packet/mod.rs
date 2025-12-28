@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use net::{HandshakeC2s, HandshakeNextState, LoginStartC2s, PacketEncode, Uuid};
+use net::{HandshakeC2s, HandshakeNextState, LoginStartC2s, LoginStartSigData, PacketEncode, Uuid};
 
 pub trait OwnedPacket<'a, P> {
     fn from_packet(packet: P) -> Self;
@@ -20,6 +20,14 @@ pub struct OwnedHandshake {
 pub struct OwnedLoginStart {
     pub username: Arc<str>,
     pub profile_id: Option<Uuid>,
+    pub sig_data: Option<OwnedLoginSigData>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OwnedLoginSigData {
+    pub timestamp: i64,
+    pub public_key: Vec<u8>,
+    pub signature: Vec<u8>,
 }
 
 impl OwnedHandshake {
@@ -68,6 +76,11 @@ impl<'a> OwnedPacket<'a, LoginStartC2s<'a>> for OwnedLoginStart {
         Self {
             username: Arc::from(packet.username),
             profile_id: packet.profile_id,
+            sig_data: packet.sig_data.map(|sig| OwnedLoginSigData {
+                timestamp: sig.timestamp,
+                public_key: sig.public_key.to_vec(),
+                signature: sig.signature.to_vec(),
+            }),
         }
     }
 
@@ -75,6 +88,11 @@ impl<'a> OwnedPacket<'a, LoginStartC2s<'a>> for OwnedLoginStart {
         LoginStartC2s {
             username: &self.username,
             profile_id: self.profile_id,
+            sig_data: self.sig_data.as_ref().map(|sig| LoginStartSigData {
+                timestamp: sig.timestamp,
+                public_key: sig.public_key.as_slice(),
+                signature: sig.signature.as_slice(),
+            }),
         }
     }
 }

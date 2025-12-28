@@ -1,17 +1,14 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use net::{
     HandshakeC2s, HandshakeNextState, LoginDisconnectS2c, LoginStartC2s, PacketDecoder,
-    PacketFrame, PacketState, ProtoError, StatusPingC2s, StatusPongS2c, StatusRequestC2s,
-    StatusResponseS2c, Uuid, encode_packet,
+    PacketEncode, PacketFrame, PacketState, ProtoError, StatusPingC2s, StatusPongS2c,
+    StatusRequestC2s, StatusResponseS2c, Uuid, encode_packet, mc::Result as McResult,
 };
-use net::mc::Result as McResult;
-use net::PacketEncode;
 
 const L7_TRUNCATE_LEN: usize = 16;
 const PROTOCOL_VERSION: i32 = 763;
 
-const STATUS_JSON: &str =
-    "{\"version\":{\"name\":\"1.20.4\",\"protocol\":763},\"players\":{\"max\":10,\"online\":0},\"description\":{\"text\":\"Lure\"}}";
+const STATUS_JSON: &str = "{\"version\":{\"name\":\"1.20.4\",\"protocol\":763},\"players\":{\"max\":10,\"online\":0},\"description\":{\"text\":\"Lure\"}}";
 const LOGIN_REASON: &str = "{\"text\":\"Bye\"}";
 const USERNAME: &str = "player";
 
@@ -165,6 +162,7 @@ fn packet_entries() -> Vec<PacketEntry<'static>> {
                     0x0102_0304_0506_0708,
                     0x090a_0b0c_0d0e_0f10,
                 )),
+                sig_data: None,
             }),
             decode: decode_login_start,
         },
@@ -180,6 +178,7 @@ fn upper_pair_entries() -> Vec<PacketEntry<'static>> {
                     0x0102_0304_0506_0708,
                     0x090a_0b0c_0d0e_0f10,
                 )),
+                sig_data: None,
             }),
             decode: decode_login_start,
         },

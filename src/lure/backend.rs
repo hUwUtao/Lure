@@ -4,10 +4,10 @@ use log::debug;
 use tokio::{net::TcpStream, time::timeout};
 
 use crate::{
+    config::LureConfig,
     connection::{EncodedConnection, SocketIntent},
     logging::LureLogger,
     packet::{OwnedHandshake, encode_uncompressed_packet},
-    config::LureConfig,
     utils::Connection,
 };
 

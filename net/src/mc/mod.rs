@@ -12,8 +12,8 @@ mod tests;
 
 pub use error::{ProtoError, Result};
 pub use packets::{
-    HandshakeC2s, LoginDisconnectS2c, LoginStartC2s, ServerboundPacket, StatusPingC2s,
-    StatusPongS2c, StatusRequestC2s, StatusResponseS2c,
+    HandshakeC2s, LoginDisconnectS2c, LoginStartC2s, LoginStartSigData, ServerboundPacket,
+    StatusPingC2s, StatusPongS2c, StatusRequestC2s, StatusResponseS2c,
 };
 pub use state::{HandshakeNextState, PacketState};
 pub use types::{
