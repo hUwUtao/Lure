@@ -327,6 +327,14 @@ impl<'a> LoginStartC2s<'a> {
         let mut profile_id = None;
         let mut sig_data = None;
 
+        if input.is_empty() {
+            return Ok(Self {
+                username,
+                profile_id,
+                sig_data,
+            });
+        }
+
         if protocol_version >= LOGIN_START_UUID_PROTOCOL {
             if input.len() < 16 {
                 return Err(ProtoError::UnexpectedEof);
@@ -335,6 +343,16 @@ impl<'a> LoginStartC2s<'a> {
         } else if protocol_version >= LOGIN_START_SIGNATURE_DATA_PROTOCOL {
             let has_sig_data = read_bool(input)?;
             if has_sig_data {
+                if input.len() == 16 {
+                    profile_id = Some(read_uuid(input)?);
+                    *input = &[];
+                    return Ok(Self {
+                        username,
+                        profile_id,
+                        sig_data,
+                    });
+                }
+
                 let timestamp = read_i64_be(input)?;
                 let public_key_len = read_varint(input)?;
                 if public_key_len < 0 {
