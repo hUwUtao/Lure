@@ -36,6 +36,11 @@
 
 - `SidecarManager` spawns, stops, and restarts external processes
 - Intended for ViaProxy + ViaGeyserProxy supervision
+- `update_ab` performs an A/B rollout, promoting a new instance and optionally draining the old one
+- Instances are named `<group>-<slot>-<generation>` to avoid accidental reuse during overlapping updates
+- `group_status` reports active/draining slots and pids; `reap_exited` prunes crashed instances
+- `spawn_reaper` runs a periodic reaper to clean up exited sidecars and empty groups
+- `finish_drain` terminates the draining instance early once sessions are gone
 
 ## Next Work
 
