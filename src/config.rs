@@ -131,6 +131,7 @@ pub struct RouteFlagsConfig {
     pub cache_query: bool,
     pub override_query: bool,
     pub preserve_host: bool,
+    pub inject_token: bool,
 }
 
 fn default_inst() -> String {
@@ -265,6 +266,9 @@ impl RouteFlagsConfig {
         }
         if self.preserve_host {
             attr.set_flag(RouteFlags::PreserveHost);
+        }
+        if self.inject_token {
+            attr.set_flag(RouteFlags::InjectToken);
         }
         attr
     }

@@ -6,6 +6,7 @@
 //! - `net::mc` - Minecraft Protocol: For native handshake, status, etc.
 pub mod ha;
 pub mod mc;
+pub mod bedrock;
 
 pub use ha::{AddressInfo, Command, Family, Header, Protocol, Tlv, parse};
 pub use mc::{

@@ -28,6 +28,8 @@ pub(crate) async fn connect(
     endpoint_port: u16,
     preserve_host: bool,
     proxied: bool,
+    inject_token: bool,
+    routing_host: Option<&str>,
     config: &LureConfig,
     client_addr: SocketAddr,
 ) -> Result<Connection, BackendConnectError> {
@@ -44,6 +46,8 @@ pub(crate) async fn connect(
             endpoint_port,
             preserve_host,
             proxied,
+            inject_token,
+            routing_host,
             config,
             client_addr,
         )
@@ -84,6 +88,8 @@ async fn init_handshake(
     endpoint_port: u16,
     preserve_host: bool,
     proxied: bool,
+    inject_token: bool,
+    routing_host: Option<&str>,
     config: &LureConfig,
     client_addr: SocketAddr,
 ) -> anyhow::Result<()> {
@@ -95,6 +101,21 @@ async fn init_handshake(
 
     let (server_address, server_port) =
         backend_handshake_parts(handshake, endpoint_host, endpoint_port, preserve_host);
+    let server_address = if inject_token {
+        match crate::crossplay::token::inject_token_hostname(
+            server_address.as_ref(),
+            routing_host.unwrap_or_default(),
+            config.proxy_signing_key.as_ref(),
+        ) {
+            Ok(updated) => Cow::Owned(updated),
+            Err(err) => {
+                log::warn!("crossplay token injection failed: {err}");
+                server_address
+            }
+        }
+    } else {
+        server_address
+    };
     let packet = net::HandshakeC2s {
         protocol_version: handshake.protocol_version,
         server_address: server_address.as_ref(),

@@ -1390,6 +1390,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-metrics",
+ "tokio-raknet",
  "toml",
  "tonic",
 ]
@@ -1478,8 +1479,12 @@ dependencies = [
 name = "net"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "criterion",
+ "flate2",
  "log",
+ "serde_json",
+ "snap",
 ]
 
 [[package]]
@@ -2374,6 +2379,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
+name = "snap"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b6b67fb9a61334225b5b790716f609cd58395f895b3fe8b328786812a40bc3b"
+
+[[package]]
 name = "socket2"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2603,6 +2614,19 @@ checksum = "bbae76ab933c85776efabc971569dd6119c580d8f5d448769dec1764bf796ef2"
 dependencies = [
  "native-tls",
  "tokio",
+]
+
+[[package]]
+name = "tokio-raknet"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9403532411c83a62458e7f71815f95e9c813b11bf1179184c061b1309d113f15"
+dependencies = [
+ "bitflags",
+ "bytes",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

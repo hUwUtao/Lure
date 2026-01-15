@@ -39,6 +39,7 @@ pub enum RouteFlags {
     OverrideQuery,
     ProxyProtocol,
     PreserveHost,
+    InjectToken,
 }
 
 /// Routing rule with matchers and endpoints, ordered by priority
@@ -76,6 +77,11 @@ impl Route {
     #[inline]
     pub fn preserve_host(&self) -> bool {
         self.read_flag(RouteFlags::PreserveHost)
+    }
+
+    #[inline]
+    pub fn inject_token(&self) -> bool {
+        self.read_flag(RouteFlags::InjectToken)
     }
 }
 

@@ -22,6 +22,7 @@ use tokio::{
 use crate::{
     config::LureConfig,
     connection::{EncodedConnection, SocketIntent, passthrough_now},
+    crossplay::token::resolve_routing_host,
     error::{ErrorResponder, ReportableError},
     logging::LureLogger,
     metrics::HandshakeMetrics,
@@ -200,7 +201,7 @@ impl Lure {
             duration: Duration::from_secs(5),
         };
         let mut handler = EncodedConnection::new(&mut connection, SocketIntent::GreetToProxy);
-        let hs = self
+        let mut hs = self
             .threat
             .nuisance(
                 async {
@@ -227,6 +228,12 @@ impl Lure {
             .inspect_err(|err| {
                 LureLogger::parser_failure(&client_addr, "client handshake", err);
             })?;
+        let config = self.config_snapshot().await;
+        let routing = resolve_routing_host(hs.server_address.as_ref(), config.proxy_signing_key.as_ref());
+        if let Some(stripped) = routing.stripped_address {
+            hs.server_address = Arc::from(stripped);
+        }
+        let routing_host = routing.routing_host;
         let state_attr = match hs.next_state {
             HandshakeNextState::Status => "status",
             HandshakeNextState::Login => "login",
@@ -238,7 +245,7 @@ impl Lure {
 
         let resolved = match timeout(
             Duration::from_secs(1),
-            self.router.resolve(&hs.get_stripped_hostname()),
+            self.router.resolve(&routing_host),
         )
         .await
         {
@@ -248,7 +255,7 @@ impl Lure {
                     "router.resolve",
                     Duration::from_secs(1),
                     Some(&client_addr),
-                    Some(&hs.server_address),
+                    Some(&routing_host),
                 );
                 None
             }
@@ -256,7 +263,9 @@ impl Lure {
 
         match hs.next_state {
             HandshakeNextState::Status => self.handle_status(handler, &hs, resolved).await,
-            HandshakeNextState::Login => self.handle_proxy(handler, &hs, resolved).await,
+            HandshakeNextState::Login => {
+                self.handle_proxy(handler, &hs, resolved, &routing_host).await
+            }
         }
     }
 
@@ -287,6 +296,8 @@ impl Lure {
             backend_addr.port(),
             resolved.route.preserve_host(),
             resolved.route.proxied(),
+            false,
+            None,
             &config,
             client_addr,
         )
@@ -412,6 +423,7 @@ impl Lure {
         mut client: EncodedConnection<'a>,
         handshake: &OwnedHandshake,
         resolved: Option<ResolvedRoute>,
+        routing_host: &str,
     ) -> anyhow::Result<()> {
         const INTENT: ClientIntent = ClientIntent {
             tag: IntentTag::Handshake,
@@ -431,8 +443,7 @@ impl Lure {
         });
 
         let address = *client.as_inner().addr();
-        let hostname = handshake.get_stripped_hostname();
-        let hostname = hostname.as_ref();
+        let hostname = routing_host;
 
         let Some(resolved) = resolved else {
             self.disconnect_login(&mut client, address, |config| {
@@ -454,7 +465,14 @@ impl Lure {
 
         let server_address = session.destination_addr;
         let _ = self
-            .handle_proxy_session(client, handshake, route.as_ref(), &session, &login_raw)
+            .handle_proxy_session(
+                client,
+                handshake,
+                route.as_ref(),
+                &session,
+                &login_raw,
+                routing_host,
+            )
             .await
             .map_err(|e| {
                 let re = ReportableError::from(e);
@@ -472,11 +490,12 @@ impl Lure {
         route: &Route,
         session: &Session,
         login_raw: &[u8],
+        routing_host: &str,
     ) -> anyhow::Result<()> {
         let config = self.config_snapshot().await;
         let server_address = session.destination_addr;
         let client_addr = session.client_addr;
-        let hostname = handshake.server_address.as_ref();
+        let hostname = routing_host;
 
         let mut owned_stream = match backend::connect(
             server_address,
@@ -485,6 +504,8 @@ impl Lure {
             server_address.port(),
             route.preserve_host(),
             route.proxied(),
+            route.inject_token(),
+            Some(routing_host),
             &config,
             client_addr,
         )

@@ -1,5 +1,7 @@
 pub(crate) mod config;
 pub(crate) mod connection;
+pub(crate) mod bedrock_proxy;
+pub(crate) mod crossplay;
 pub(crate) mod error;
 pub(crate) mod inspect;
 pub(crate) mod logging;
@@ -11,13 +13,14 @@ pub(crate) mod telemetry;
 pub(crate) mod threat;
 pub(crate) mod utils;
 
-use std::{env, error::Error, io::ErrorKind};
+use std::{env, error::Error, io::ErrorKind, net::SocketAddr};
 
 use config::LureConfig;
 use lure::Lure;
 
 use crate::{
     config::{LureConfigLoadError, ProxySigningKey},
+    router::RouterInstance,
     telemetry::{oltp::init_meter, process::ProcessMetricsService},
     utils::{leak, spawn_named},
 };
@@ -63,8 +66,39 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let pmt = leak(ProcessMetricsService::new());
     pmt.start();
 
+    let bedrock_config = config.clone();
     let lure = leak(Lure::new(config));
     lure.sync_routes_from_config().await?;
+
+    if let Ok(value) = env::var("LURE_BEDROCK_BIND") {
+        let bind = value.trim();
+        if !bind.is_empty() {
+            match bind.parse::<SocketAddr>() {
+                Ok(addr) => {
+                    let bedrock_router = leak(RouterInstance::new());
+                    bedrock_router.set_instance_name(format!("{}-bedrock", bedrock_config.inst));
+                    match bedrock_config.default_routes() {
+                        Ok(routes) => {
+                            for route in routes {
+                                bedrock_router.apply_route(route).await;
+                            }
+                            spawn_named("Bedrock proxy", async move {
+                                if let Err(err) = bedrock_proxy::start(addr, bedrock_router).await {
+                                    log::error!("bedrock proxy failed: {err}");
+                                }
+                            })?;
+                        }
+                        Err(err) => {
+                            log::error!("Failed to load routes for bedrock proxy: {err}");
+                        }
+                    }
+                }
+                Err(err) => {
+                    log::error!("Invalid LURE_BEDROCK_BIND value '{bind}': {err}");
+                }
+            }
+        }
+    }
 
     let reload_path = config_file.clone();
     let reload_lure = lure;
