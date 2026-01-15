@@ -42,6 +42,16 @@
 - `spawn_reaper` runs a periodic reaper to clean up exited sidecars and empty groups
 - `finish_drain` terminates the draining instance early once sessions are gone
 
+## Sidecar Endpoints
+
+- Route endpoints can use `sidecar.<group>:<port>` to defer resolution to the crossplay supervisor.
+- The supervisor swaps the endpoint address to the active A/B listen address before connecting.
+
+## Bedrock Notes
+
+- Bedrock routing uses the login ServerAddress (from JWT) as-is for route resolution.
+- Bedrock does not parse or inject `lurex` tokens; loopback tokens are only used on the Java handshake path.
+
 ## Next Work
 
 - Wire config/CLI for `inject_token` and crossplay flags

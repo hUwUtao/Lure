@@ -70,6 +70,11 @@ impl Destination {
                 Ok(vec![(host, sa)])
             }
             Address::Fqdn(s) => {
+                if s.starts_with("sidecar.") {
+                    let host = s.clone();
+                    let sa = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), self.1);
+                    return Ok(vec![(host, sa)]);
+                }
                 let addrs = (s.as_ref(), self.1)
                     .to_socket_addrs()
                     .map_err(ParseDestinationError::ResolveError)?;

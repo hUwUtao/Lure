@@ -102,6 +102,10 @@ pub struct LureConfig {
     #[serde(default)]
     pub route: Vec<RouteConfig>,
 
+    /// Optional crossplay supervision configuration.
+    #[serde(default)]
+    pub crossplay: Option<CrossplayConfig>,
+
     #[serde(flatten)]
     pub other_fields: HashMap<String, toml::Value>,
 }
@@ -134,6 +138,28 @@ pub struct RouteFlagsConfig {
     pub inject_token: bool,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct CrossplayConfig {
+    pub sidecars: Vec<SidecarGroupConfig>,
+    pub drain_timeout_secs: Option<u64>,
+    pub reaper_interval_secs: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct SidecarGroupConfig {
+    pub name: String,
+    pub program: String,
+    pub args: Vec<String>,
+    pub env: HashMap<String, String>,
+    pub workdir: Option<PathBuf>,
+    pub listen_a: Option<String>,
+    pub listen_b: Option<String>,
+    pub drain_timeout_secs: Option<u64>,
+    pub auto_start: bool,
+}
+
 fn default_inst() -> String {
     "main".to_string()
 }
@@ -157,6 +183,7 @@ impl Default for LureConfig {
             cooldown: 3,
             strings: HashMap::new(),
             route: Vec::new(),
+            crossplay: None,
             other_fields: HashMap::new(),
         }
     }

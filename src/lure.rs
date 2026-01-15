@@ -22,7 +22,7 @@ use tokio::{
 use crate::{
     config::LureConfig,
     connection::{EncodedConnection, SocketIntent, passthrough_now},
-    crossplay::token::resolve_routing_host,
+    crossplay::{supervisor::CrossplaySupervisor, token::resolve_routing_host},
     error::{ErrorResponder, ReportableError},
     logging::LureLogger,
     metrics::HandshakeMetrics,
@@ -42,6 +42,7 @@ pub struct Lure {
     threat: &'static ThreatControlService,
     metrics: HandshakeMetrics,
     errors: ErrorResponder,
+    crossplay: Option<CrossplaySupervisor>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -75,13 +76,19 @@ impl Lure {
     pub fn new(config: LureConfig) -> Lure {
         let router = leak(RouterInstance::new());
         router.set_instance_name(config.inst.clone());
+        let crossplay = CrossplaySupervisor::from_config(config.crossplay.as_ref());
         Lure {
             config: RwLock::new(config),
             router,
             threat: leak(ThreatControlService::new()),
             metrics: HandshakeMetrics::new(&get_meter()),
             errors: ErrorResponder::new(),
+            crossplay,
         }
+    }
+
+    pub fn crossplay_supervisor(&self) -> Option<CrossplaySupervisor> {
+        self.crossplay.clone()
     }
 
     async fn config_snapshot(&self) -> LureConfig {
@@ -121,6 +128,12 @@ impl Lure {
         let cooldown = Duration::from_secs(config.cooldown);
         let inst = config.inst.clone();
         drop(config);
+
+        if let Some(crossplay) = &self.crossplay {
+            if let Err(err) = crossplay.start().await {
+                log::error!("crossplay supervisor failed to start: {err}");
+            }
+        }
 
         if let Ok(rpc_url) = dotenvy::var("LURE_RPC") {
             let event = init_event(rpc_url);
@@ -456,11 +469,33 @@ impl Lure {
             return Ok(());
         };
 
+        let (resolved, sidecar_group) = match self
+            .resolve_sidecar_endpoint(&resolved)
+            .await
+        {
+            Ok(result) => result,
+            Err(err) => {
+                self.disconnect_login(&mut client, address, |config| {
+                    (
+                        config.string_value("ERROR"),
+                        format!("ERROR: sidecar resolution failed for host '{hostname}': {err}"),
+                    )
+                })
+                .await;
+                return Ok(());
+            }
+        };
+
         let Some((session, route)) = self
             .create_proxy_session(&mut client, address, hostname, &resolved, profile)
             .await
         else {
             return Ok(());
+        };
+
+        let _sidecar_guard = match (&self.crossplay, sidecar_group) {
+            (Some(crossplay), Some(group)) => crossplay.session_guard(&group).await,
+            _ => None,
         };
 
         let server_address = session.destination_addr;
@@ -628,6 +663,27 @@ impl Lure {
                 None
             }
         }
+    }
+
+    async fn resolve_sidecar_endpoint(
+        &self,
+        resolved: &ResolvedRoute,
+    ) -> anyhow::Result<(ResolvedRoute, Option<String>)> {
+        let Some(crossplay) = &self.crossplay else {
+            return Ok((resolved.clone(), None));
+        };
+
+        let Some(sidecar) = crossplay
+            .resolve_sidecar_endpoint(&resolved.endpoint_host)
+            .await?
+        else {
+            return Ok((resolved.clone(), None));
+        };
+
+        let mut updated = resolved.clone();
+        updated.endpoint = sidecar.endpoint;
+        updated.endpoint_host = sidecar.endpoint_host;
+        Ok((updated, Some(sidecar.group)))
     }
 
     async fn disconnect_backend_error(

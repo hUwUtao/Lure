@@ -5,6 +5,7 @@ use bytes::Bytes;
 use tokio_raknet::protocol::reliability::Reliability;
 use tokio_raknet::transport::{Message, RaknetListener, RaknetStream};
 
+use crate::crossplay::supervisor::CrossplaySupervisor;
 use crate::router::{ResolvedRoute, RouterInstance};
 use net::bedrock::{
     COMPRESSION_ALGORITHM_NONE,
@@ -30,12 +31,17 @@ struct BufferedMessage {
     channel: u8,
 }
 
-pub async fn start(bind: SocketAddr, router: &'static RouterInstance) -> anyhow::Result<()> {
+pub async fn start(
+    bind: SocketAddr,
+    router: &'static RouterInstance,
+    crossplay: Option<CrossplaySupervisor>,
+) -> anyhow::Result<()> {
     let mut listener = RaknetListener::bind(bind).await?;
     log::info!("bedrock proxy listening on {bind}");
 
     while let Some(stream) = listener.accept().await {
-        tokio::spawn(handle_connection(stream, router));
+        let crossplay = crossplay.clone();
+        tokio::spawn(handle_connection(stream, router, crossplay));
     }
 
     Ok(())
@@ -44,6 +50,7 @@ pub async fn start(bind: SocketAddr, router: &'static RouterInstance) -> anyhow:
 async fn handle_connection(
     mut client: RaknetStream,
     router: &'static RouterInstance,
+    crossplay: Option<CrossplaySupervisor>,
 ) -> anyhow::Result<()> {
     let client_addr = client.peer_addr();
     let mut buffered: Vec<BufferedMessage> = Vec::new();
@@ -85,7 +92,17 @@ async fn handle_connection(
         buffered.push(msg);
     }
 
-    let resolved = resolved.expect("resolved route");
+    let mut resolved = resolved.expect("resolved route");
+    if let Some(crossplay) = &crossplay {
+        if let Some(sidecar) = crossplay
+            .resolve_sidecar_endpoint(&resolved.endpoint_host)
+            .await?
+        {
+            resolved.endpoint = sidecar.endpoint;
+            resolved.endpoint_host = sidecar.endpoint_host;
+        }
+    }
+
     let backend = resolved.endpoint;
     let mut server = RaknetStream::connect(backend)
         .await

@@ -82,8 +82,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             for route in routes {
                                 bedrock_router.apply_route(route).await;
                             }
+                            let crossplay = lure.crossplay_supervisor();
                             spawn_named("Bedrock proxy", async move {
-                                if let Err(err) = bedrock_proxy::start(addr, bedrock_router).await {
+                                if let Err(err) =
+                                    bedrock_proxy::start(addr, bedrock_router, crossplay).await
+                                {
                                     log::error!("bedrock proxy failed: {err}");
                                 }
                             })?;
