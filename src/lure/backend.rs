@@ -1,14 +1,14 @@
 use std::{borrow::Cow, net::SocketAddr, time::Duration};
 
 use log::debug;
-use tokio::{net::TcpStream, time::timeout};
+use tokio::time::timeout;
 
 use crate::{
     config::LureConfig,
     connection::{EncodedConnection, SocketIntent},
     logging::LureLogger,
     packet::{OwnedHandshake, encode_uncompressed_packet},
-    utils::Connection,
+    sock::Connection,
 };
 
 mod headers;
@@ -109,7 +109,7 @@ async fn init_handshake(
 }
 
 async fn open_backend_connection(address: SocketAddr) -> anyhow::Result<Connection> {
-    let stream = timeout(Duration::from_secs(3), TcpStream::connect(address)).await??;
+    let stream = timeout(Duration::from_secs(3), Connection::connect(address)).await??;
     debug!("Connected to backend: {}", address);
 
     if dotenvy::var("NO_NODELAY").is_err()
@@ -118,7 +118,7 @@ async fn open_backend_connection(address: SocketAddr) -> anyhow::Result<Connecti
         LureLogger::tcp_nodelay_failed(&e);
     }
 
-    Ok(Connection::try_from(stream)?)
+    Ok(stream)
 }
 
 #[cfg(test)]

@@ -1,10 +1,7 @@
 use std::{
     fmt::Debug,
     io::{self, ErrorKind},
-    time::Duration,
 };
-
-use futures::FutureExt;
 // use futures::FutureExt;
 use net::{
     LoginDisconnectS2c, LoginStartC2s, PacketDecode, PacketDecoder, PacketEncode, PacketEncoder,
@@ -15,21 +12,14 @@ use opentelemetry::{
     metrics::{Counter, Histogram, Meter},
 };
 use serde_json::to_string as json_string;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    sync::broadcast,
-};
-
-use crate::{
-    error::ReportableError, logging::LureLogger, router::Session, telemetry::get_meter,
-    utils::Connection,
-};
+use crate::{sock::Connection, telemetry::get_meter};
 
 pub(crate) struct EncodedConnection<'a> {
     enc: PacketEncoder,
     dec: PacketDecoder,
     frame: PacketFrame,
     stream: &'a mut Connection,
+    read_buf: Vec<u8>,
     metric: ConnectionMetric,
     intent: KeyValue,
     _reserved_lifetime: std::marker::PhantomData<&'a ()>,
@@ -97,6 +87,7 @@ impl<'a> EncodedConnection<'a> {
                 id: 0,
                 body: Vec::new(),
             },
+            read_buf: vec![0u8; MAX_CHUNK_SIZE],
             metric: ConnectionMetric::new(&metric),
             intent: intent.as_attr(),
             _reserved_lifetime: std::marker::PhantomData,
@@ -124,7 +115,7 @@ impl<'a> EncodedConnection<'a> {
         };
         self.send(&kick).await?;
         self.drain_pending_inbound();
-        let _ = self.stream.as_mut().shutdown().await;
+        let _ = self.stream.shutdown().await;
         Ok(())
     }
 
@@ -132,7 +123,7 @@ impl<'a> EncodedConnection<'a> {
         let mut buf = [0u8; 1024];
         let mut drained = 0usize;
         loop {
-            match self.stream.as_mut().try_read(&mut buf) {
+            match self.stream.try_read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
                     drained = drained.saturating_add(n);
@@ -159,12 +150,15 @@ impl<'a> EncodedConnection<'a> {
                 return decode_frame::<P>(&self.frame);
             }
 
-            let mut buf = [0u8; MAX_CHUNK_SIZE];
-            let read_len = self.stream.as_mut().read(&mut buf).await?;
+            let (read_len, buf) = self
+                .stream
+                .read_chunk(std::mem::take(&mut self.read_buf))
+                .await?;
+            self.read_buf = buf;
             if read_len == 0 {
                 return Err(io::Error::from(ErrorKind::UnexpectedEof).into());
             }
-            self.dec.queue_slice(&buf[..read_len]);
+            self.dec.queue_slice(&self.read_buf[..read_len]);
         }
     }
 
@@ -183,12 +177,15 @@ impl<'a> EncodedConnection<'a> {
                 return Ok(LoginStartFrame { packet, raw });
             }
 
-            let mut buf = [0u8; MAX_CHUNK_SIZE];
-            let read_len = self.stream.as_mut().read(&mut buf).await?;
+            let (read_len, buf) = self
+                .stream
+                .read_chunk(std::mem::take(&mut self.read_buf))
+                .await?;
+            self.read_buf = buf;
             if read_len == 0 {
                 return Err(io::Error::from(ErrorKind::UnexpectedEof).into());
             }
-            self.dec.queue_slice(&buf[..read_len]);
+            self.dec.queue_slice(&self.read_buf[..read_len]);
         }
     }
 
@@ -201,7 +198,7 @@ impl<'a> EncodedConnection<'a> {
         let size = bytes.len();
         self.packet_record(size);
         // timeout(Duration::from_millis(5000), self.write.write_all(&bytes)).await??;
-        self.stream.as_mut().write_all(&bytes).await?;
+        let _ = self.stream.write_all(bytes).await?;
         self.flush().await?;
         Ok(())
     }
@@ -219,7 +216,7 @@ impl<'a> EncodedConnection<'a> {
         let bytes = self.enc.take();
         let size = bytes.len();
         self.packet_record(size);
-        self.stream.as_mut().write_all(&bytes).await?;
+        let _ = self.stream.write_all(bytes).await?;
         self.flush().await?;
         Ok(())
     }
@@ -227,13 +224,13 @@ impl<'a> EncodedConnection<'a> {
     pub async fn send_raw(&mut self, pkt: &[u8]) -> anyhow::Result<()> {
         let size = pkt.len();
         self.packet_record(size);
-        self.stream.as_mut().write_all(pkt).await?;
+        let _ = self.stream.write_all(pkt.to_vec()).await?;
         self.flush().await?;
         Ok(())
     }
 
     async fn flush(&mut self) -> anyhow::Result<()> {
-        self.stream.as_mut().flush().await?;
+        self.stream.flush().await?;
         Ok(())
     }
 
@@ -298,174 +295,4 @@ fn decode_login_start_frame<'a>(
     let mut body = frame.body.as_slice();
     let pkt = LoginStartC2s::decode_body_with_version(&mut body, protocol_version)?;
     Ok(pkt)
-}
-
-// Borrowed from mqudsi/tcpproxy
-// https://github.com/mqudsi/tcpproxy/blob/e2d423b72898b497b129e8a58307934f9335974b/src/main.rs#L114C1-L159C6
-// Quote
-// Two instances of this function are spawned for each half of the connection: client-to-server,
-// server-to-client. We can't use tokio::io::copy() instead (no matter how convenient it might
-// be) because it doesn't give us a way to correlate the lifetimes of the two tcp read/write
-// loops: even after the client disconnects, tokio would keep the upstream connection to the
-// server alive until the connection's max client idle timeout is reached.
-// Unquote
-pub async fn copy_with_abort<R, W, L>(
-    read: &mut R,
-    write: &mut W,
-    mut cancel: broadcast::Receiver<()>,
-    poll_size: L,
-) -> anyhow::Result<()>
-where
-    R: tokio::io::AsyncRead + Unpin,
-    W: tokio::io::AsyncWrite + Unpin,
-    L: Fn(u64),
-{
-    // let mut copied = 0;
-    let mut buf = [0u8; 1024];
-    loop {
-        let bytes_read;
-        tokio::select! {
-            res = read.read(&mut buf) => {
-                bytes_read = match res {
-                    Ok(n) => n,
-                    Err(e) => match e.kind() {
-                        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted => 0,
-                        _ => return Err(ReportableError::from(e).into()),
-                    },
-                };
-            }
-            _ = cancel.recv() => {
-                break;
-            }
-        }
-        if bytes_read == 0 {
-            break;
-        }
-        poll_size(bytes_read as u64);
-        // While we ignore some read errors above, any error writing data we've already read to
-        // the other side is always treated as exceptional.
-        write.write_all(&buf[0..bytes_read]).await?;
-        // Reduce poller wakes
-        // write.flush().await?;
-        // copied += bytes_read;
-        // tokio::task::yield_now().await;
-    }
-    Ok(())
-    // Ok(copied)
-}
-
-pub(crate) async fn passthrough_now<'a, 'b>(
-    client: &mut EncodedConnection<'a>,
-    server: &mut EncodedConnection<'b>,
-    session: &Session,
-) -> anyhow::Result<()> {
-    let client = client.as_inner_mut();
-    let server = server.as_inner_mut();
-    let cad = *client.addr();
-    let rad = *server.addr();
-    let (mut client_read, mut client_write) = client.as_mut().split();
-    let (mut remote_read, mut remote_write) = server.as_mut().split();
-
-    let (cancel, _) = broadcast::channel(1);
-    let inspect = session.inspect.clone();
-
-    // Allows lint & fmt
-    let (la, lb, lc) = (
-        {
-            let inspect = inspect.clone();
-            copy_with_abort(
-                &mut remote_read,
-                &mut client_write,
-                cancel.subscribe(),
-                move |u| {
-                    inspect.record_s2c(u);
-                },
-            )
-            .then(|r| {
-                let _ = cancel.send(());
-                async { r }
-            })
-        },
-        {
-            let inspect = inspect.clone();
-            copy_with_abort(
-                &mut client_read,
-                &mut remote_write,
-                cancel.subscribe(),
-                move |u| {
-                    inspect.record_c2s(u);
-                },
-            )
-            .then(|r| {
-                let _ = cancel.send(());
-                async { r }
-            })
-        },
-        // Meter report thread
-        {
-            let abort = cancel.subscribe();
-
-            async move {
-                let mut interval = tokio::time::interval(Duration::from_millis(100));
-                let volume_record = get_meter()
-                    .u64_counter("lure_proxy_transport_volume")
-                    .with_unit("bytes")
-                    .build();
-
-                let packet_record = get_meter()
-                    .u64_counter("lure_proxy_transport_packet_count")
-                    .with_unit("packets")
-                    .build();
-
-                let s2ct = KeyValue::new("intent", "s2c");
-                let c2st = KeyValue::new("intent", "c2s");
-
-                let mut last = inspect.traffic.snapshot();
-
-                loop {
-                    if !abort.is_empty() {
-                        break;
-                    }
-
-                    let vr1 = volume_record.clone();
-                    let vr2 = volume_record.clone();
-                    let pr1 = packet_record.clone();
-                    let pr2 = packet_record.clone();
-
-                    let snap = inspect.traffic.snapshot();
-
-                    vr1.add(
-                        snap.c2s_bytes - last.c2s_bytes,
-                        core::slice::from_ref(&c2st),
-                    );
-                    vr2.add(
-                        snap.s2c_bytes - last.s2c_bytes,
-                        core::slice::from_ref(&s2ct),
-                    );
-                    pr1.add(
-                        snap.c2s_chunks - last.c2s_chunks,
-                        core::slice::from_ref(&c2st),
-                    );
-                    pr2.add(
-                        snap.s2c_chunks - last.s2c_chunks,
-                        core::slice::from_ref(&s2ct),
-                    );
-
-                    last = snap;
-
-                    interval.tick().await;
-                }
-            }
-        },
-    );
-    let (ra, rb, _rc) = tokio::join!(la, lb, lc);
-
-    if let Err(era) = ra {
-        LureLogger::connection_error(&cad, Some(&rad), &era);
-    }
-    if let Err(erb) = rb {
-        LureLogger::connection_error(&cad, Some(&rad), &erb);
-    }
-
-    Ok(())
 }

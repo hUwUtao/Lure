@@ -13,7 +13,6 @@ use net::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::{
-    net::TcpListener,
     sync::{RwLock, Semaphore},
     task::yield_now,
     time::{error::Elapsed, timeout},
@@ -21,17 +20,18 @@ use tokio::{
 
 use crate::{
     config::LureConfig,
-    connection::{EncodedConnection, SocketIntent, passthrough_now},
+    connection::{EncodedConnection, SocketIntent},
     error::{ErrorResponder, ReportableError},
     logging::LureLogger,
     metrics::HandshakeMetrics,
     packet::{OwnedHandshake, OwnedLoginStart, OwnedPacket},
     router::{Profile, ResolvedRoute, Route, RouterInstance, Session, SessionHandle},
+    sock::{BackendKind, Listener, backend_kind, passthrough_now},
     telemetry::{EventEnvelope, EventServiceInstance, event::EventHook, get_meter, init_event},
     threat::{
         ClientFail, ClientIntent, IntentTag, ThreatControlService, ratelimit::RateLimiterController,
     },
-    utils::{Connection, OwnedStatic, leak, spawn_named},
+    utils::{OwnedStatic, leak, spawn_named},
 };
 mod backend;
 mod query;
@@ -132,15 +132,13 @@ impl Lure {
         }
 
         // Start server.
-        let listener = TcpListener::bind(address).await?;
+        let listener = Listener::bind(address).await?;
         let semaphore = Arc::new(Semaphore::new(max_connections));
         let rate_limiter: RateLimiterController<IpAddr> = RateLimiterController::new(10, cooldown);
 
         loop {
             // Accept connection first
             let (client, addr) = listener.accept().await?;
-
-            let client = Connection::new(client, addr);
 
             self.metrics.record_open();
 
@@ -158,19 +156,24 @@ impl Lure {
             match semaphore.clone().try_acquire_owned() {
                 Ok(permit) => {
                     if dotenvy::var("NO_NODELAY").is_err()
-                        && let Err(e) = client.as_ref().set_nodelay(true)
+                        && let Err(e) = client.set_nodelay(true)
                     {
                         LureLogger::tcp_nodelay_failed(&e);
                     }
 
                     let lure = self;
-                    spawn_named("Connection handler", async move {
+                    let handler = async move {
                         // Apply timeout to connection handling
                         if let Err(e) = lure.handle_connection(client, addr).await {
                             LureLogger::connection_closed(&addr, &e);
                         }
                         drop(permit);
-                    })?;
+                    };
+                    if backend_kind() == BackendKind::Uring {
+                        tokio_uring::spawn(handler);
+                    } else {
+                        spawn_named("Connection handler", handler)?;
+                    }
                 }
                 Err(_) => {
                     // Too many connections, reject immediately
@@ -183,7 +186,7 @@ impl Lure {
 
     async fn handle_connection(
         &self,
-        client_socket: Connection,
+        client_socket: crate::sock::Connection,
         address: SocketAddr,
     ) -> anyhow::Result<()> {
         LureLogger::new_connection(&address);
@@ -192,7 +195,7 @@ impl Lure {
         Ok(())
     }
 
-    async fn handle_handshake(&self, mut connection: Connection) -> anyhow::Result<()> {
+    async fn handle_handshake(&self, mut connection: crate::sock::Connection) -> anyhow::Result<()> {
         let start = Instant::now();
         let client_addr = *connection.addr();
         const HANDSHAKE_INTENT: ClientIntent = ClientIntent {

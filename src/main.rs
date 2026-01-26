@@ -7,6 +7,7 @@ pub(crate) mod lure;
 pub(crate) mod metrics;
 pub(crate) mod packet;
 pub(crate) mod router;
+pub(crate) mod sock;
 pub(crate) mod telemetry;
 pub(crate) mod threat;
 pub(crate) mod utils;
@@ -18,12 +19,12 @@ use lure::Lure;
 
 use crate::{
     config::{LureConfigLoadError, ProxySigningKey},
+    sock::{BackendKind, backend_selection},
     telemetry::{oltp::init_meter, process::ProcessMetricsService},
     utils::{leak, spawn_named},
 };
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<(), Box<dyn Error>> {
     let _ = dotenvy::dotenv();
     console_subscriber::init();
     #[cfg(debug_assertions)]
@@ -33,6 +34,31 @@ async fn main() -> Result<(), Box<dyn Error>> {
     #[cfg(not(debug_assertions))]
     env_logger::init();
 
+    let backend = backend_selection();
+    match backend.kind {
+        BackendKind::Uring => {
+            log::info!("socket backend: tokio-uring ({})", backend.reason);
+            tokio_uring::start(async {
+                let local = tokio::task::LocalSet::new();
+                local.run_until(run()).await
+            })
+        }
+        BackendKind::Tokio => {
+            if backend.reason.contains("init failed") {
+                log::warn!("socket backend: tokio ({})", backend.reason);
+            } else {
+                log::info!("socket backend: tokio ({})", backend.reason);
+            }
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            let local = tokio::task::LocalSet::new();
+            runtime.block_on(local.run_until(run()))
+        }
+    }
+}
+
+async fn run() -> Result<(), Box<dyn Error>> {
     let providers = if dotenvy::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
         Some((init_meter(), 0u8))
     } else {

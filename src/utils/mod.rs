@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use tokio::{io, net::TcpStream};
 
 use crate::telemetry::{EventEnvelope, EventServiceInstance, event::EventHook};
 
@@ -41,45 +40,13 @@ pub fn leak<T>(inner: T) -> &'static T {
     Box::leak(Box::new(inner))
 }
 
-pub struct Connection {
-    stream: tokio::net::TcpStream,
-    addr: std::net::SocketAddr,
-}
-
-impl TryFrom<TcpStream> for Connection {
-    type Error = io::Error;
-
-    fn try_from(stream: TcpStream) -> Result<Self, io::Error> {
-        let addr = stream.peer_addr()?;
-        Ok(Self { stream, addr })
-    }
-}
-
-impl Connection {
-    pub fn new(stream: tokio::net::TcpStream, addr: std::net::SocketAddr) -> Self {
-        Self { stream, addr }
-    }
-
-    pub fn as_ref(&self) -> &tokio::net::TcpStream {
-        &self.stream
-    }
-
-    pub fn as_mut(&mut self) -> &mut tokio::net::TcpStream {
-        &mut self.stream
-    }
-
-    pub fn addr(&self) -> &std::net::SocketAddr {
-        &self.addr
-    }
-}
-
 pub fn spawn_named<F>(
     name: &str,
     future: F,
 ) -> Result<tokio::task::JoinHandle<F::Output>, std::io::Error>
 where
-    F: Future + Send + 'static,
-    F::Output: Send + 'static,
+    F: Future + 'static,
+    F::Output: 'static,
 {
-    tokio::task::Builder::new().name(name).spawn(future)
+    tokio::task::Builder::new().name(name).spawn_local(future)
 }
