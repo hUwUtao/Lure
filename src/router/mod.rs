@@ -728,90 +728,110 @@ impl crate::telemetry::event::EventHook<EventEnvelope, EventEnvelope> for Router
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
+
+    async fn run_in_local<F, T>(future: F) -> T
+    where
+        F: Future<Output = T>,
+    {
+        tokio::task::LocalSet::new().run_until(future).await
+    }
 
     #[tokio::test]
     async fn wildcard_resolve_replaces_port() {
-        let router = RouterInstance::new();
-        let route = Route {
-            id: 1,
-            matchers: vec!["10000-10245*.abc.xyz.com".to_string()],
-            endpoints: vec![Destination::parse("123.245.122.21:0").unwrap()],
-            ..Default::default()
-        };
-        router.apply_route(route).await;
-        let resolved = router.resolve("10241.abc.xyz.com").await.unwrap();
-        assert_eq!(resolved.endpoint, "123.245.122.21:10241".parse().unwrap());
+        run_in_local(async {
+            let router = RouterInstance::new();
+            let route = Route {
+                id: 1,
+                matchers: vec!["10000-10245*.abc.xyz.com".to_string()],
+                endpoints: vec![Destination::parse("123.245.122.21:0").unwrap()],
+                ..Default::default()
+            };
+            router.apply_route(route).await;
+            let resolved = router.resolve("10241.abc.xyz.com").await.unwrap();
+            assert_eq!(resolved.endpoint, "123.245.122.21:10241".parse().unwrap());
+        })
+        .await;
     }
     #[tokio::test]
     async fn route_disabled_flag_works_correctly() {
-        let router = RouterInstance::new();
+        run_in_local(async {
+            let router = RouterInstance::new();
 
-        // Test disabled flag
-        let disabled_route = Route {
-            id: 1,
-            matchers: vec!["example.com".to_string()],
-            endpoints: vec![Destination::parse("127.0.0.1:8080").unwrap()],
-            flags: attr::RouteAttr::from(RouteFlags::Disabled),
-            ..Default::default()
-        };
-        router.apply_route(disabled_route).await;
+            // Test disabled flag
+            let disabled_route = Route {
+                id: 1,
+                matchers: vec!["example.com".to_string()],
+                endpoints: vec![Destination::parse("127.0.0.1:8080").unwrap()],
+                flags: attr::RouteAttr::from(RouteFlags::Disabled),
+                ..Default::default()
+            };
+            router.apply_route(disabled_route).await;
 
-        // Disabled route should not resolve
-        let resolved = router.resolve("example.com").await;
-        assert!(resolved.is_none());
+            // Disabled route should not resolve
+            let resolved = router.resolve("example.com").await;
+            assert!(resolved.is_none());
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn route_proxy_and_normal_flags_work_correctly() {
-        let router = RouterInstance::new();
+        run_in_local(async {
+            let router = RouterInstance::new();
 
-        // Test proxy protocol flag
-        let proxied_route = Route {
-            id: 2,
-            matchers: vec!["proxy.example.com".to_string()],
-            endpoints: vec![Destination::parse("127.0.0.1:25565").unwrap()],
-            flags: attr::RouteAttr::from(RouteFlags::ProxyProtocol),
-            ..Default::default()
-        };
-        router.apply_route(proxied_route).await;
+            // Test proxy protocol flag
+            let proxied_route = Route {
+                id: 2,
+                matchers: vec!["proxy.example.com".to_string()],
+                endpoints: vec![Destination::parse("127.0.0.1:25565").unwrap()],
+                flags: attr::RouteAttr::from(RouteFlags::ProxyProtocol),
+                ..Default::default()
+            };
+            router.apply_route(proxied_route).await;
 
-        let resolved = router.resolve("proxy.example.com").await.unwrap();
-        assert!(resolved.route.proxied());
-        assert!(!resolved.route.disabled());
+            let resolved = router.resolve("proxy.example.com").await.unwrap();
+            assert!(resolved.route.proxied());
+            assert!(!resolved.route.disabled());
 
-        // Test route with no flags
-        let normal_route = Route {
-            id: 3,
-            matchers: vec!["normal.example.com".to_string()],
-            endpoints: vec![Destination::parse("127.0.0.1:25565").unwrap()],
-            flags: attr::RouteAttr::from_u64(0),
-            ..Default::default()
-        };
-        router.apply_route(normal_route).await;
+            // Test route with no flags
+            let normal_route = Route {
+                id: 3,
+                matchers: vec!["normal.example.com".to_string()],
+                endpoints: vec![Destination::parse("127.0.0.1:25565").unwrap()],
+                flags: attr::RouteAttr::from_u64(0),
+                ..Default::default()
+            };
+            router.apply_route(normal_route).await;
 
-        let resolved = router.resolve("normal.example.com").await.unwrap();
-        assert!(!resolved.route.proxied());
-        assert!(!resolved.route.disabled());
+            let resolved = router.resolve("normal.example.com").await.unwrap();
+            assert!(!resolved.route.proxied());
+            assert!(!resolved.route.disabled());
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn resolve_load_balances_across_endpoints() {
-        let router = RouterInstance::new();
-        let route = Route {
-            id: 10,
-            matchers: vec!["balanced.example.com".to_string()],
-            endpoints: vec![
-                Destination::parse("10.0.0.1:25565").unwrap(),
-                Destination::parse("10.0.0.2:25565").unwrap(),
-            ],
-            ..Default::default()
-        };
+        run_in_local(async {
+            let router = RouterInstance::new();
+            let route = Route {
+                id: 10,
+                matchers: vec!["balanced.example.com".to_string()],
+                endpoints: vec![
+                    Destination::parse("10.0.0.1:25565").unwrap(),
+                    Destination::parse("10.0.0.2:25565").unwrap(),
+                ],
+                ..Default::default()
+            };
 
-        router.apply_route(route).await;
+            router.apply_route(route).await;
 
-        let first = router.resolve("balanced.example.com").await.unwrap();
-        let second = router.resolve("balanced.example.com").await.unwrap();
+            let first = router.resolve("balanced.example.com").await.unwrap();
+            let second = router.resolve("balanced.example.com").await.unwrap();
 
-        assert_ne!(first.endpoint, second.endpoint);
+            assert_ne!(first.endpoint, second.endpoint);
+        })
+        .await;
     }
 }
