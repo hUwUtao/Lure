@@ -195,7 +195,10 @@ impl Lure {
         Ok(())
     }
 
-    async fn handle_handshake(&self, mut connection: crate::sock::Connection) -> anyhow::Result<()> {
+    async fn handle_handshake(
+        &self,
+        mut connection: crate::sock::Connection,
+    ) -> anyhow::Result<()> {
         let start = Instant::now();
         let client_addr = *connection.addr();
         const HANDSHAKE_INTENT: ClientIntent = ClientIntent {
@@ -426,7 +429,10 @@ impl Lure {
                 .threat
                 .nuisance(client.recv_login_start(handshake.protocol_version), INTENT)
                 .await??;
-            (OwnedLoginStart::from_packet(login_frame.packet), login_frame.raw)
+            (
+                OwnedLoginStart::from_packet(login_frame.packet),
+                login_frame.raw,
+            )
         };
         let profile = Arc::new(Profile {
             name: Arc::clone(&login.username),

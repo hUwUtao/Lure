@@ -1,7 +1,7 @@
 pub mod event;
 pub mod inspect;
-pub(crate) mod oltp;
-pub(crate) mod process;
+pub mod oltp;
+pub mod process;
 
 use std::{sync::Arc, time::Duration};
 
@@ -25,15 +25,15 @@ pub fn get_tracer() -> BoxedTracer {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct Id {
+pub(crate) struct Id {
     pub id: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct Empty {}
+pub(crate) struct Empty {}
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct NonObj<T> {
+pub(crate) struct NonObj<T> {
     _v: T,
 }
 
@@ -45,7 +45,7 @@ impl<T> NonObj<T> {
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "_c")]
-pub enum EventEnvelope {
+pub(crate) enum EventEnvelope {
     Hello(Empty),
     SetRoute(crate::router::Route),
     RemoveRoute(Id),

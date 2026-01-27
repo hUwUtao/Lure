@@ -2,6 +2,7 @@
 name = "lure"
 version = "0.3.2"
 edition = "2024"
+default-run = "lure"
 
 [workspace.metadata.cargo-shear]
 ignored = ["tonic"]

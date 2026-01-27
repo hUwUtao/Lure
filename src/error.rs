@@ -5,7 +5,7 @@ use anyhow::Result;
 use crate::{connection::EncodedConnection, logging::LureLogger, threat::ClientFail};
 
 #[derive(thiserror::Error, Debug)]
-pub enum ReportableError {
+pub(crate) enum ReportableError {
     #[error("Request timeout (re::rt)")]
     Timeout(#[from] tokio::time::error::Elapsed),
     #[error("Networking error - {0:?} (re:ne)")]
@@ -17,7 +17,7 @@ pub enum ReportableError {
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct ErrorResponder;
+pub(crate) struct ErrorResponder;
 
 impl ErrorResponder {
     pub const fn new() -> Self {

@@ -13,12 +13,12 @@ use tokio::{
 
 use crate::{
     error::ReportableError,
+    inspect::drive_transport_metrics,
     logging::LureLogger,
     router::Session,
-    telemetry::get_meter,
 };
 
-pub(crate) struct Listener {
+pub struct Listener {
     inner: TcpListener,
 }
 
@@ -32,9 +32,13 @@ impl Listener {
         let (stream, addr) = self.inner.accept().await?;
         Ok((Connection::new(stream, addr), addr))
     }
+
+    pub(crate) fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.inner.local_addr()
+    }
 }
 
-pub(crate) struct Connection {
+pub struct Connection {
     stream: TcpStream,
     addr: SocketAddr,
 }
@@ -202,55 +206,7 @@ pub(crate) async fn passthrough_now(
             let abort = cancel.subscribe();
 
             async move {
-                let mut interval = tokio::time::interval(Duration::from_millis(100));
-                let volume_record = get_meter()
-                    .u64_counter("lure_proxy_transport_volume")
-                    .with_unit("bytes")
-                    .build();
-
-                let packet_record = get_meter()
-                    .u64_counter("lure_proxy_transport_packet_count")
-                    .with_unit("packets")
-                    .build();
-
-                let s2ct = opentelemetry::KeyValue::new("intent", "s2c");
-                let c2st = opentelemetry::KeyValue::new("intent", "c2s");
-
-                let mut last = inspect.traffic.snapshot();
-
-                loop {
-                    if !abort.is_empty() {
-                        break;
-                    }
-
-                    let vr1 = volume_record.clone();
-                    let vr2 = volume_record.clone();
-                    let pr1 = packet_record.clone();
-                    let pr2 = packet_record.clone();
-
-                    let snap = inspect.traffic.snapshot();
-
-                    vr1.add(
-                        snap.c2s_bytes - last.c2s_bytes,
-                        core::slice::from_ref(&c2st),
-                    );
-                    vr2.add(
-                        snap.s2c_bytes - last.s2c_bytes,
-                        core::slice::from_ref(&s2ct),
-                    );
-                    pr1.add(
-                        snap.c2s_chunks - last.c2s_chunks,
-                        core::slice::from_ref(&c2st),
-                    );
-                    pr2.add(
-                        snap.s2c_chunks - last.s2c_chunks,
-                        core::slice::from_ref(&s2ct),
-                    );
-
-                    last = snap;
-
-                    interval.tick().await;
-                }
+                drive_transport_metrics(inspect, || !abort.is_empty()).await;
             }
         },
     );

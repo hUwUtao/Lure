@@ -1,34 +1,36 @@
-use std::{
-    io,
-    net::SocketAddr,
-    rc::Rc,
-};
+use std::{io, net::SocketAddr, rc::Rc, sync::Arc};
 
-use tokio::sync::broadcast;
+use io_uring::IoUring;
 use tokio_uring::{
+    Submit,
+    buf::BufferImpl,
     net::{TcpListener, TcpStream},
     runtime::Runtime,
-    Submit,
 };
-use io_uring::IoUring;
 
 use crate::{
     error::ReportableError,
+    inspect::drive_transport_metrics,
     logging::LureLogger,
     router::Session,
-    telemetry::get_meter,
+    utils::UnsafeCounterU64,
 };
 
 pub(crate) fn probe() -> io::Result<()> {
-    IoUring::new(1)
-        .map(|_| ())
-        .map_err(|err| io::Error::new(err.kind(), format!("io_uring syscall unavailable: {err}")))?;
+    IoUring::new(1).map(|_| ()).map_err(|err| {
+        io::Error::new(err.kind(), format!("io_uring syscall unavailable: {err}"))
+    })?;
     Runtime::new(&tokio_uring::builder())
         .map(|_| ())
-        .map_err(|err| io::Error::new(err.kind(), format!("tokio-uring runtime init failed: {err}")))
+        .map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!("tokio-uring runtime init failed: {err}"),
+            )
+        })
 }
 
-pub(crate) struct Listener {
+pub struct Listener {
     inner: TcpListener,
 }
 
@@ -42,9 +44,13 @@ impl Listener {
         let (stream, addr) = self.inner.accept().await?;
         Ok((Connection::new(stream, addr), addr))
     }
+
+    pub(crate) fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.inner.local_addr()
+    }
 }
 
-pub(crate) struct Connection {
+pub struct Connection {
     stream: Rc<TcpStream>,
     addr: SocketAddr,
 }
@@ -93,8 +99,7 @@ impl Connection {
     }
 
     pub(crate) async fn write_all(&mut self, buf: Vec<u8>) -> io::Result<Vec<u8>> {
-        let len = buf.len();
-        write_all_stream(self.stream.as_ref(), buf, len).await
+        write_all_stream(self.stream.as_ref(), buf).await
     }
 
     pub(crate) async fn flush(&mut self) -> io::Result<()> {
@@ -114,6 +119,52 @@ impl Connection {
     }
 }
 
+struct WriteBuf {
+    buf: Vec<u8>,
+    offset: usize,
+}
+
+impl WriteBuf {
+    fn new(buf: Vec<u8>) -> Self {
+        Self { buf, offset: 0 }
+    }
+
+    fn remaining(&self) -> usize {
+        self.buf.len().saturating_sub(self.offset)
+    }
+
+    fn advance(&mut self, n: usize) {
+        self.offset = self.offset.saturating_add(n);
+    }
+
+    fn into_vec(self) -> Vec<u8> {
+        self.buf
+    }
+}
+
+// Offsets the iovec pointer without copying bytes in userland.
+unsafe impl BufferImpl for WriteBuf {
+    type UserData = (Vec<u8>, usize);
+
+    fn into_raw_parts(self) -> (Vec<*mut u8>, Vec<usize>, Vec<usize>, Self::UserData) {
+        let mut buf = self.buf;
+        let offset = self.offset;
+        let len = buf.len().saturating_sub(offset);
+        let ptr = unsafe { buf.as_mut_ptr().add(offset) };
+        (vec![ptr], vec![len], vec![len], (buf, offset))
+    }
+
+    unsafe fn from_raw_parts(
+        _ptr: Vec<*mut u8>,
+        _len: Vec<usize>,
+        _cap: Vec<usize>,
+        user_data: Self::UserData,
+    ) -> Self {
+        let (buf, offset) = user_data;
+        Self { buf, offset }
+    }
+}
+
 pub(crate) async fn passthrough_now(
     client: &mut Connection,
     server: &mut Connection,
@@ -124,20 +175,21 @@ pub(crate) async fn passthrough_now(
     let client_stream = client.stream_handle();
     let server_stream = server.stream_handle();
 
-    let (cancel, _) = broadcast::channel(1);
+    let cancel = Arc::new(UnsafeCounterU64::default());
     let inspect = session.inspect.clone();
 
     let a = {
-        let cancel = cancel.clone();
-        let inspect = inspect.clone();
+        let cancel = Arc::clone(&cancel);
         let from = Rc::clone(&server_stream);
         let to = Rc::clone(&client_stream);
+        let inspect = inspect.clone();
+
         tokio_uring::spawn(async move {
             forward_loop(from, to, cancel, |u| inspect.record_s2c(u)).await
         })
     };
     let b = {
-        let cancel = cancel.clone();
+        let cancel = Arc::clone(&cancel);
         let inspect = inspect.clone();
         let from = Rc::clone(&client_stream);
         let to = Rc::clone(&server_stream);
@@ -146,56 +198,8 @@ pub(crate) async fn passthrough_now(
         })
     };
     let c = tokio_uring::spawn(async move {
-        let abort = cancel.subscribe();
-        let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
-        let volume_record = get_meter()
-            .u64_counter("lure_proxy_transport_volume")
-            .with_unit("bytes")
-            .build();
-
-        let packet_record = get_meter()
-            .u64_counter("lure_proxy_transport_packet_count")
-            .with_unit("packets")
-            .build();
-
-        let s2ct = opentelemetry::KeyValue::new("intent", "s2c");
-        let c2st = opentelemetry::KeyValue::new("intent", "c2s");
-
-        let mut last = inspect.traffic.snapshot();
-
-        loop {
-            if !abort.is_empty() {
-                break;
-            }
-
-            let vr1 = volume_record.clone();
-            let vr2 = volume_record.clone();
-            let pr1 = packet_record.clone();
-            let pr2 = packet_record.clone();
-
-            let snap = inspect.traffic.snapshot();
-
-            vr1.add(
-                snap.c2s_bytes - last.c2s_bytes,
-                core::slice::from_ref(&c2st),
-            );
-            vr2.add(
-                snap.s2c_bytes - last.s2c_bytes,
-                core::slice::from_ref(&s2ct),
-            );
-            pr1.add(
-                snap.c2s_chunks - last.c2s_chunks,
-                core::slice::from_ref(&c2st),
-            );
-            pr2.add(
-                snap.s2c_chunks - last.s2c_chunks,
-                core::slice::from_ref(&s2ct),
-            );
-
-            last = snap;
-
-            interval.tick().await;
-        }
+        let cancel = Arc::clone(&cancel);
+        drive_transport_metrics(inspect, || cancel.load() != 0).await;
         Ok::<(), anyhow::Error>(())
     });
 
@@ -216,77 +220,79 @@ pub(crate) async fn passthrough_now(
 async fn forward_loop<L>(
     from: Rc<TcpStream>,
     to: Rc<TcpStream>,
-    cancel: broadcast::Sender<()>,
+    cancel: Arc<UnsafeCounterU64>,
     poll_size: L,
 ) -> anyhow::Result<()>
 where
     L: Fn(u64),
 {
-    let mut buf = vec![0u8; 16 * 1024];
-    let abort = cancel.subscribe();
+    const BUF_CAP: usize = 16 * 1024;
+    let mut buf = Vec::with_capacity(BUF_CAP);
     loop {
-        let (bytes_read, buf_out) =
-            match from.read(tokio_uring::buf::Buffer::from(buf)).await {
-                Ok((n, buf_out)) => (n, buf_out),
-                Err(err) => {
-                    let _ = err.1;
-                    let _ = cancel.send(());
-                    return Err(ReportableError::from(err.0).into());
-                }
-            };
-        buf = buf_out.try_into().unwrap_or_else(|_| vec![0u8; 16 * 1024]);
+        let (bytes_read, buf_out) = match from.read(tokio_uring::buf::Buffer::from(buf)).await {
+            Ok((n, buf_out)) => (n, buf_out),
+            Err(err) => {
+                let _ = err.1;
+                cancel.inc(1);
+                return Err(ReportableError::from(err.0).into());
+            }
+        };
+        buf = buf_out
+            .try_into()
+            .expect("tokio-uring buffer conversion failed");
 
         if bytes_read == 0 {
-            let _ = cancel.send(());
+            cancel.inc(1);
             break;
         }
 
         poll_size(bytes_read as u64);
 
-        buf = match write_all_stream(to.as_ref(), buf, bytes_read).await {
-            Ok(buf) => buf,
-            Err(err) => {
-                let _ = cancel.send(());
-                return Err(ReportableError::from(err).into());
+        let mut write_buf = WriteBuf::new(buf);
+        while write_buf.remaining() > 0 {
+            let buffer = tokio_uring::buf::Buffer::from(write_buf);
+            let (written, buffer) = match to.write(buffer).submit().await {
+                Ok((n, buffer)) => (n, buffer),
+                Err(err) => {
+                    cancel.inc(1);
+                    return Err(ReportableError::from(err.0).into());
+                }
+            };
+            write_buf = buffer
+                .try_into()
+                .expect("tokio-uring buffer conversion failed");
+
+            if written == 0 {
+                cancel.inc(1);
+                return Ok(());
             }
-        };
-        buf.clear();
-        if buf.capacity() < 16 * 1024 {
-            buf.reserve_exact(16 * 1024 - buf.capacity());
+
+            write_buf.advance(written);
         }
 
-        if !abort.is_empty() {
-            break;
-        }
+        buf = write_buf.into_vec();
+        buf.clear();
     }
     Ok(())
 }
 
-async fn write_all_stream(
-    stream: &TcpStream,
-    mut buf: Vec<u8>,
-    mut len: usize,
-) -> io::Result<Vec<u8>> {
-    if len > buf.len() {
-        len = buf.len();
-    }
-    buf.truncate(len);
-    loop {
-        let buffer = tokio_uring::buf::Buffer::from(buf);
-        let (n, buffer) = match stream.write(buffer).submit().await {
+async fn write_all_stream(stream: &TcpStream, buf: Vec<u8>) -> io::Result<Vec<u8>> {
+    let mut write_buf = WriteBuf::new(buf);
+    while write_buf.remaining() > 0 {
+        let buffer = tokio_uring::buf::Buffer::from(write_buf);
+        let (written, buffer) = match stream.write(buffer).submit().await {
             Ok((n, buffer)) => (n, buffer),
             Err(err) => return Err(err.0),
         };
-        let mut vec = buffer.try_into().unwrap_or_else(|_| Vec::new());
-        if n >= vec.len() {
-            return Ok(vec);
+        write_buf = buffer
+            .try_into()
+            .expect("tokio-uring buffer conversion failed");
+
+        if written == 0 {
+            return Ok(write_buf.into_vec());
         }
-        vec.copy_within(n.., 0);
-        let remaining = vec.len().saturating_sub(n);
-        vec.truncate(remaining);
-        buf = vec;
-        if buf.is_empty() {
-            return Ok(buf);
-        }
+
+        write_buf.advance(written);
     }
+    Ok(write_buf.into_vec())
 }

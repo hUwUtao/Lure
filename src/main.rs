@@ -1,24 +1,9 @@
-pub(crate) mod config;
-pub(crate) mod connection;
-pub(crate) mod error;
-pub(crate) mod inspect;
-pub(crate) mod logging;
-pub(crate) mod lure;
-pub(crate) mod metrics;
-pub(crate) mod packet;
-pub(crate) mod router;
-pub(crate) mod sock;
-pub(crate) mod telemetry;
-pub(crate) mod threat;
-pub(crate) mod utils;
-
 use std::{env, error::Error, io::ErrorKind};
 
-use config::LureConfig;
-use lure::Lure;
-
-use crate::{
+use lure::{
     config::{LureConfigLoadError, ProxySigningKey},
+    config::LureConfig,
+    lure::Lure,
     sock::{BackendKind, backend_selection},
     telemetry::{oltp::init_meter, process::ProcessMetricsService},
     utils::{leak, spawn_named},

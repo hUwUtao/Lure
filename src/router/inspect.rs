@@ -10,6 +10,7 @@ use std::{
 use serde::Serialize;
 use tokio::sync::RwLock;
 
+use crate::utils::UnsafeCounterU64;
 use crate::telemetry::inspect::{
     InstanceStats, RouteStats, SessionAttributes, SessionInspect, SessionStats, TenantStats,
     TrafficCounters,
@@ -17,6 +18,77 @@ use crate::telemetry::inspect::{
 
 #[derive(Debug)]
 pub struct TrafficCountersAtomic {
+    c2s_bytes: UnsafeCounterU64,
+    s2c_bytes: UnsafeCounterU64,
+    c2s_chunks: UnsafeCounterU64,
+    s2c_chunks: UnsafeCounterU64,
+    last_sample_ms: UnsafeCounterU64,
+    last_c2s_bytes: UnsafeCounterU64,
+    last_s2c_bytes: UnsafeCounterU64,
+}
+
+impl TrafficCountersAtomic {
+    pub fn new() -> Self {
+        Self {
+            c2s_bytes: UnsafeCounterU64::default(),
+            s2c_bytes: UnsafeCounterU64::default(),
+            c2s_chunks: UnsafeCounterU64::default(),
+            s2c_chunks: UnsafeCounterU64::default(),
+            last_sample_ms: UnsafeCounterU64::default(),
+            last_c2s_bytes: UnsafeCounterU64::default(),
+            last_s2c_bytes: UnsafeCounterU64::default(),
+        }
+    }
+
+    pub fn record_c2s(&self, bytes: u64) {
+        self.c2s_chunks.inc(1);
+        self.c2s_bytes.inc(bytes);
+    }
+
+    pub fn record_s2c(&self, bytes: u64) {
+        self.s2c_chunks.inc(1);
+        self.s2c_bytes.inc(bytes);
+    }
+
+    pub fn snapshot(&self) -> TrafficCounters {
+        let now_ms = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or(std::time::Duration::ZERO)
+            .as_millis() as u64;
+        let c2s_bytes = self.c2s_bytes.load();
+        let s2c_bytes = self.s2c_bytes.load();
+
+        let prev_ms = self.last_sample_ms.swap(now_ms);
+        let prev_c2s = self.last_c2s_bytes.swap(c2s_bytes);
+        let prev_s2c = self.last_s2c_bytes.swap(s2c_bytes);
+
+        let (c2s_bps, s2c_bps) = if prev_ms == 0 || now_ms <= prev_ms {
+            (0, 0)
+        } else {
+            let delta_ms = now_ms - prev_ms;
+            let c2s = c2s_bytes.saturating_sub(prev_c2s).saturating_mul(1000) / delta_ms;
+            let s2c = s2c_bytes.saturating_sub(prev_s2c).saturating_mul(1000) / delta_ms;
+            (c2s, s2c)
+        };
+        TrafficCounters {
+            c2s_bytes,
+            s2c_bytes,
+            c2s_chunks: self.c2s_chunks.load(),
+            s2c_chunks: self.s2c_chunks.load(),
+            c2s_bps,
+            s2c_bps,
+        }
+    }
+}
+
+impl Default for TrafficCountersAtomic {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug)]
+pub struct TrafficCountersShared {
     c2s_bytes: AtomicU64,
     s2c_bytes: AtomicU64,
     c2s_chunks: AtomicU64,
@@ -26,7 +98,7 @@ pub struct TrafficCountersAtomic {
     last_s2c_bytes: AtomicU64,
 }
 
-impl TrafficCountersAtomic {
+impl TrafficCountersShared {
     pub fn new() -> Self {
         Self {
             c2s_bytes: AtomicU64::new(0),
@@ -39,13 +111,13 @@ impl TrafficCountersAtomic {
         }
     }
 
-    pub fn record_c2s(&self, bytes: u64) {
-        self.c2s_chunks.fetch_add(1, Ordering::Relaxed);
+    pub fn record_c2s(&self, bytes: u64, chunks: u64) {
+        self.c2s_chunks.fetch_add(chunks, Ordering::Relaxed);
         self.c2s_bytes.fetch_add(bytes, Ordering::Relaxed);
     }
 
-    pub fn record_s2c(&self, bytes: u64) {
-        self.s2c_chunks.fetch_add(1, Ordering::Relaxed);
+    pub fn record_s2c(&self, bytes: u64, chunks: u64) {
+        self.s2c_chunks.fetch_add(chunks, Ordering::Relaxed);
         self.s2c_bytes.fetch_add(bytes, Ordering::Relaxed);
     }
 
@@ -80,7 +152,7 @@ impl TrafficCountersAtomic {
     }
 }
 
-impl Default for TrafficCountersAtomic {
+impl Default for TrafficCountersShared {
     fn default() -> Self {
         Self::new()
     }
@@ -91,7 +163,7 @@ pub struct RouteStatsAtomic {
     pub id: u64,
     zone: AtomicU64,
     active_sessions: AtomicU64,
-    traffic: TrafficCountersAtomic,
+    traffic: TrafficCountersShared,
 }
 
 impl RouteStatsAtomic {
@@ -100,7 +172,7 @@ impl RouteStatsAtomic {
             id,
             zone: AtomicU64::new(zone),
             active_sessions: AtomicU64::new(0),
-            traffic: TrafficCountersAtomic::new(),
+            traffic: TrafficCountersShared::new(),
         }
     }
 
@@ -108,12 +180,12 @@ impl RouteStatsAtomic {
         self.zone.store(zone, Ordering::Relaxed);
     }
 
-    pub fn record_c2s(&self, bytes: u64) {
-        self.traffic.record_c2s(bytes);
+    pub fn record_c2s(&self, bytes: u64, chunks: u64) {
+        self.traffic.record_c2s(bytes, chunks);
     }
 
-    pub fn record_s2c(&self, bytes: u64) {
-        self.traffic.record_s2c(bytes);
+    pub fn record_s2c(&self, bytes: u64, chunks: u64) {
+        self.traffic.record_s2c(bytes, chunks);
     }
 
     pub fn inc_active(&self) {
@@ -138,7 +210,7 @@ impl RouteStatsAtomic {
 pub struct TenantStatsAtomic {
     pub zone: u64,
     active_sessions: AtomicU64,
-    traffic: TrafficCountersAtomic,
+    traffic: TrafficCountersShared,
 }
 
 impl TenantStatsAtomic {
@@ -146,16 +218,16 @@ impl TenantStatsAtomic {
         Self {
             zone,
             active_sessions: AtomicU64::new(0),
-            traffic: TrafficCountersAtomic::new(),
+            traffic: TrafficCountersShared::new(),
         }
     }
 
-    pub fn record_c2s(&self, bytes: u64) {
-        self.traffic.record_c2s(bytes);
+    pub fn record_c2s(&self, bytes: u64, chunks: u64) {
+        self.traffic.record_c2s(bytes, chunks);
     }
 
-    pub fn record_s2c(&self, bytes: u64) {
-        self.traffic.record_s2c(bytes);
+    pub fn record_s2c(&self, bytes: u64, chunks: u64) {
+        self.traffic.record_s2c(bytes, chunks);
     }
 
     pub fn inc_active(&self) {
@@ -181,7 +253,7 @@ pub struct InstanceStatsAtomic {
     started_at: Instant,
     routes_active: AtomicU64,
     sessions_active: AtomicU64,
-    traffic: TrafficCountersAtomic,
+    traffic: TrafficCountersShared,
 }
 
 impl InstanceStatsAtomic {
@@ -191,7 +263,7 @@ impl InstanceStatsAtomic {
             started_at: Instant::now(),
             routes_active: AtomicU64::new(0),
             sessions_active: AtomicU64::new(0),
-            traffic: TrafficCountersAtomic::new(),
+            traffic: TrafficCountersShared::new(),
         }
     }
 
@@ -199,12 +271,12 @@ impl InstanceStatsAtomic {
         let _ = self.inst.set(inst);
     }
 
-    pub fn record_c2s(&self, bytes: u64) {
-        self.traffic.record_c2s(bytes);
+    pub fn record_c2s(&self, bytes: u64, chunks: u64) {
+        self.traffic.record_c2s(bytes, chunks);
     }
 
-    pub fn record_s2c(&self, bytes: u64) {
-        self.traffic.record_s2c(bytes);
+    pub fn record_s2c(&self, bytes: u64, chunks: u64) {
+        self.traffic.record_s2c(bytes, chunks);
     }
 
     pub fn set_routes_active(&self, total: u64) {
@@ -239,7 +311,7 @@ pub struct SessionInspectState {
     pub route_id: u64,
     pub hostname: String,
     pub created_at_ms: u64,
-    pub last_activity_ms: AtomicU64,
+    pub last_activity_ms: UnsafeCounterU64,
     pub traffic: TrafficCountersAtomic,
     pub attributes: Arc<RwLock<SessionAttributes>>,
     pub route: Arc<RouteStatsAtomic>,
@@ -266,7 +338,7 @@ impl From<&SessionInspectState> for SessionInspectReportFormat {
             route_id: state.route_id,
             hostname: state.hostname.clone(),
             created_at_ms: state.created_at_ms,
-            last_activity_ms: state.last_activity_ms.load(Ordering::Relaxed),
+            last_activity_ms: state.last_activity_ms.load(),
             traffic: state.traffic.snapshot(),
         }
     }
@@ -292,40 +364,34 @@ impl SessionInspectState {
         instance: Arc<InstanceStatsAtomic>,
     ) -> Self {
         let now_ms = instance.started_at.elapsed().as_millis() as u64;
-        Self {
+        let state = Self {
             id,
             zone,
             route_id,
             hostname,
             created_at_ms: now_ms,
-            last_activity_ms: AtomicU64::new(now_ms),
+            last_activity_ms: UnsafeCounterU64::default(),
             traffic: TrafficCountersAtomic::new(),
             attributes: Arc::new(RwLock::new(SessionAttributes::default())),
             route,
             tenant,
             instance,
-        }
+        };
+        state.last_activity_ms.store(now_ms);
+        state
     }
 
     pub fn record_c2s(&self, bytes: u64) {
         self.traffic.record_c2s(bytes);
-        self.route.record_c2s(bytes);
-        self.tenant.record_c2s(bytes);
-        self.instance.record_c2s(bytes);
         self.last_activity_ms.store(
             self.instance.started_at.elapsed().as_millis() as u64,
-            Ordering::Relaxed,
         );
     }
 
     pub fn record_s2c(&self, bytes: u64) {
         self.traffic.record_s2c(bytes);
-        self.route.record_s2c(bytes);
-        self.tenant.record_s2c(bytes);
-        self.instance.record_s2c(bytes);
         self.last_activity_ms.store(
             self.instance.started_at.elapsed().as_millis() as u64,
-            Ordering::Relaxed,
         );
     }
 
@@ -334,7 +400,7 @@ impl SessionInspectState {
             id: self.id,
             zone: self.zone,
             route_id: self.route_id,
-            last_activity_ms: self.last_activity_ms.load(Ordering::Relaxed),
+            last_activity_ms: self.last_activity_ms.load(),
             traffic: self.traffic.snapshot(),
         }
     }
@@ -350,12 +416,13 @@ pub struct InspectRegistry {
 
 impl InspectRegistry {
     pub fn new() -> Self {
-        Self {
+        let registry = Self {
             instance: Arc::new(InstanceStatsAtomic::new()),
             routes: RwLock::new(HashMap::new()),
             tenants: RwLock::new(HashMap::new()),
             session_cursor: AtomicU64::new(1),
-        }
+        };
+        registry
     }
 
     pub fn set_instance_name(&self, inst: String) {
@@ -426,7 +493,7 @@ pub fn inspect_session_to_view(
         hostname: state.hostname.clone(),
         endpoint_host,
         created_at_ms: state.created_at_ms,
-        last_activity_ms: state.last_activity_ms.load(Ordering::Relaxed),
+        last_activity_ms: state.last_activity_ms.load(),
         traffic: state.traffic.snapshot(),
         attributes,
         profile: (*session.profile).clone(),

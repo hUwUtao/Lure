@@ -1,3 +1,5 @@
+use std::cell::UnsafeCell;
+
 use async_trait::async_trait;
 
 use crate::telemetry::{EventEnvelope, EventServiceInstance, event::EventHook};
@@ -49,4 +51,55 @@ where
     F::Output: 'static,
 {
     tokio::task::Builder::new().name(name).spawn_local(future)
+}
+
+#[derive(Default, Debug)]
+/// Warning: This implementation only assumes that single sync-inc
+pub struct UnsafeCounterU64 {
+    v: UnsafeCell<u64>,
+}
+
+// single-writer, multi-reader-by-convention
+unsafe impl Sync for UnsafeCounterU64 {}
+
+impl UnsafeCounterU64 {
+    pub fn inc(&self, rhs: u64) {
+        unsafe {
+            *self.v.get() += rhs;
+        }
+    }
+
+    pub fn add(&self, rhs: u64) -> u64 {
+        unsafe {
+            let old = *self.v.get();
+            *self.v.get() = old.wrapping_add(rhs);
+            old
+        }
+    }
+
+    pub fn sub(&self, rhs: u64) -> u64 {
+        unsafe {
+            let old = *self.v.get();
+            *self.v.get() = old.wrapping_sub(rhs);
+            old
+        }
+    }
+
+    pub fn store(&self, value: u64) {
+        unsafe {
+            *self.v.get() = value;
+        }
+    }
+
+    pub fn swap(&self, value: u64) -> u64 {
+        unsafe {
+            let old = *self.v.get();
+            *self.v.get() = value;
+            old
+        }
+    }
+
+    pub fn load(&self) -> u64 {
+        unsafe { *self.v.get() }
+    }
 }
