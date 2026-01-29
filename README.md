@@ -3,26 +3,18 @@
 </p>
 
 <h1 align="center">Lure</h1>
-<p align="center"><em>A modern Minecraft Layer 4 proxy and load balancer built with Rust, Tokio, and Valence.</em></p>
+<p align="center"><em>A modern Minecraft native proxy and load balancer built with Rust</em></p>
 
 ---
 
 ## Overview
 
-**Lure** is a sophisticated, but lightweight enough, high-performance Layer 4 (L4) proxy for Minecraft.
+**Lure** is a sophisticated, but lightweight enough, high-performance proxy for Minecraft.
 It reach high performance with
 
-- Fast tokio socket polling
-- Fast first-handshake deserialization
-- Async session handling
-
-### Performance
-
-Gate vs Lure, tested from VN to SG, with Wifi latency. 
-
-![Gate: 96ms; Lure: 16ms](/assets/thicc.png)
-
-<sub>*Lure actually give off uneven result with random spike, while Gate keeps a stable number, a quite lower than the peak of Lure</sub>
+- ~~Fair tokio socket polling~~ (kinda fast ngl)
+- Toasty io-uring, not even haproxy done this already
+- Unrailed safety prooven with hundred of hours of hardcore Forge connection, while handling few dozen player Minecraft network
 
 ## Philosophy
 
@@ -38,13 +30,20 @@ Gate(lite), which is a mature proxy for this purpose, but I wasn't able to make 
 - Proxy Protocol (supported Paper-derived, Velocity and Bungeecord)
 - Highly observable system through OTEL
 - Global threat control (WIP), with socket ratelimit, etc.
+- Proxy-Protocol authentication (not even tcpshield doing this atm, but uhh we don't kinda need this are we?)
 
 ### Cutting edge
 
 Future proof features, with considerations that some "unsafe" are fine. Project is using rustfmt nightly.
 To extends features like runtime monitoring \(I have some jealousy with go that they have actually mature otlp).
 
-### The coldest process
+### Updates
+
+#### The shortest road
+
+With io-uring (test environment), up to 16% CPU instructions, and noticibly latency is reduced by 1μs 🥳. This cannot be made efficient in real time, but we can accelerate it!
+
+#### The coldest process
 
 Optional [mimalloc](https://github.com/microsoft/mimalloc) crate feature allocator reduces CPU usage (4% → 1%) at the
 cost of higher memory usage (~47MiB vs ~20MiB).
