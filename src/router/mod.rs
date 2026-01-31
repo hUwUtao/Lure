@@ -39,6 +39,7 @@ pub enum RouteFlags {
     OverrideQuery,
     ProxyProtocol,
     PreserveHost,
+    Tunnel,
 }
 
 /// Routing rule with matchers and endpoints, ordered by priority
@@ -51,6 +52,8 @@ pub struct Route {
     pub priority: i32,
     /// Route flags
     pub flags: attr::RouteAttr,
+    /// Optional tunnel token (32-byte identifier)
+    pub tunnel_token: Option<[u8; 32]>,
     /// Domain patterns or hostnames this route matches
     pub matchers: Vec<String>,
     /// Available endpoint specifications for this route
@@ -76,6 +79,11 @@ impl Route {
     #[inline]
     pub fn preserve_host(&self) -> bool {
         self.read_flag(RouteFlags::PreserveHost)
+    }
+
+    #[inline]
+    pub fn tunnel(&self) -> bool {
+        self.read_flag(RouteFlags::Tunnel)
     }
 }
 

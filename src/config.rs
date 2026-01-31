@@ -121,6 +121,8 @@ pub struct RouteConfig {
     pub priority: i32,
     /// Additional flags to apply.
     pub flags: Option<RouteFlagsConfig>,
+    /// Optional tunnel token (hex or base64, 32 bytes).
+    pub tunnel_token: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -131,6 +133,7 @@ pub struct RouteFlagsConfig {
     pub cache_query: bool,
     pub override_query: bool,
     pub preserve_host: bool,
+    pub tunnel: bool,
 }
 
 fn default_inst() -> String {
@@ -233,6 +236,14 @@ impl RouteConfig {
             anyhow::bail!("route entry index {offset} exceeds reserved id range");
         }
 
+        let tunnel_token = if let Some(token) = &self.tunnel_token {
+            Some(parse_tunnel_token(token).map_err(|err| {
+                anyhow::anyhow!("invalid tunnel token for route {offset}: {err}")
+            })?)
+        } else {
+            None
+        };
+
         Ok(Route {
             id: DEFAULT_ROUTE_ID_BASE + offset as u64,
             zone: u64::MAX,
@@ -242,6 +253,7 @@ impl RouteConfig {
                 .as_ref()
                 .map(RouteFlagsConfig::to_attr)
                 .unwrap_or_default(),
+            tunnel_token,
             matchers,
             endpoints,
         })
@@ -266,8 +278,30 @@ impl RouteFlagsConfig {
         if self.preserve_host {
             attr.set_flag(RouteFlags::PreserveHost);
         }
+        if self.tunnel {
+            attr.set_flag(RouteFlags::Tunnel);
+        }
         attr
     }
+}
+
+fn parse_tunnel_token(token: &str) -> anyhow::Result<[u8; 32]> {
+    let trimmed = token.trim();
+    if trimmed.len() == 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        let mut out = [0u8; 32];
+        for i in 0..32 {
+            let byte = u8::from_str_radix(&trimmed[i * 2..i * 2 + 2], 16)?;
+            out[i] = byte;
+        }
+        return Ok(out);
+    }
+    let decoded = STANDARD.decode(trimmed)?;
+    if decoded.len() != 32 {
+        anyhow::bail!("expected 32 bytes, got {}", decoded.len());
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&decoded);
+    Ok(out)
 }
 
 #[derive(Debug, thiserror::Error)]

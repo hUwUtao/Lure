@@ -8,13 +8,14 @@ default-run = "lure"
 ignored = ["tonic"]
 
 [workspace]
-members = ["net"]
+members = ["net", "tun"]
 
 [dependencies]
 anyhow = "1.0"
 bytes = "1.10"
 log = "0.4.27"
 net = { path = "net" }
+tun = { path = "tun" }
 opentelemetry = "0.31"
 opentelemetry-otlp = { version = "0.31", features = ["tokio", "http-proto", "reqwest-rustls-webpki-roots", "http-json"] }
 dotenvy = "0.15"

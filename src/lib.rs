@@ -10,4 +10,5 @@ pub mod router;
 pub mod sock;
 pub mod telemetry;
 pub mod threat;
+pub mod tunnel;
 pub mod utils;
