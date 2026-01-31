@@ -13,3 +13,5 @@ path = "src/bin/tun.rs"
 
 [dependencies]
 thiserror = "2.0"
+net = { path = "../net" }
+tokio = { version = "1.48", features = ["full", "rt-multi-thread", "tracing"] }

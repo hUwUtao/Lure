@@ -417,7 +417,7 @@ fn run_proxy_uring(
     addr_tx: std::sync::mpsc::Sender<SocketAddr>,
     mut stop_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> anyhow::Result<()> {
-    tokio_uring::start(async move {
+    net::sock::uring::start(async move {
         let listener = sock::Listener::bind("127.0.0.1:0".parse()?).await?;
         let addr = listener.local_addr()?;
         let _ = addr_tx.send(addr);
@@ -427,7 +427,7 @@ fn run_proxy_uring(
                 _ = &mut stop_rx => break,
                 res = listener.accept() => {
                     let (client, _) = res?;
-                    tokio_uring::spawn(async move {
+                    net::sock::uring::spawn(async move {
                         let _ = proxy_connection(client, backend_addr, payload).await;
                     });
                 }

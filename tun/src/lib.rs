@@ -1,5 +1,7 @@
 use std::net::{IpAddr, SocketAddr};
 
+pub use net::sock;
+
 #[derive(Debug, thiserror::Error)]
 pub enum TunnelError {
     #[error("buffer too short")]
@@ -53,6 +55,14 @@ pub enum ServerMsgKind {
 pub enum ServerMsg {
     SessionOffer([u8; 32]),
     TargetAddr(SocketAddr),
+}
+
+pub async fn connect_agent(addr: SocketAddr) -> std::io::Result<sock::Connection> {
+    sock::Connection::connect(addr).await
+}
+
+pub async fn listen_agent(addr: SocketAddr) -> std::io::Result<sock::Listener> {
+    sock::Listener::bind(addr).await
 }
 
 pub fn decode_agent_hello(buf: &[u8]) -> Result<Option<(AgentHello, usize)>, TunnelError> {

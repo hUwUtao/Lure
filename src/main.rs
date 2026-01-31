@@ -23,7 +23,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     match backend.kind {
         BackendKind::Uring => {
             log::info!("socket backend: tokio-uring ({})", backend.reason);
-            tokio_uring::start(async {
+            net::sock::uring::start(async {
                 let local = tokio::task::LocalSet::new();
                 local.run_until(run()).await
             })

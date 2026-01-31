@@ -173,7 +173,7 @@ impl Lure {
                         drop(permit);
                     };
                     if backend_kind() == BackendKind::Uring {
-                        tokio_uring::spawn(handler);
+                        net::sock::uring::spawn(handler);
                     } else {
                         spawn_named("Connection handler", handler)?;
                     }

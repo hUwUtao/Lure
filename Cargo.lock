@@ -1393,7 +1393,6 @@ dependencies = [
  "futures",
  "getrandom 0.3.4",
  "governor",
- "io-uring",
  "log",
  "mimalloc",
  "net",
@@ -1407,7 +1406,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-metrics",
- "tokio-uring",
  "toml",
  "tonic",
  "tun",
@@ -1498,7 +1496,10 @@ name = "net"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "io-uring",
  "log",
+ "tokio",
+ "tokio-uring",
 ]
 
 [[package]]
@@ -2865,7 +2866,9 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 name = "tun"
 version = "0.1.0"
 dependencies = [
+ "net",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
