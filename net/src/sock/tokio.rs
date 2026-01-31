@@ -96,3 +96,13 @@ impl Connection {
         self.stream.shutdown().await
     }
 }
+
+pub async fn passthrough_basic(a: &mut Connection, b: &mut Connection) -> io::Result<()> {
+    let (mut a_read, mut a_write) = a.as_mut().split();
+    let (mut b_read, mut b_write) = b.as_mut().split();
+
+    let a_to_b = tokio::io::copy(&mut a_read, &mut b_write);
+    let b_to_a = tokio::io::copy(&mut b_read, &mut a_write);
+    let _ = tokio::try_join!(a_to_b, b_to_a)?;
+    Ok(())
+}

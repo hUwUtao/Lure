@@ -15,3 +15,5 @@ path = "src/bin/tun.rs"
 thiserror = "2.0"
 net = { path = "../net" }
 tokio = { version = "1.48", features = ["full", "rt-multi-thread", "tracing"] }
+base64 = "0.22"
+anyhow = "1.0"

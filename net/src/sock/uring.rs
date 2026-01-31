@@ -155,6 +155,32 @@ pub async fn write_all_handle(stream: &StreamHandle, buf: Vec<u8>) -> io::Result
     write_all_stream_handle(stream, buf).await
 }
 
+pub async fn passthrough_basic(a: &mut Connection, b: &mut Connection) -> io::Result<()> {
+    let a_stream = a.stream_handle();
+    let b_stream = b.stream_handle();
+    let left = spawn(async move { relay(a_stream, b_stream).await });
+    let b_stream = b.stream_handle();
+    let a_stream = a.stream_handle();
+    let right = spawn(async move { relay(b_stream, a_stream).await });
+    let _ = left.await?;
+    let _ = right.await?;
+    Ok(())
+}
+
+async fn relay(from: StreamHandle, to: StreamHandle) -> io::Result<()> {
+    const BUF_CAP: usize = 16 * 1024;
+    let mut buf = vec![0u8; BUF_CAP];
+    loop {
+        let (n, out) = read_into_handle(&from, buf).await?;
+        buf = out;
+        if n == 0 {
+            return Ok(());
+        }
+        let data = buf[..n].to_vec();
+        let _ = write_all_handle(&to, data).await?;
+    }
+}
+
 async fn write_all_stream_handle(stream: &TcpStream, buf: Vec<u8>) -> io::Result<Vec<u8>> {
     let mut pending = buf;
     loop {

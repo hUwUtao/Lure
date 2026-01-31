@@ -184,3 +184,14 @@ impl Connection {
         }
     }
 }
+
+pub async fn passthrough_basic(a: &mut Connection, b: &mut Connection) -> io::Result<()> {
+    match (a, b) {
+        (Connection::Tokio(a), Connection::Tokio(b)) => tokio::passthrough_basic(a, b).await,
+        (Connection::Uring(a), Connection::Uring(b)) => uring::passthrough_basic(a, b).await,
+        _ => Err(io::Error::new(
+            io::ErrorKind::Other,
+            "mismatched connection backends for passthrough",
+        )),
+    }
+}
