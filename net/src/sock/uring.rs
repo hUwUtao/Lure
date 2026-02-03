@@ -178,10 +178,10 @@ async fn relay(from: StreamHandle, to: StreamHandle) -> io::Result<()> {
         if n == 0 {
             return Ok(());
         }
-        /* Optimize: truncate buffer to only needed data instead of allocating new vector */
+        /* Optimize: pass only needed data to write, reuse buffer on next iteration */
         buf.truncate(n);
         buf = write_all_handle(&to, buf).await?;
-        /* Resize buffer back to capacity for reuse */
+        /* Resize buffer back to capacity for next read operation */
         buf.resize(BUF_CAP, 0);
     }
 }
