@@ -3,7 +3,7 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use anyhow::Context;
 use tokio::sync::{RwLock, mpsc, oneshot};
 
-use crate::{sock::Connection, utils::spawn_named};
+use crate::{sock::LureConnection, utils::spawn_named};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TunnelToken(pub [u8; 32]);
@@ -23,7 +23,7 @@ struct AgentHandle {
 
 struct PendingSession {
     target: SocketAddr,
-    respond: oneshot::Sender<Connection>,
+    respond: oneshot::Sender<LureConnection>,
 }
 
 enum TunnelCommand {
@@ -43,7 +43,7 @@ impl TunnelRegistry {
     pub async fn register_listener(
         self: &Arc<Self>,
         token: TunnelToken,
-        mut connection: Connection,
+        mut connection: LureConnection,
     ) -> anyhow::Result<()> {
         let (tx, mut rx) = mpsc::channel(8);
         {
@@ -79,7 +79,7 @@ impl TunnelRegistry {
         token: TunnelToken,
         session: SessionToken,
         target: SocketAddr,
-    ) -> anyhow::Result<oneshot::Receiver<Connection>> {
+    ) -> anyhow::Result<oneshot::Receiver<LureConnection>> {
         let (tx, rx) = oneshot::channel();
         {
             let mut pending = self.pending.write().await;
@@ -109,7 +109,7 @@ impl TunnelRegistry {
         &self,
         token: TunnelToken,
         session: SessionToken,
-        mut connection: Connection,
+        mut connection: LureConnection,
     ) -> anyhow::Result<()> {
         let pending = {
             let mut pending = self.pending.write().await;

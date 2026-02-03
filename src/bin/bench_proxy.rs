@@ -359,6 +359,7 @@ impl ProxyServer {
 
         let join = thread::spawn(move || match kind {
             BackendKind::Tokio => run_proxy_tokio(backend_addr, payload, addr_tx, stop_rx),
+            BackendKind::Epoll => run_proxy_tokio(backend_addr, payload, addr_tx, stop_rx),
             BackendKind::Uring => run_proxy_uring(backend_addr, payload, addr_tx, stop_rx),
         });
 
@@ -390,7 +391,7 @@ fn run_proxy_tokio(
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async move {
-                let listener = sock::Listener::bind("127.0.0.1:0".parse()?).await?;
+                let listener = sock::LureListener::bind("127.0.0.1:0".parse()?).await?;
                 let addr = listener.local_addr()?;
                 let _ = addr_tx.send(addr);
 
@@ -418,7 +419,7 @@ fn run_proxy_uring(
     mut stop_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> anyhow::Result<()> {
     net::sock::uring::start(async move {
-        let listener = sock::Listener::bind("127.0.0.1:0".parse()?).await?;
+        let listener = sock::LureListener::bind("127.0.0.1:0".parse()?).await?;
         let addr = listener.local_addr()?;
         let _ = addr_tx.send(addr);
 
@@ -438,11 +439,11 @@ fn run_proxy_uring(
 }
 
 async fn proxy_connection(
-    mut client: sock::Connection,
+    mut client: sock::LureConnection,
     backend_addr: SocketAddr,
     payload: usize,
 ) -> io::Result<()> {
-    let mut server = sock::Connection::connect(backend_addr).await?;
+    let mut server = sock::LureConnection::connect(backend_addr).await?;
     let _ = client.set_nodelay(true);
     let _ = server.set_nodelay(true);
 
@@ -466,8 +467,8 @@ async fn proxy_connection(
 }
 
 async fn relay_exact(
-    from: &mut sock::Connection,
-    to: &mut sock::Connection,
+    from: &mut sock::LureConnection,
+    to: &mut sock::LureConnection,
     mut buf: Vec<u8>,
     mut remaining: usize,
 ) -> io::Result<Vec<u8>> {

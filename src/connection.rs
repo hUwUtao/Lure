@@ -12,13 +12,13 @@ use opentelemetry::{
     metrics::{Counter, Histogram, Meter},
 };
 use serde_json::to_string as json_string;
-use crate::{sock::Connection, telemetry::get_meter};
+use crate::{sock::LureConnection, telemetry::get_meter};
 
 pub(crate) struct EncodedConnection<'a> {
     enc: PacketEncoder,
     dec: PacketDecoder,
     frame: PacketFrame,
-    stream: &'a mut Connection,
+    stream: &'a mut LureConnection,
     read_buf: Vec<u8>,
     metric: ConnectionMetric,
     intent: KeyValue,
@@ -77,7 +77,7 @@ impl<'a, 'b> PacketEncode for VersionedLoginStart<'a, 'b> {
 }
 
 impl<'a> EncodedConnection<'a> {
-    pub fn new(stream: &'a mut Connection, intent: SocketIntent) -> Self {
+    pub fn new(stream: &'a mut LureConnection, intent: SocketIntent) -> Self {
         let metric = get_meter();
         Self {
             enc: PacketEncoder::new(),
@@ -95,7 +95,7 @@ impl<'a> EncodedConnection<'a> {
     }
 
     pub fn with_buffered(
-        stream: &'a mut Connection,
+        stream: &'a mut LureConnection,
         intent: SocketIntent,
         buffered: Vec<u8>,
     ) -> Self {
@@ -246,11 +246,11 @@ impl<'a> EncodedConnection<'a> {
         Ok(())
     }
 
-    pub fn as_inner_mut(&mut self) -> &mut Connection {
+    pub fn as_inner_mut(&mut self) -> &mut LureConnection {
         self.stream
     }
 
-    pub fn as_inner(&self) -> &Connection {
+    pub fn as_inner(&self) -> &LureConnection {
         self.stream
     }
 

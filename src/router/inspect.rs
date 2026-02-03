@@ -416,13 +416,13 @@ pub struct InspectRegistry {
 
 impl InspectRegistry {
     pub fn new() -> Self {
-        let registry = Self {
+        
+        Self {
             instance: Arc::new(InstanceStatsAtomic::new()),
             routes: RwLock::new(HashMap::new()),
             tenants: RwLock::new(HashMap::new()),
             session_cursor: AtomicU64::new(1),
-        };
-        registry
+        }
     }
 
     pub fn set_instance_name(&self, inst: String) {

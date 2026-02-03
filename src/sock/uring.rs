@@ -67,7 +67,7 @@ async fn forward_loop<L>(
 where
     L: Fn(u64),
 {
-    const BUF_CAP: usize = 16 * 1024;
+    const BUF_CAP: usize = 64 * 1024;  /* Increased from 16KB to reduce syscalls on high throughput */
     let mut buf = Vec::with_capacity(BUF_CAP);
     loop {
         let (bytes_read, buf_out) = match read_into_handle(&from, buf).await {

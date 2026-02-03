@@ -82,6 +82,12 @@ pub struct ProcessMetricsService {
     // task_monitor: TaskMonitor,
 }
 
+impl Default for ProcessMetricsService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ProcessMetricsService {
     pub fn new() -> Self {
         let meter = get_meter();

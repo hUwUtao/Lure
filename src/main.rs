@@ -28,6 +28,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                 local.run_until(run()).await
             })
         }
+        BackendKind::Epoll => {
+            log::info!("socket backend: epoll ({})", backend.reason);
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            let local = tokio::task::LocalSet::new();
+            runtime.block_on(local.run_until(run()))
+        }
         BackendKind::Tokio => {
             if backend.reason.contains("init failed") {
                 log::warn!("socket backend: tokio ({})", backend.reason);

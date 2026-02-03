@@ -25,7 +25,7 @@ use crate::{
     metrics::HandshakeMetrics,
     packet::{OwnedHandshake, OwnedLoginStart, OwnedPacket},
     router::{Profile, ResolvedRoute, Route, RouterInstance, Session, SessionHandle},
-    sock::{BackendKind, Listener, backend_kind, passthrough_now},
+    sock::{BackendKind, LureListener, backend_kind, passthrough_now},
     telemetry::{EventEnvelope, EventServiceInstance, event::EventHook, get_meter, init_event},
     threat::{
         ClientFail, ClientIntent, IntentTag, ThreatControlService, ratelimit::RateLimiterController,
@@ -135,7 +135,7 @@ impl Lure {
         }
 
         // Start server.
-        let listener = Listener::bind(address).await?;
+        let listener = LureListener::bind(address).await?;
         let semaphore = Arc::new(Semaphore::new(max_connections));
         let rate_limiter: RateLimiterController<IpAddr> = RateLimiterController::new(10, cooldown);
 
@@ -189,7 +189,7 @@ impl Lure {
 
     async fn handle_connection(
         &self,
-        client_socket: crate::sock::Connection,
+        client_socket: crate::sock::LureConnection,
         address: SocketAddr,
     ) -> anyhow::Result<()> {
         LureLogger::new_connection(&address);
@@ -200,7 +200,7 @@ impl Lure {
 
     async fn handle_handshake(
         &self,
-        mut connection: crate::sock::Connection,
+        mut connection: crate::sock::LureConnection,
     ) -> anyhow::Result<()> {
         let start = Instant::now();
         let client_addr = *connection.addr();
@@ -552,7 +552,7 @@ impl Lure {
 
     async fn handle_tunnel_ingress(
         &self,
-        connection: crate::sock::Connection,
+        connection: crate::sock::LureConnection,
         hello: tun::AgentHello,
     ) -> anyhow::Result<()> {
         let token = TunnelToken(hello.token);
@@ -574,7 +574,7 @@ impl Lure {
 
     async fn read_ingress_hello(
         &self,
-        connection: &mut crate::sock::Connection,
+        connection: &mut crate::sock::LureConnection,
     ) -> anyhow::Result<IngressHello> {
         let mut buf = Vec::new();
         let mut read_buf = vec![0u8; 1024];
@@ -621,7 +621,7 @@ impl Lure {
 
     async fn read_tunnel_hello(
         &self,
-        connection: &mut crate::sock::Connection,
+        connection: &mut crate::sock::LureConnection,
         mut buf: Vec<u8>,
     ) -> anyhow::Result<tun::AgentHello> {
         loop {

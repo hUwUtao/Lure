@@ -195,6 +195,12 @@ enum RouterMetricsMessage {
     SessionsActive(u64),
 }
 
+impl Default for RouterInstance {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RouterInstance {
     pub fn new() -> Self {
         let metrics = Arc::new(RouterMetrics::new(&get_meter()));

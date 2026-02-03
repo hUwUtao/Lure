@@ -168,7 +168,7 @@ pub async fn passthrough_basic(a: &mut Connection, b: &mut Connection) -> io::Re
 }
 
 async fn relay(from: StreamHandle, to: StreamHandle) -> io::Result<()> {
-    const BUF_CAP: usize = 16 * 1024;
+    const BUF_CAP: usize = 64 * 1024;  /* Increased from 16KB to reduce syscalls on high throughput */
     let mut buf = vec![0u8; BUF_CAP];
     loop {
         let (n, out) = read_into_handle(&from, buf).await?;
@@ -176,8 +176,11 @@ async fn relay(from: StreamHandle, to: StreamHandle) -> io::Result<()> {
         if n == 0 {
             return Ok(());
         }
-        let data = buf[..n].to_vec();
-        let _ = write_all_handle(&to, data).await?;
+        /* Optimize: truncate buffer to only needed data instead of allocating new vector */
+        buf.truncate(n);
+        buf = write_all_handle(&to, buf).await?;
+        /* Resize buffer back to capacity for reuse */
+        buf.resize(BUF_CAP, 0);
     }
 }
 

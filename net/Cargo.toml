@@ -4,10 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+crossbeam-channel = "0.5"
+libc = "0.2"
 log = "0.4.22"
+num_cpus = "1.16"
 tokio = { version = "1.48", features = ["full", "rt-multi-thread", "tracing"] }
 tokio-uring = { git = "https://github.com/hUwUtao/tokio-uring.git", version = "0.5.0", features = ["bytes"] }
 io-uring = "0.6.0"
+
+[build-dependencies]
+cc = "1.0"
 
 [dev-dependencies]
 criterion = "0.5"
