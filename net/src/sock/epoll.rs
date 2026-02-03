@@ -249,6 +249,7 @@ impl EpollBackend {
                 let err = std::io::Error::last_os_error();
                 if err.kind() == std::io::ErrorKind::WouldBlock && retries < MAX_RETRIES {
                     retries += 1;
+                    thread::yield_now();
                     continue;
                 }
                 let _ = unsafe { close(fd_a) };
@@ -295,6 +296,7 @@ impl EpollBackend {
                     let err = std::io::Error::last_os_error();
                     if err.kind() == std::io::ErrorKind::WouldBlock && retries < MAX_RETRIES {
                         retries += 1;
+                        thread::yield_now();
                         continue;
                     }
                     break;
@@ -380,14 +382,7 @@ fn run_c_thread(cmd_fd: RawFd, done_fd: RawFd, max_conns: usize, buf_cap: usize,
 }
 
 fn forward_done(fd: RawFd, done_tx: Sender<EpollDone>) {
-    // Set blocking mode to avoid busy-waiting on EAGAIN
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL, 0) };
-    if flags >= 0 {
-        unsafe {
-            libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK);
-        }
-    }
-
+    // Keep fd in non-blocking mode to avoid thread blocking
     let mut buf: [MaybeUninit<EpollDone>; 32] = unsafe { MaybeUninit::uninit().assume_init() };
     loop {
         let n = unsafe {
@@ -397,7 +392,16 @@ fn forward_done(fd: RawFd, done_tx: Sender<EpollDone>) {
                 std::mem::size_of_val(&buf),
             )
         };
-        if n <= 0 {
+        if n < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::WouldBlock {
+                // Sleep briefly to avoid busy-waiting on EAGAIN
+                thread::sleep(std::time::Duration::from_millis(1));
+                continue;
+            }
+            break;
+        }
+        if n == 0 {
             break;
         }
         let count = n as usize / std::mem::size_of::<EpollDone>();

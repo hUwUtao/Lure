@@ -45,15 +45,18 @@ impl TunnelRegistry {
         token: TunnelToken,
         mut connection: LureConnection,
     ) -> anyhow::Result<()> {
+        let (tx, mut rx) = mpsc::channel(8);
+
+        // INSERT INTO REGISTRY FIRST (before spawning task)
         {
-            let agents = self.agents.read().await;
+            let mut agents = self.agents.write().await;
             if agents.contains_key(&token) {
                 anyhow::bail!("tunnel token already registered");
             }
+            agents.insert(token, AgentHandle { tx: tx.clone() });
         }
 
-        let (tx, mut rx) = mpsc::channel(8);
-
+        // SPAWN TASK SECOND (after registration)
         let registry = Arc::clone(self);
         spawn_named("tunnel-agent-listener", async move {
             while let Some(cmd) = rx.recv().await {
@@ -74,9 +77,6 @@ impl TunnelRegistry {
             agents.remove(&token);
         })
         .context("failed to spawn tunnel listener task")?;
-
-        let mut agents = self.agents.write().await;
-        agents.insert(token, AgentHandle { tx });
 
         Ok(())
     }
