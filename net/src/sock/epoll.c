@@ -54,10 +54,11 @@ static inline size_t buf_free(LureBuf* buf) {
 }
 
 static inline size_t buf_contiguous_write(LureBuf* buf) {
+    size_t free = buf_free(buf);
     if (buf->write_pos >= buf->read_pos) {
-        return buf->cap - buf->write_pos;
+        return (buf->cap - buf->write_pos) > free ? free : (buf->cap - buf->write_pos);
     }
-    return buf->read_pos - buf->write_pos - 1;
+    return (buf->read_pos - buf->write_pos - 1) > free ? free : (buf->read_pos - buf->write_pos - 1);
 }
 
 static inline size_t buf_contiguous_read(LureBuf* buf) {
@@ -538,11 +539,8 @@ void lure_epoll_thread_shutdown(LureEpollThread* thread) {
     if (!thread) {
         return;
     }
-    LureEpollCmd cmd;
-    cmd.fd_a = -1;
-    cmd.fd_b = -1;
-    cmd.id = 0;
-    (void)write(thread->cmd_fd, &cmd, sizeof(cmd));
+    /* Shutdown is initiated by the Rust caller via its retained write end of the pipe;
+       do not attempt to write from the C thread as cmd_fd is the read end only. */
 }
 
 void lure_epoll_thread_free(LureEpollThread* thread) {
@@ -607,15 +605,14 @@ static int relay_pair(int fd_a, int fd_b, LureEpollStats* stats) {
             unpack_key(key, &idx, &side);
             uint32_t ev = events[i].events;
             if (ev & (EPOLLERR | EPOLLHUP)) {
-                close(fd_a);
-                close(fd_b);
-                free(buf);
-                close(temp.epoll_fd);
+                int saved_errno = errno;
                 if (stats) {
                     *stats = conn.stats;
                 }
+                free(buf);
+                close(temp.epoll_fd);
                 lure_panic_if(&temp, 1);
-                return -errno;
+                return saved_errno != 0 ? -saved_errno : -1;
             }
             if (ev & EPOLLIN) {
                 handle_read(&temp, 0, side);
@@ -632,8 +629,6 @@ static int relay_pair(int fd_a, int fd_b, LureEpollStats* stats) {
                 return -errno;
             }
             if ((conn.a_eof && conn.b_eof) && buf_avail(&conn.a2b) == 0 && buf_avail(&conn.b2a) == 0) {
-                close(fd_a);
-                close(fd_b);
                 if (stats) {
                     *stats = conn.stats;
                 }

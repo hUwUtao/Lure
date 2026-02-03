@@ -162,8 +162,10 @@ pub async fn passthrough_basic(a: &mut Connection, b: &mut Connection) -> io::Re
     let b_stream = b.stream_handle();
     let a_stream = a.stream_handle();
     let right = spawn(async move { relay(b_stream, a_stream).await });
-    let _ = left.await?;
-    let _ = right.await?;
+    let left_res = left.await?;
+    left_res?;
+    let right_res = right.await?;
+    right_res?;
     Ok(())
 }
 

@@ -109,7 +109,23 @@ pub fn decode_agent_hello(buf: &[u8]) -> Result<Option<(AgentHello, usize)>, Tun
     )))
 }
 
-pub fn encode_agent_hello(hello: &AgentHello, out: &mut Vec<u8>) {
+pub fn encode_agent_hello(hello: &AgentHello, out: &mut Vec<u8>) -> Result<(), TunnelError> {
+    // Validate intent/session invariant: only Connect may have a session, others must not
+    match hello.intent {
+        Intent::Connect => {
+            // Connect must have a session
+            if hello.session.is_none() {
+                return Err(TunnelError::InvalidIntent(hello.intent as u8));
+            }
+        }
+        Intent::Listen => {
+            // Listen must not have a session
+            if hello.session.is_some() {
+                return Err(TunnelError::InvalidIntent(hello.intent as u8));
+            }
+        }
+    }
+
     out.extend_from_slice(&MAGIC);
     out.push(hello.version);
     out.push(hello.intent as u8);
@@ -117,6 +133,7 @@ pub fn encode_agent_hello(hello: &AgentHello, out: &mut Vec<u8>) {
     if let Some(session) = hello.session {
         out.extend_from_slice(&session);
     }
+    Ok(())
 }
 
 pub fn encode_server_msg(msg: &ServerMsg, out: &mut Vec<u8>) {

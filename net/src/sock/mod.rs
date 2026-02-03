@@ -450,22 +450,3 @@ impl LureConnection {
     }
 }
 
-pub trait BackendRuntime {
-    type ART;
-}
-
-pub struct TokioBackend;
-pub struct EpollBackend;
-pub struct UringBackend;
-
-impl BackendRuntime for TokioBackend {
-    type ART = ::tokio::runtime::Handle;
-}
-
-impl BackendRuntime for EpollBackend {
-    type ART = ::tokio::runtime::Handle;
-}
-
-impl BackendRuntime for UringBackend {
-    type ART = tokio_uring::runtime::Runtime;
-}

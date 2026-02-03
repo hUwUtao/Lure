@@ -229,19 +229,39 @@ impl EpollBackend {
             id,
         };
 
-        let rc = unsafe {
-            write(
-                self.workers[idx].cmd_fd,
-                &cmd as *const EpollCmd as *const c_void,
-                std::mem::size_of::<EpollCmd>(),
-            )
+        let cmd_bytes = unsafe {
+            std::slice::from_raw_parts(&cmd as *const EpollCmd as *const u8, std::mem::size_of::<EpollCmd>())
         };
+        let mut bytes_written = 0;
+        const MAX_RETRIES: usize = 10;
+        let mut retries = 0;
 
-        if rc < 0 {
-            let _ = unsafe { close(fd_a) };
-            let _ = unsafe { close(fd_b) };
-            let _ = self.pending.lock().unwrap().remove(&id);
-            return Err(io::Error::last_os_error());
+        loop {
+            let rc = unsafe {
+                write(
+                    self.workers[idx].cmd_fd,
+                    cmd_bytes[bytes_written..].as_ptr() as *const c_void,
+                    cmd_bytes.len() - bytes_written,
+                )
+            };
+
+            if rc < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::WouldBlock && retries < MAX_RETRIES {
+                    retries += 1;
+                    continue;
+                }
+                let _ = unsafe { close(fd_a) };
+                let _ = unsafe { close(fd_b) };
+                let _ = self.pending.lock().unwrap().remove(&id);
+                return Err(err);
+            }
+
+            bytes_written += rc as usize;
+            if bytes_written >= cmd_bytes.len() {
+                break;
+            }
+            retries = 0;
         }
 
         Ok(rx)
@@ -254,14 +274,38 @@ impl EpollBackend {
             fd_b: -1,
             id: 0,
         };
+        let cmd_bytes = unsafe {
+            std::slice::from_raw_parts(&cmd as *const EpollCmd as *const u8, std::mem::size_of::<EpollCmd>())
+        };
         for worker in &self.workers {
-            let _ = unsafe {
-                write(
-                    worker.cmd_fd,
-                    &cmd as *const EpollCmd as *const c_void,
-                    std::mem::size_of::<EpollCmd>(),
-                )
-            };
+            let mut bytes_written = 0;
+            const MAX_RETRIES: usize = 10;
+            let mut retries = 0;
+
+            loop {
+                let rc = unsafe {
+                    write(
+                        worker.cmd_fd,
+                        cmd_bytes[bytes_written..].as_ptr() as *const c_void,
+                        cmd_bytes.len() - bytes_written,
+                    )
+                };
+
+                if rc < 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() == std::io::ErrorKind::WouldBlock && retries < MAX_RETRIES {
+                        retries += 1;
+                        continue;
+                    }
+                    break;
+                }
+
+                bytes_written += rc as usize;
+                if bytes_written >= cmd_bytes.len() {
+                    break;
+                }
+                retries = 0;
+            }
         }
     }
 
@@ -336,6 +380,14 @@ fn run_c_thread(cmd_fd: RawFd, done_fd: RawFd, max_conns: usize, buf_cap: usize,
 }
 
 fn forward_done(fd: RawFd, done_tx: Sender<EpollDone>) {
+    // Set blocking mode to avoid busy-waiting on EAGAIN
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL, 0) };
+    if flags >= 0 {
+        unsafe {
+            libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK);
+        }
+    }
+
     let mut buf: [MaybeUninit<EpollDone>; 32] = unsafe { MaybeUninit::uninit().assume_init() };
     loop {
         let n = unsafe {

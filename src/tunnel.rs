@@ -45,14 +45,17 @@ impl TunnelRegistry {
         token: TunnelToken,
         mut connection: LureConnection,
     ) -> anyhow::Result<()> {
-        let (tx, mut rx) = mpsc::channel(8);
         {
-            let mut agents = self.agents.write().await;
-            agents.insert(token, AgentHandle { tx: tx.clone() });
+            let agents = self.agents.read().await;
+            if agents.contains_key(&token) {
+                anyhow::bail!("tunnel token already registered");
+            }
         }
 
+        let (tx, mut rx) = mpsc::channel(8);
+
         let registry = Arc::clone(self);
-        let _ = spawn_named("tunnel-agent-listener", async move {
+        spawn_named("tunnel-agent-listener", async move {
             while let Some(cmd) = rx.recv().await {
                 let mut buf = Vec::new();
                 match cmd {
@@ -69,7 +72,11 @@ impl TunnelRegistry {
             }
             let mut agents = registry.agents.write().await;
             agents.remove(&token);
-        });
+        })
+        .context("failed to spawn tunnel listener task")?;
+
+        let mut agents = self.agents.write().await;
+        agents.insert(token, AgentHandle { tx });
 
         Ok(())
     }
@@ -96,13 +103,18 @@ impl TunnelRegistry {
             anyhow::bail!("no active tunnel agent registered for token");
         };
 
-        agent
+        match agent
             .tx
             .send(TunnelCommand::OfferSession { session })
             .await
-            .context("failed to notify tunnel agent")?;
-
-        Ok(rx)
+        {
+            Ok(()) => Ok(rx),
+            Err(_) => {
+                let mut pending = self.pending.write().await;
+                pending.remove(&session);
+                anyhow::bail!("failed to notify tunnel agent")
+            }
+        }
     }
 
     pub async fn accept_connect(

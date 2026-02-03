@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 
 use tun::{AgentHello, Intent, ServerMsg};
+use base64::Engine;
 
 fn parse_token(input: &str) -> Result<[u8; 32], String> {
     let trimmed = input.trim();
@@ -13,7 +14,9 @@ fn parse_token(input: &str) -> Result<[u8; 32], String> {
         }
         return Ok(out);
     }
-    let decoded = base64::decode(trimmed).map_err(|err| err.to_string())?;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(trimmed)
+        .map_err(|err| err.to_string())?;
     if decoded.len() != 32 {
         return Err(format!("expected 32 bytes, got {}", decoded.len()));
     }
@@ -44,7 +47,7 @@ async fn send_agent_hello(
     hello: AgentHello,
 ) -> anyhow::Result<()> {
     let mut buf = Vec::new();
-    tun::encode_agent_hello(&hello, &mut buf);
+    tun::encode_agent_hello(&hello, &mut buf)?;
     conn.write_all(buf).await?;
     Ok(())
 }
@@ -104,6 +107,11 @@ async fn run(ingress: SocketAddr, token: [u8; 32]) -> anyhow::Result<()> {
                         let _ = handle_session(ingress, token, session).await;
                     });
                 }
+                net::sock::BackendKind::Epoll => {
+                    tokio::spawn(async move {
+                        let _ = handle_session(ingress, token, session).await;
+                    });
+                }
                 net::sock::BackendKind::Uring => {
                     net::sock::uring::spawn(async move {
                         let _ = handle_session(ingress, token, session).await;
@@ -143,7 +151,7 @@ fn main() {
     };
 
     match net::sock::backend_kind() {
-        net::sock::BackendKind::Tokio => {
+        net::sock::BackendKind::Tokio | net::sock::BackendKind::Epoll => {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
