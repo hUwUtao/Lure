@@ -1,4 +1,4 @@
-use std::{os::fd::AsRawFd, sync::Arc, time::Duration};
+use std::{os::fd::AsRawFd, sync::Arc, thread};
 
 use net::sock::epoll::{duplicate_fd, passthrough};
 
@@ -21,14 +21,18 @@ pub(crate) async fn passthrough_now(
             .await;
     });
 
-    let stats = tokio::task::spawn_blocking(move || passthrough(client_fd, server_fd))
-        .await
-        .map_err(|err| ReportableError::from(anyhow::anyhow!(err.to_string())))??;
+    // Spawn a plain OS thread to do the synchronous passthrough work
+    let passthrough_thread = thread::spawn(move || passthrough(client_fd, server_fd));
+
+    // Wait for the thread to finish (blocks until done)
+    let stats = passthrough_thread
+        .join()
+        .map_err(|_| ReportableError::from(anyhow::anyhow!("passthrough thread panicked")))?
+        .map_err(|e| ReportableError::from(anyhow::anyhow!(e.to_string())))?;
 
     session.inspect.record_c2s(stats.c2s_bytes);
     session.inspect.record_s2c(stats.s2c_bytes);
 
-    tokio::time::sleep(Duration::from_millis(110)).await;
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     let _ = metrics_task.await;
 

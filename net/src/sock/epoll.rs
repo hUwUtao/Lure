@@ -249,7 +249,7 @@ impl EpollBackend {
                 if err.kind() == std::io::ErrorKind::WouldBlock {
                     // Exponential backoff: retry indefinitely with growing sleep duration
                     thread::sleep(std::time::Duration::from_millis(backoff_ms));
-                    backoff_ms = (backoff_ms * 2).min(100); // Cap at 100ms
+                    backoff_ms = (backoff_ms * 2).min(10); // Cap at 10ms instead of 100ms
                     continue;
                 }
                 let _ = unsafe { close(fd_a) };
@@ -296,7 +296,7 @@ impl EpollBackend {
                     if err.kind() == std::io::ErrorKind::WouldBlock {
                         // Exponential backoff: retry indefinitely with growing sleep duration
                         thread::sleep(std::time::Duration::from_millis(backoff_ms));
-                        backoff_ms = (backoff_ms * 2).min(100); // Cap at 100ms
+                        backoff_ms = (backoff_ms * 2).min(10); // Cap at 10ms instead of 100ms
                         continue;
                     }
                     break;
@@ -382,36 +382,66 @@ fn run_c_thread(cmd_fd: RawFd, done_fd: RawFd, max_conns: usize, buf_cap: usize,
 }
 
 fn forward_done(fd: RawFd, done_tx: Sender<EpollDone>) {
-    // Keep fd in non-blocking mode to avoid thread blocking
+    // Create dedicated epoll instance for done pipe to avoid polling
+    let epoll_fd = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
+    if epoll_fd < 0 {
+        unsafe { libc::close(fd) };
+        return;
+    }
+
+    // Register done_read fd for EPOLLIN events
+    let mut ev = libc::epoll_event {
+        events: (libc::EPOLLIN | libc::EPOLLERR | libc::EPOLLHUP) as u32,
+        u64: 0,
+    };
+    if unsafe { libc::epoll_ctl(epoll_fd, libc::EPOLL_CTL_ADD, fd, &mut ev) } < 0 {
+        unsafe {
+            libc::close(epoll_fd);
+            libc::close(fd);
+        }
+        return;
+    }
+
     let mut buf: [MaybeUninit<EpollDone>; 32] = unsafe { MaybeUninit::uninit().assume_init() };
+    let mut events = [libc::epoll_event { events: 0, u64: 0 }; 1];
+
     loop {
-        let n = unsafe {
-            read(
-                fd,
-                buf.as_mut_ptr() as *mut c_void,
-                std::mem::size_of_val(&buf),
-            )
-        };
+        // Wait for events with 100ms timeout for clean shutdown
+        let n = unsafe { libc::epoll_wait(epoll_fd, events.as_mut_ptr(), 1, 100) };
+
         if n < 0 {
-            let err = std::io::Error::last_os_error();
-            if err.kind() == std::io::ErrorKind::WouldBlock {
-                // Sleep briefly to avoid busy-waiting on EAGAIN
-                thread::sleep(std::time::Duration::from_millis(1));
+            if unsafe { *libc::__errno_location() } == libc::EINTR {
                 continue;
             }
             break;
         }
+
         if n == 0 {
-            break;
+            // Timeout - loop back to check for more events
+            continue;
         }
-        let count = n as usize / std::mem::size_of::<EpollDone>();
-        for i in 0..count {
-            let done = unsafe { buf[i].assume_init() };
-            let _ = done_tx.send(done);
+
+        // Data available - read all pending done notifications
+        loop {
+            let bytes = unsafe {
+                read(fd, buf.as_mut_ptr() as *mut c_void, std::mem::size_of_val(&buf))
+            };
+
+            if bytes <= 0 {
+                break; // No more data or error
+            }
+
+            let count = bytes as usize / std::mem::size_of::<EpollDone>();
+            for i in 0..count {
+                let done = unsafe { buf[i].assume_init() };
+                let _ = done_tx.send(done);
+            }
         }
     }
+
     unsafe {
-        let _ = close(fd);
+        libc::close(epoll_fd);
+        libc::close(fd);
     }
 }
 

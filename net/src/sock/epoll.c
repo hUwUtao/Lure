@@ -38,7 +38,7 @@ typedef struct {
     uint8_t a_dirty;  /* epoll interest needs update */
     uint8_t b_dirty;  /* epoll interest needs update */
     LureEpollStats stats;
-} LureConn;
+} __attribute__((aligned(64))) LureConn;  /* Cache-line alignment (64 bytes) for L1/L2 cache optimization */
 
 /* Helper functions for ring buffer operations */
 static inline size_t buf_avail(LureBuf* buf) {
