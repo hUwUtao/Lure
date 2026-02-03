@@ -563,7 +563,7 @@ static int relay_pair(int fd_a, int fd_b, LureEpollStats* stats) {
     if (temp.epoll_fd < 0) {
         return -1;
     }
-    temp.buf_cap = 64 * 1024;  /* Increased from 16KB to reduce syscalls on high throughput */
+    temp.buf_cap = 4 * 1024;  /* 4KB fits in L1 cache, reduces cache misses */
     temp.done_fd = -1;
     temp.panic_on_error = lure_should_panic();
 
