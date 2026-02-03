@@ -2,5 +2,5 @@
 /settings.toml
 /*.png
 /flamegraph.svg
-/perf.data
 .env
+perf*
