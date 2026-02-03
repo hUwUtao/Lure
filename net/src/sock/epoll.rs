@@ -233,8 +233,7 @@ impl EpollBackend {
             std::slice::from_raw_parts(&cmd as *const EpollCmd as *const u8, std::mem::size_of::<EpollCmd>())
         };
         let mut bytes_written = 0;
-        const MAX_RETRIES: usize = 10;
-        let mut retries = 0;
+        let mut backoff_ms = 1u64;
 
         loop {
             let rc = unsafe {
@@ -247,9 +246,10 @@ impl EpollBackend {
 
             if rc < 0 {
                 let err = std::io::Error::last_os_error();
-                if err.kind() == std::io::ErrorKind::WouldBlock && retries < MAX_RETRIES {
-                    retries += 1;
-                    thread::yield_now();
+                if err.kind() == std::io::ErrorKind::WouldBlock {
+                    // Exponential backoff: retry indefinitely with growing sleep duration
+                    thread::sleep(std::time::Duration::from_millis(backoff_ms));
+                    backoff_ms = (backoff_ms * 2).min(100); // Cap at 100ms
                     continue;
                 }
                 let _ = unsafe { close(fd_a) };
@@ -262,7 +262,7 @@ impl EpollBackend {
             if bytes_written >= cmd_bytes.len() {
                 break;
             }
-            retries = 0;
+            backoff_ms = 1; // Reset backoff on successful partial write
         }
 
         Ok(rx)
@@ -280,8 +280,7 @@ impl EpollBackend {
         };
         for worker in &self.workers {
             let mut bytes_written = 0;
-            const MAX_RETRIES: usize = 10;
-            let mut retries = 0;
+            let mut backoff_ms = 1u64;
 
             loop {
                 let rc = unsafe {
@@ -294,9 +293,10 @@ impl EpollBackend {
 
                 if rc < 0 {
                     let err = std::io::Error::last_os_error();
-                    if err.kind() == std::io::ErrorKind::WouldBlock && retries < MAX_RETRIES {
-                        retries += 1;
-                        thread::yield_now();
+                    if err.kind() == std::io::ErrorKind::WouldBlock {
+                        // Exponential backoff: retry indefinitely with growing sleep duration
+                        thread::sleep(std::time::Duration::from_millis(backoff_ms));
+                        backoff_ms = (backoff_ms * 2).min(100); // Cap at 100ms
                         continue;
                     }
                     break;
@@ -306,7 +306,7 @@ impl EpollBackend {
                 if bytes_written >= cmd_bytes.len() {
                     break;
                 }
-                retries = 0;
+                backoff_ms = 1; // Reset backoff on successful partial write
             }
         }
     }

@@ -130,8 +130,7 @@ impl Connection {
     }
 
     pub(crate) async fn shutdown(&mut self) -> io::Result<()> {
-        let _ = self.stream.shutdown(std::net::Shutdown::Both);
-        Ok(())
+        self.stream.shutdown(std::net::Shutdown::Both)
     }
 }
 

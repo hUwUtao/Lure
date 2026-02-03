@@ -22,6 +22,7 @@ struct AgentHandle {
 }
 
 struct PendingSession {
+    tunnel_token: TunnelToken,
     target: SocketAddr,
     respond: oneshot::Sender<LureConnection>,
 }
@@ -90,7 +91,7 @@ impl TunnelRegistry {
         let (tx, rx) = oneshot::channel();
         {
             let mut pending = self.pending.write().await;
-            pending.insert(session, PendingSession { target, respond: tx });
+            pending.insert(session, PendingSession { tunnel_token: token, target, respond: tx });
         }
 
         let agent = {
@@ -130,6 +131,11 @@ impl TunnelRegistry {
         let Some(pending) = pending else {
             anyhow::bail!("no pending tunnel session");
         };
+
+        // Validate that the provided token matches the one that created this session
+        if pending.tunnel_token != token {
+            anyhow::bail!("tunnel token mismatch: unauthorized accept attempt");
+        }
 
         let mut buf = Vec::new();
         tun::encode_server_msg(&tun::ServerMsg::TargetAddr(pending.target), &mut buf);
