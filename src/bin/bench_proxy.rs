@@ -14,11 +14,30 @@ use anyhow::Context;
 
 use lure::sock::{self, BackendKind};
 
+// High-precision nanosecond timer using CLOCK_MONOTONIC
+fn get_nanos() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    unsafe {
+        libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
+    }
+    (ts.tv_sec as u64) * 1_000_000_000 + (ts.tv_nsec as u64)
+}
+
 const DEFAULT_DURATION_SECS: u64 = 15;
 const DEFAULT_WARMUP_SECS: u64 = 5;
 const DEFAULT_CONCURRENCY: usize = 32;
 const DEFAULT_PAYLOAD: usize = 1024;
 const PROXY_BUF_SIZE: usize = 16 * 1024;
+
+// Nanosecond precision timestamps for each operation
+struct TimestampedLatency {
+    total_ns: u64,      // Total round-trip latency
+    write_ns: u64,      // Write phase latency
+    read_ns: u64,       // Read phase latency
+}
 
 struct BenchConfig {
     duration: Duration,
@@ -31,17 +50,20 @@ struct BenchResult {
     duration: Duration,
     total_ops: u64,
     total_bytes: u64,
-    latencies_ns: Vec<u64>,
+    latencies: Vec<TimestampedLatency>,
 }
 
 struct LatencyStats {
     count: usize,
     mean_us: f64,
     median_us: f64,
+    p50_us: f64,
     p95_us: f64,
     p99_us: f64,
     max_us: f64,
     stdev_us: f64,
+    write_mean_us: f64,
+    read_mean_us: f64,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -152,13 +174,13 @@ fn run_client_load(
     let start = Instant::now();
     let mut total_ops = 0u64;
     let mut total_bytes = 0u64;
-    let mut latencies_ns = Vec::new();
+    let mut latencies = Vec::new();
 
     for thread_result in rx {
         total_ops += thread_result.total_ops;
         total_bytes += thread_result.total_bytes;
         if record_latencies {
-            latencies_ns.extend(thread_result.latencies_ns);
+            latencies.extend(thread_result.latencies);
         }
     }
 
@@ -166,14 +188,14 @@ fn run_client_load(
         duration: start.elapsed(),
         total_ops,
         total_bytes,
-        latencies_ns,
+        latencies,
     })
 }
 
 struct ThreadResult {
     total_ops: u64,
     total_bytes: u64,
-    latencies_ns: Vec<u64>,
+    latencies: Vec<TimestampedLatency>,
 }
 
 fn client_worker(
@@ -183,7 +205,7 @@ fn client_worker(
     record_latencies: bool,
 ) -> ThreadResult {
     let mut total_ops = 0u64;
-    let mut latencies_ns = Vec::new();
+    let mut latencies = Vec::new();
 
     let mut stream = match TcpStream::connect(proxy_addr) {
         Ok(stream) => stream,
@@ -191,7 +213,7 @@ fn client_worker(
             return ThreadResult {
                 total_ops: 0,
                 total_bytes: 0,
-                latencies_ns,
+                latencies,
             }
         }
     };
@@ -201,23 +223,38 @@ fn client_worker(
     let mut read_buf = vec![0u8; payload];
 
     while Instant::now() < deadline {
-        let start = Instant::now();
+        let start_ns = get_nanos();
+
+        // Write phase
+        let write_start_ns = get_nanos();
         if stream.write_all(&write_buf).is_err() {
             break;
         }
+        let write_ns = get_nanos() - write_start_ns;
+
+        // Read phase
+        let read_start_ns = get_nanos();
         if stream.read_exact(&mut read_buf).is_err() {
             break;
         }
+        let read_ns = get_nanos() - read_start_ns;
+
+        let total_ns = get_nanos() - start_ns;
+
         total_ops += 1;
         if record_latencies {
-            latencies_ns.push(start.elapsed().as_nanos() as u64);
+            latencies.push(TimestampedLatency {
+                total_ns,
+                write_ns,
+                read_ns,
+            });
         }
     }
 
     ThreadResult {
         total_ops,
         total_bytes: total_ops * payload as u64 * 2,
-        latencies_ns,
+        latencies,
     }
 }
 
@@ -233,56 +270,75 @@ fn report(result: &BenchResult) {
     println!("  ops/sec: {:.2}", ops_per_sec);
     println!("  throughput: {:.2} MiB/s", mib_per_sec);
 
-    if result.latencies_ns.is_empty() {
+    if result.latencies.is_empty() {
         println!("  latency: (none)");
         return;
     }
 
-    let mut latencies = result.latencies_ns.clone();
-    if let Some(stats) = latency_stats(&mut latencies) {
+    if let Some(stats) = latency_stats(&result.latencies) {
         println!("  latency (us):");
-        println!("    mean: {:.2}", stats.mean_us);
-        println!("    median: {:.2}", stats.median_us);
-        println!("    p95: {:.2}", stats.p95_us);
-        println!("    p99: {:.2}", stats.p99_us);
-        println!("    max: {:.2}", stats.max_us);
-        println!("    stdev: {:.2}", stats.stdev_us);
+        println!("    mean: {:.3}", stats.mean_us);
+        println!("    median (p50): {:.3}", stats.p50_us);
+        println!("    p95: {:.3}", stats.p95_us);
+        println!("    p99: {:.3}", stats.p99_us);
+        println!("    max: {:.3}", stats.max_us);
+        println!("    stdev: {:.3}", stats.stdev_us);
+        println!("  breakdown:");
+        println!("    write avg: {:.3} us", stats.write_mean_us);
+        println!("    read avg: {:.3} us", stats.read_mean_us);
         println!("    samples: {}", stats.count);
     }
 }
 
-fn latency_stats(latencies_ns: &mut [u64]) -> Option<LatencyStats> {
-    if latencies_ns.is_empty() {
+fn latency_stats(latencies: &[TimestampedLatency]) -> Option<LatencyStats> {
+    if latencies.is_empty() {
         return None;
     }
 
-    latencies_ns.sort_unstable();
-    let count = latencies_ns.len();
-    let mut sum = 0f64;
-    let mut sum_sq = 0f64;
+    let count = latencies.len();
 
-    for &value in latencies_ns.iter() {
-        let us = value as f64 / 1_000.0;
-        sum += us;
-        sum_sq += us * us;
+    // Extract total latencies for percentile calculation
+    let mut total_latencies: Vec<u64> = latencies.iter().map(|l| l.total_ns).collect();
+    total_latencies.sort_unstable();
+
+    let mut total_sum = 0f64;
+    let mut total_sum_sq = 0f64;
+    let mut write_sum = 0f64;
+    let mut read_sum = 0f64;
+
+    for lat in latencies.iter() {
+        let total_us = lat.total_ns as f64 / 1_000.0;
+        let write_us = lat.write_ns as f64 / 1_000.0;
+        let read_us = lat.read_ns as f64 / 1_000.0;
+
+        total_sum += total_us;
+        total_sum_sq += total_us * total_us;
+        write_sum += write_us;
+        read_sum += read_us;
     }
 
-    let mean_us = sum / count as f64;
-    let variance = (sum_sq / count as f64) - (mean_us * mean_us);
+    let mean_us = total_sum / count as f64;
+    let variance = (total_sum_sq / count as f64) - (mean_us * mean_us);
     let stdev_us = variance.max(0.0).sqrt();
-    let median_us = percentile_us(latencies_ns, 50.0);
-    let p95_us = percentile_us(latencies_ns, 95.0);
-    let p99_us = percentile_us(latencies_ns, 99.0);
-    let max_us = *latencies_ns.last().unwrap() as f64 / 1_000.0;
+    let write_mean_us = write_sum / count as f64;
+    let read_mean_us = read_sum / count as f64;
+
+    let p50_us = percentile_us(&total_latencies, 50.0);
+    let p95_us = percentile_us(&total_latencies, 95.0);
+    let p99_us = percentile_us(&total_latencies, 99.0);
+    let max_us = *total_latencies.last().unwrap() as f64 / 1_000.0;
 
     Some(LatencyStats {
         count,
         mean_us,
-        median_us,
+        median_us: p50_us,
+        p50_us,
         p95_us,
         p99_us,
         max_us,
         stdev_us,
+        write_mean_us,
+        read_mean_us,
     })
 }
 

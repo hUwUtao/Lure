@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 crossbeam-channel = "0.5"
+dashmap = "5.5"
 libc = "0.2"
 log = "0.4.22"
 num_cpus = "1.16"

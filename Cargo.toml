@@ -14,7 +14,9 @@ members = ["net", "tun"]
 anyhow = "1.0"
 bytes = "1.10"
 log = "0.4.27"
+libc = "0.2"
 net = { path = "net" }
+num_cpus = "1.16"
 tun = { path = "tun" }
 opentelemetry = "0.31"
 opentelemetry-otlp = { version = "0.31", features = ["tokio", "http-proto", "reqwest-rustls-webpki-roots", "http-json"] }

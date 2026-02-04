@@ -1,17 +1,17 @@
 use std::{
-    collections::HashMap,
     io,
     mem::MaybeUninit,
     net::SocketAddr,
     os::fd::{AsRawFd, RawFd},
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     thread,
 };
 
 use crossbeam_channel::Sender;
+use dashmap::DashMap;
 use libc::{
     c_int, c_void, close, dup, pipe2, read, sched_param, sched_setscheduler, setpriority, write,
     O_CLOEXEC, O_NONBLOCK, PRIO_PROCESS, SCHED_RR,
@@ -158,22 +158,22 @@ pub struct EpollBackend {
     workers: Vec<WorkerHandle>,
     rr: AtomicUsize,
     next_id: AtomicU64,
-    pending: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<EpollDone>>>>,
+    pending: Arc<DashMap<u64, tokio::sync::oneshot::Sender<EpollDone>>>,
     shutdown: AtomicBool,
 }
 
 impl EpollBackend {
     pub fn new(worker_threads: usize, max_conns: usize, buf_cap: usize) -> io::Result<Self> {
         let (done_tx, done_rx) = crossbeam_channel::unbounded::<EpollDone>();
-        let pending: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<EpollDone>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let pending: Arc<DashMap<u64, tokio::sync::oneshot::Sender<EpollDone>>> =
+            Arc::new(DashMap::new());
         let pending_forward = Arc::clone(&pending);
 
         thread::Builder::new()
             .name("lure-epoll-done".to_string())
             .spawn(move || {
                 while let Ok(done) = done_rx.recv() {
-                    if let Some(tx) = pending_forward.lock().unwrap().remove(&done.id) {
+                    if let Some((_, tx)) = pending_forward.remove(&done.id) {
                         let _ = tx.send(done);
                     }
                 }
@@ -220,7 +220,7 @@ impl EpollBackend {
     pub fn spawn_pair(&self, fd_a: RawFd, fd_b: RawFd) -> io::Result<tokio::sync::oneshot::Receiver<EpollDone>> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.pending.lock().unwrap().insert(id, tx);
+        self.pending.insert(id, tx);
 
         let idx = self.rr.fetch_add(1, Ordering::Relaxed) % self.workers.len();
         let cmd = EpollCmd {
@@ -254,7 +254,7 @@ impl EpollBackend {
                 }
                 let _ = unsafe { close(fd_a) };
                 let _ = unsafe { close(fd_b) };
-                let _ = self.pending.lock().unwrap().remove(&id);
+                let _ = self.pending.remove(&id);
                 return Err(err);
             }
 
