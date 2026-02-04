@@ -34,9 +34,17 @@ const PROXY_BUF_SIZE: usize = 16 * 1024;
 
 // Nanosecond precision timestamps for each operation
 struct TimestampedLatency {
-    total_ns: u64,      // Total round-trip latency
-    write_ns: u64,      // Write phase latency
-    read_ns: u64,       // Read phase latency
+    total_ns: u64,      // Total round-trip latency (send_start to recv_end)
+    send_ns: u64,       // Send phase latency (time to write)
+    recv_ns: u64,       // Receive phase latency (time to read response)
+}
+
+// Request with embedded timestamp for validation
+#[repr(C)]
+struct PipelinedRequest {
+    seq_num: u64,       // Sequence number for matching
+    send_ts_ns: u64,    // Send timestamp (nanoseconds)
+    padding: [u8; 1008], // Pad to payload size
 }
 
 struct BenchConfig {
@@ -55,15 +63,15 @@ struct BenchResult {
 
 struct LatencyStats {
     count: usize,
-    mean_us: f64,
-    median_us: f64,
-    p50_us: f64,
-    p95_us: f64,
-    p99_us: f64,
-    max_us: f64,
-    stdev_us: f64,
-    write_mean_us: f64,
-    read_mean_us: f64,
+    mean_ms: f64,
+    median_ms: f64,
+    p50_ms: f64,
+    p95_ms: f64,
+    p99_ms: f64,
+    max_ms: f64,
+    stdev_ms: f64,
+    send_mean_ms: f64,
+    recv_mean_ms: f64,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -219,35 +227,71 @@ fn client_worker(
     };
     let _ = stream.set_nodelay(true);
 
-    let write_buf = vec![0u8; payload];
+    // Pipelined I/O: send multiple requests, then drain responses
+    // This measures send and receive latency separately
+    const PIPELINE_DEPTH: usize = 8;
+    let mut write_buf = vec![0u8; payload];
     let mut read_buf = vec![0u8; payload];
+    let mut pending_timestamps = Vec::new(); // vec of send_timestamp
 
-    while Instant::now() < deadline {
-        let start_ns = get_nanos();
+    // Pre-fill write buffer with data
+    for i in 0..payload {
+        write_buf[i] = (i % 256) as u8;
+    }
 
-        // Write phase
-        let write_start_ns = get_nanos();
-        if stream.write_all(&write_buf).is_err() {
+    loop {
+        let now = Instant::now();
+        if now >= deadline && pending_timestamps.is_empty() {
             break;
         }
-        let write_ns = get_nanos() - write_start_ns;
 
-        // Read phase
-        let read_start_ns = get_nanos();
-        if stream.read_exact(&mut read_buf).is_err() {
-            break;
+        // Send phase: queue up to PIPELINE_DEPTH requests in parallel
+        while pending_timestamps.len() < PIPELINE_DEPTH && now < deadline {
+            let send_start_ns = get_nanos();
+            match stream.write_all(&write_buf) {
+                Ok(_) => {
+                    let send_end_ns = get_nanos();
+                    pending_timestamps.push((send_start_ns, send_end_ns));
+                }
+                Err(_) => {
+                    return ThreadResult {
+                        total_ops,
+                        total_bytes: total_ops * payload as u64 * 2,
+                        latencies,
+                    };
+                }
+            }
         }
-        let read_ns = get_nanos() - read_start_ns;
 
-        let total_ns = get_nanos() - start_ns;
+        // Receive phase: drain responses in FIFO order
+        while !pending_timestamps.is_empty() {
+            let recv_start_ns = get_nanos();
+            match stream.read_exact(&mut read_buf) {
+                Ok(_) => {
+                    let recv_end_ns = get_nanos();
+                    let (send_start_ns, send_end_ns) = pending_timestamps.remove(0);
 
-        total_ops += 1;
-        if record_latencies {
-            latencies.push(TimestampedLatency {
-                total_ns,
-                write_ns,
-                read_ns,
-            });
+                    let send_ns = send_end_ns - send_start_ns;
+                    let recv_ns = recv_end_ns - recv_start_ns;
+                    let total_ns = recv_end_ns - send_start_ns;
+
+                    total_ops += 1;
+                    if record_latencies {
+                        latencies.push(TimestampedLatency {
+                            total_ns,
+                            send_ns,
+                            recv_ns,
+                        });
+                    }
+                }
+                Err(_) => {
+                    return ThreadResult {
+                        total_ops,
+                        total_bytes: total_ops * payload as u64 * 2,
+                        latencies,
+                    };
+                }
+            }
         }
     }
 
@@ -276,16 +320,16 @@ fn report(result: &BenchResult) {
     }
 
     if let Some(stats) = latency_stats(&result.latencies) {
-        println!("  latency (us):");
-        println!("    mean: {:.3}", stats.mean_us);
-        println!("    median (p50): {:.3}", stats.p50_us);
-        println!("    p95: {:.3}", stats.p95_us);
-        println!("    p99: {:.3}", stats.p99_us);
-        println!("    max: {:.3}", stats.max_us);
-        println!("    stdev: {:.3}", stats.stdev_us);
-        println!("  breakdown:");
-        println!("    write avg: {:.3} us", stats.write_mean_us);
-        println!("    read avg: {:.3} us", stats.read_mean_us);
+        println!("  latency (ms):");
+        println!("    mean: {:.4}", stats.mean_ms);
+        println!("    median (p50): {:.4}", stats.p50_ms);
+        println!("    p95: {:.4}", stats.p95_ms);
+        println!("    p99: {:.4}", stats.p99_ms);
+        println!("    max: {:.4}", stats.max_ms);
+        println!("    stdev: {:.4}", stats.stdev_ms);
+        println!("  latency components (ms):");
+        println!("    send avg: {:.4}", stats.send_mean_ms);
+        println!("    recv avg: {:.4}", stats.recv_mean_ms);
         println!("    samples: {}", stats.count);
     }
 }
@@ -297,57 +341,57 @@ fn latency_stats(latencies: &[TimestampedLatency]) -> Option<LatencyStats> {
 
     let count = latencies.len();
 
-    // Extract total latencies for percentile calculation
+    // Extract total latencies for percentile calculation (in ns)
     let mut total_latencies: Vec<u64> = latencies.iter().map(|l| l.total_ns).collect();
     total_latencies.sort_unstable();
 
     let mut total_sum = 0f64;
     let mut total_sum_sq = 0f64;
-    let mut write_sum = 0f64;
-    let mut read_sum = 0f64;
+    let mut send_sum = 0f64;
+    let mut recv_sum = 0f64;
 
     for lat in latencies.iter() {
-        let total_us = lat.total_ns as f64 / 1_000.0;
-        let write_us = lat.write_ns as f64 / 1_000.0;
-        let read_us = lat.read_ns as f64 / 1_000.0;
+        let total_ms = lat.total_ns as f64 / 1_000_000.0;
+        let send_ms = lat.send_ns as f64 / 1_000_000.0;
+        let recv_ms = lat.recv_ns as f64 / 1_000_000.0;
 
-        total_sum += total_us;
-        total_sum_sq += total_us * total_us;
-        write_sum += write_us;
-        read_sum += read_us;
+        total_sum += total_ms;
+        total_sum_sq += total_ms * total_ms;
+        send_sum += send_ms;
+        recv_sum += recv_ms;
     }
 
-    let mean_us = total_sum / count as f64;
-    let variance = (total_sum_sq / count as f64) - (mean_us * mean_us);
-    let stdev_us = variance.max(0.0).sqrt();
-    let write_mean_us = write_sum / count as f64;
-    let read_mean_us = read_sum / count as f64;
+    let mean_ms = total_sum / count as f64;
+    let variance = (total_sum_sq / count as f64) - (mean_ms * mean_ms);
+    let stdev_ms = variance.max(0.0).sqrt();
+    let send_mean_ms = send_sum / count as f64;
+    let recv_mean_ms = recv_sum / count as f64;
 
-    let p50_us = percentile_us(&total_latencies, 50.0);
-    let p95_us = percentile_us(&total_latencies, 95.0);
-    let p99_us = percentile_us(&total_latencies, 99.0);
-    let max_us = *total_latencies.last().unwrap() as f64 / 1_000.0;
+    let p50_ms = percentile_ms(&total_latencies, 50.0);
+    let p95_ms = percentile_ms(&total_latencies, 95.0);
+    let p99_ms = percentile_ms(&total_latencies, 99.0);
+    let max_ms = *total_latencies.last().unwrap() as f64 / 1_000_000.0;
 
     Some(LatencyStats {
         count,
-        mean_us,
-        median_us: p50_us,
-        p50_us,
-        p95_us,
-        p99_us,
-        max_us,
-        stdev_us,
-        write_mean_us,
-        read_mean_us,
+        mean_ms,
+        median_ms: p50_ms,
+        p50_ms,
+        p95_ms,
+        p99_ms,
+        max_ms,
+        stdev_ms,
+        send_mean_ms,
+        recv_mean_ms,
     })
 }
 
-fn percentile_us(latencies_ns: &[u64], pct: f64) -> f64 {
+fn percentile_ms(latencies_ns: &[u64], pct: f64) -> f64 {
     if latencies_ns.is_empty() {
         return 0.0;
     }
     let rank = ((pct / 100.0) * (latencies_ns.len() as f64 - 1.0)).round() as usize;
-    latencies_ns[rank.min(latencies_ns.len() - 1)] as f64 / 1_000.0
+    latencies_ns[rank.min(latencies_ns.len() - 1)] as f64 / 1_000_000.0
 }
 
 struct EchoServer {
