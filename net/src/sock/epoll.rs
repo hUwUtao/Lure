@@ -13,8 +13,8 @@ use std::{
 use crossbeam_channel::Sender;
 use dashmap::DashMap;
 use libc::{
-    c_int, c_void, close, dup, pipe2, read, sched_param, sched_setscheduler, setpriority, write,
-    O_CLOEXEC, O_NONBLOCK, PRIO_PROCESS, SCHED_RR,
+    c_int, c_void, close, dup, pipe2, read, setpriority, write,
+    O_CLOEXEC, O_NONBLOCK, PRIO_PROCESS,
 };
 use tokio::net::{TcpListener, TcpStream};
 
@@ -456,11 +456,10 @@ fn make_pipe() -> io::Result<(RawFd, RawFd)> {
 
 fn set_worker_priority() {
     unsafe {
-        let mut param = sched_param { sched_priority: 10 };
-        let rc = sched_setscheduler(0, SCHED_RR, &mut param);
-        if rc != 0 {
-            let _ = setpriority(PRIO_PROCESS, 0, -10);
-        }
+        // Use SCHED_OTHER (normal scheduling) with high nice priority for low-latency
+        // This allows the kernel to idle the core when epoll_wait blocks, avoiding
+        // CPU saturation while maintaining responsive wakeups
+        let _ = setpriority(PRIO_PROCESS, 0, -15);
     }
 }
 

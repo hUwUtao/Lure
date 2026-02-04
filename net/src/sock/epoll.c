@@ -15,6 +15,12 @@
 #define LURE_EPOLL_SIDE_B 1u
 #define LURE_EPOLL_CMD_KEY UINT64_MAX
 
+/* splice syscall - zero-copy kernel-to-kernel data movement */
+extern ssize_t splice(int fd_in, loff_t *off_in, int fd_out, loff_t *off_out,
+                     size_t len, unsigned int flags);
+#define SPLICE_F_MOVE   1
+#define SPLICE_F_NONBLOCK 2
+
 /* Configuration */
 #define LURE_SMALL_BUF_SIZE (2 * 1024)     /* 2KB fits in L1 */
 #define LURE_MAX_BATCH 256                  /* Max vectored I/O per batch */
@@ -28,23 +34,24 @@
 #define CONN_B_EOF      0x20
 #define CONN_A_SHUTDOWN 0x40
 #define CONN_B_SHUTDOWN 0x80
+#define CONN_NO_SPLICE  0x100   /* splice not supported, use buffered I/O */
 
 /* Ultra-compact fast-path connection state (64 bytes) */
 typedef struct {
     int fd_a;
     int fd_b;
     uint64_t id;
-    uint8_t flags;              /* All state in one byte */
+    uint16_t flags;             /* Extended to 16 bits for CONN_NO_SPLICE */
     uint8_t dirty_a;
     uint8_t dirty_b;
-    uint8_t _pad0;
     uint16_t buf_a2b;           /* Buffer indices */
     uint16_t buf_b2a;
     uint64_t c2s_bytes;         /* Stats */
     uint64_t s2c_bytes;
     uint64_t c2s_chunks;
     uint64_t s2c_chunks;
-    uint8_t _pad[8];            /* Pad to 64 bytes */
+    uint32_t last_ev_a;         /* Cached event mask to avoid redundant epoll_ctl */
+    uint32_t last_ev_b;
 } __attribute__((aligned(64))) LureConnFast;
 
 _Static_assert(sizeof(LureConnFast) == 64, "Must be 64 bytes");
@@ -157,6 +164,15 @@ static inline void conn_set_eof_b(LureConnFast* conn) {
     conn->flags |= CONN_B_EOF;
 }
 
+static inline int conn_splice_disabled(LureConnFast* conn) {
+    return (conn->flags & CONN_NO_SPLICE) != 0;
+}
+
+static inline void conn_disable_splice(LureConnFast* conn) {
+    conn->flags |= CONN_NO_SPLICE;
+}
+
+
 /* Mark a connection as dirty to track epoll updates */
 static inline void mark_dirty(LureEpollThread* thread, uint32_t idx) {
     if (thread->dirty_count < 256) {
@@ -217,8 +233,7 @@ static void set_tcp_opts(int fd) {
     (void)setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
     (void)setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
 
-    int cork = 1;
-    (void)setsockopt(fd, IPPROTO_TCP, TCP_CORK, &cork, sizeof(cork));
+    /* TCP_CORK omitted: conflicts with TCP_NODELAY for low-latency forwarding */
 }
 
 /* ============================================================================
@@ -291,6 +306,8 @@ static void conn_init(LureEpollThread* thread, LureConnFast* conn,
     conn->s2c_bytes = 0;
     conn->c2s_chunks = 0;
     conn->s2c_chunks = 0;
+    conn->last_ev_a = 0;        /* Will be updated on first flush */
+    conn->last_ev_b = 0;
 }
 
 static void conn_close(LureEpollThread* thread, uint32_t idx) {
@@ -388,13 +405,21 @@ static void flush_epoll_updates(LureEpollThread* thread) {
 
         if (conn->dirty_a) {
             uint32_t ev = build_events(conn_should_read_a(conn), conn_should_write_a(conn));
-            epoll_mod(thread->epoll_fd, conn->fd_a, idx, LURE_EPOLL_SIDE_A, ev);
+            /* Only call epoll_ctl if event mask changed */
+            if (ev != conn->last_ev_a) {
+                epoll_mod(thread->epoll_fd, conn->fd_a, idx, LURE_EPOLL_SIDE_A, ev);
+                conn->last_ev_a = ev;
+            }
             conn->dirty_a = 0;
         }
 
         if (conn->dirty_b) {
             uint32_t ev = build_events(conn_should_read_b(conn), conn_should_write_b(conn));
-            epoll_mod(thread->epoll_fd, conn->fd_b, idx, LURE_EPOLL_SIDE_B, ev);
+            /* Only call epoll_ctl if event mask changed */
+            if (ev != conn->last_ev_b) {
+                epoll_mod(thread->epoll_fd, conn->fd_b, idx, LURE_EPOLL_SIDE_B, ev);
+                conn->last_ev_b = ev;
+            }
             conn->dirty_b = 0;
         }
     }
@@ -441,61 +466,114 @@ int lure_epoll_thread_run(LureEpollThread* thread) {
                 continue;
             }
 
-            /* Process reads immediately (inline) */
+            /* Process reads immediately (drain socket to reduce syscalls) */
             if (ev & EPOLLIN) {
-                int fd = side == LURE_EPOLL_SIDE_A ? conn->fd_a : conn->fd_b;
-                if (fd >= 0) {
-                    uint16_t buf_idx = side == LURE_EPOLL_SIDE_A ? conn->buf_a2b : conn->buf_b2a;
-                    RingPos* pos = &thread->buf_pool.positions[buf_idx];
-                    size_t write_space = ring_contiguous_write(pos, thread->buf_pool.buf_size);
+                int read_fd = side == LURE_EPOLL_SIDE_A ? conn->fd_a : conn->fd_b;
+                int write_fd = side == LURE_EPOLL_SIDE_A ? conn->fd_b : conn->fd_a;
+                if (read_fd >= 0 && write_fd >= 0) {
+                    /* Try zero-copy splice if not disabled for this connection */
+                    if (!conn_splice_disabled(conn)) {
+                        ssize_t spliced = splice(read_fd, NULL, write_fd, NULL, 65536,
+                                                SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
 
-                    if (write_space > 0) {
-                        uint8_t* buf_data = thread->buf_pool.data + buf_idx * thread->buf_pool.buf_size;
-                        ssize_t n = read(fd, buf_data + pos->write_pos, write_space);
-
-                        if (n > 0) {
-                            pos->write_pos = (pos->write_pos + n) % thread->buf_pool.buf_size;
+                        if (spliced > 0) {
+                            /* Success: record stats and mark dirty */
                             if (side == LURE_EPOLL_SIDE_A) {
-                                conn->c2s_bytes += n;
+                                conn->c2s_bytes += spliced;
                                 conn->c2s_chunks++;
                             } else {
-                                conn->s2c_bytes += n;
+                                conn->s2c_bytes += spliced;
                                 conn->s2c_chunks++;
                             }
                             mark_dirty(thread, idx);
-                        } else if (n == 0) {
+                        } else if (spliced == 0) {
+                            /* EOF: mark connection closed */
                             if (side == LURE_EPOLL_SIDE_A) {
                                 conn_set_eof_a(conn);
                             } else {
                                 conn_set_eof_b(conn);
                             }
                             mark_dirty(thread, idx);
-                        } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                        } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                            /* No data available, try again later */
+                        } else if (errno == EINVAL || errno == ENOSYS) {
+                            /* splice not supported: disable it for this connection */
+                            conn_disable_splice(conn);
+                            /* Fall through to buffered I/O below */
+                        } else {
+                            /* Unexpected error: close connection */
                             conn_close(thread, idx);
+                            continue;
                         }
+                    }
+
+                    /* Fallback to buffered I/O if splice failed or is disabled */
+                    if (conn_splice_disabled(conn)) {
+                        uint16_t buf_idx = side == LURE_EPOLL_SIDE_A ? conn->buf_a2b : conn->buf_b2a;
+                        RingPos* pos = &thread->buf_pool.positions[buf_idx];
+                        uint8_t* buf_data = thread->buf_pool.data + buf_idx * thread->buf_pool.buf_size;
+
+                        /* Drain socket: read until EAGAIN to minimize syscalls
+                         * This trades CPU per-event for fewer syscall transitions */
+                        while (1) {
+                            size_t write_space = ring_contiguous_write(pos, thread->buf_pool.buf_size);
+                            if (write_space == 0) break;  /* Buffer full */
+
+                            ssize_t n = read(read_fd, buf_data + pos->write_pos, write_space);
+
+                            if (n > 0) {
+                                pos->write_pos = (pos->write_pos + n) % thread->buf_pool.buf_size;
+                                if (side == LURE_EPOLL_SIDE_A) {
+                                    conn->c2s_bytes += n;
+                                    conn->c2s_chunks++;
+                                } else {
+                                    conn->s2c_bytes += n;
+                                    conn->s2c_chunks++;
+                                }
+                            } else if (n == 0) {
+                                if (side == LURE_EPOLL_SIDE_A) {
+                                    conn_set_eof_a(conn);
+                                } else {
+                                    conn_set_eof_b(conn);
+                                }
+                                break;
+                            } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                                break;  /* No more data available */
+                            } else {
+                                conn_close(thread, idx);
+                                break;
+                            }
+                        }
+                        mark_dirty(thread, idx);
                     }
                 }
             }
 
-            /* Process writes immediately (inline) */
+            /* Process writes immediately (drain buffer to reduce syscalls) */
             if (ev & EPOLLOUT) {
                 int write_fd = side == LURE_EPOLL_SIDE_A ? conn->fd_b : conn->fd_a;
                 if (write_fd >= 0) {
                     uint16_t buf_idx = side == LURE_EPOLL_SIDE_A ? conn->buf_a2b : conn->buf_b2a;
                     RingPos* pos = &thread->buf_pool.positions[buf_idx];
-                    size_t avail = ring_contiguous_read(pos, thread->buf_pool.buf_size);
 
-                    if (avail > 0) {
+                    /* Drain buffer: write until EAGAIN to minimize syscalls */
+                    while (1) {
+                        size_t avail = ring_contiguous_read(pos, thread->buf_pool.buf_size);
+                        if (avail == 0) break;  /* Buffer empty */
+
                         uint8_t* buf_data = thread->buf_pool.data + buf_idx * thread->buf_pool.buf_size;
                         ssize_t n = write(write_fd, buf_data + pos->read_pos, avail);
 
                         if (n > 0) {
                             pos->read_pos = (pos->read_pos + n) % thread->buf_pool.buf_size;
-                            mark_dirty(thread, idx);
-                        } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                        } else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                            break;  /* Socket buffer full, stop draining */
+                        } else if (n < 0) {
                             conn_close(thread, idx);
+                            break;
                         }
                     }
+                    mark_dirty(thread, idx);
                 }
             }
 
@@ -661,30 +739,67 @@ int lure_epoll_passthrough(int fd_a, int fd_b, LureEpollStats* stats) {
 
             if (events[i].events & EPOLLIN) {
                 int read_fd = side == LURE_EPOLL_SIDE_A ? fd_a : fd_b;
+                int write_fd = side == LURE_EPOLL_SIDE_A ? fd_b : fd_a;
                 uint16_t buf_idx = side == LURE_EPOLL_SIDE_A ? 0 : 1;
                 RingPos* pos = &thread.buf_pool.positions[buf_idx];
                 uint8_t* buf_data = thread.buf_pool.data + buf_idx * LURE_SMALL_BUF_SIZE;
 
-                size_t write_space = ring_contiguous_write(pos, LURE_SMALL_BUF_SIZE);
-                ssize_t n_read = read(read_fd, buf_data + pos->write_pos, write_space);
+                /* Try zero-copy splice if not disabled for this connection */
+                if (!conn_splice_disabled(&conn)) {
+                    ssize_t spliced = splice(read_fd, NULL, write_fd, NULL, 65536,
+                                            SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
 
-                if (n_read > 0) {
-                    pos->write_pos = (pos->write_pos + n_read) % LURE_SMALL_BUF_SIZE;
-                    if (side == LURE_EPOLL_SIDE_A) {
-                        conn.c2s_bytes += n_read;
-                        conn.c2s_chunks++;
+                    if (spliced > 0) {
+                        /* Success: record stats */
+                        if (side == LURE_EPOLL_SIDE_A) {
+                            conn.c2s_bytes += spliced;
+                            conn.c2s_chunks++;
+                        } else {
+                            conn.s2c_bytes += spliced;
+                            conn.s2c_chunks++;
+                        }
+                    } else if (spliced == 0) {
+                        /* EOF: mark connection closed */
+                        if (side == LURE_EPOLL_SIDE_A) {
+                            conn_set_eof_a(&conn);
+                        } else {
+                            conn_set_eof_b(&conn);
+                        }
+                    } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        /* No data available, fall through to buffered I/O attempt */
+                    } else if (errno == EINVAL || errno == ENOSYS) {
+                        /* splice not supported: disable it for this connection */
+                        conn_disable_splice(&conn);
+                        /* Fall through to buffered I/O below */
                     } else {
-                        conn.s2c_bytes += n_read;
-                        conn.s2c_chunks++;
+                        /* Unexpected error: close connection */
+                        goto fail;
                     }
-                } else if (n_read == 0) {
-                    if (side == LURE_EPOLL_SIDE_A) {
-                        conn_set_eof_a(&conn);
-                    } else {
-                        conn_set_eof_b(&conn);
+                }
+
+                /* Fallback to buffered I/O if splice failed or is disabled */
+                if (conn_splice_disabled(&conn)) {
+                    size_t write_space = ring_contiguous_write(pos, LURE_SMALL_BUF_SIZE);
+                    ssize_t n_read = read(read_fd, buf_data + pos->write_pos, write_space);
+
+                    if (n_read > 0) {
+                        pos->write_pos = (pos->write_pos + n_read) % LURE_SMALL_BUF_SIZE;
+                        if (side == LURE_EPOLL_SIDE_A) {
+                            conn.c2s_bytes += n_read;
+                            conn.c2s_chunks++;
+                        } else {
+                            conn.s2c_bytes += n_read;
+                            conn.s2c_chunks++;
+                        }
+                    } else if (n_read == 0) {
+                        if (side == LURE_EPOLL_SIDE_A) {
+                            conn_set_eof_a(&conn);
+                        } else {
+                            conn_set_eof_b(&conn);
+                        }
+                    } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                        goto fail;
                     }
-                } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                    goto fail;
                 }
             }
 
