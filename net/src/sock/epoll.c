@@ -282,9 +282,9 @@ static void conn_init(LureEpollThread* thread, LureConnFast* conn,
     conn->fd_a = fd_a;
     conn->fd_b = fd_b;
     conn->id = id;
-    conn->flags = CONN_A_READ | CONN_B_READ;  /* Start with read enabled */
-    conn->dirty_a = 0;
-    conn->dirty_b = 0;
+    conn->flags = CONN_A_READ | CONN_B_READ | CONN_A_WRITE | CONN_B_WRITE;  /* Start with read and write enabled */
+    conn->dirty_a = 1;
+    conn->dirty_b = 1;
     conn->buf_a2b = buf_a2b;
     conn->buf_b2a = buf_b2a;
     conn->c2s_bytes = 0;
