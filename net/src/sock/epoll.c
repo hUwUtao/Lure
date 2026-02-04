@@ -91,6 +91,10 @@ struct LureEpollThread {
     int read_count;
     int write_count;
 
+    /* Dirty list tracking (phase 2 optimization) */
+    uint32_t dirty_list[256];   /* Track dirty connections */
+    int dirty_count;
+
     /* Command buffer */
     uint8_t cmd_buf[sizeof(LureEpollCmd)];
     size_t cmd_buf_len;
@@ -151,6 +155,13 @@ static inline void conn_set_eof_a(LureConnFast* conn) {
 
 static inline void conn_set_eof_b(LureConnFast* conn) {
     conn->flags |= CONN_B_EOF;
+}
+
+/* Mark a connection as dirty to track epoll updates */
+static inline void mark_dirty(LureEpollThread* thread, uint32_t idx) {
+    if (thread->dirty_count < 256) {
+        thread->dirty_list[thread->dirty_count++] = idx;
+    }
 }
 
 /* ============================================================================
@@ -370,96 +381,28 @@ static int read_cmds(LureEpollThread* thread) {
    ============================================================================ */
 
 static void flush_epoll_updates(LureEpollThread* thread) {
-    for (size_t i = 0; i < thread->max_conns; i++) {
-        LureConnFast* conn = &thread->conns[i];
-        if (conn->fd_a < 0 && conn->fd_b < 0) continue;
+    /* Process only dirty connections (phase 2 optimization: no full scan) */
+    for (int i = 0; i < thread->dirty_count; i++) {
+        uint32_t idx = thread->dirty_list[i];
+        LureConnFast* conn = &thread->conns[idx];
 
         if (conn->dirty_a) {
             uint32_t ev = build_events(conn_should_read_a(conn), conn_should_write_a(conn));
-            epoll_mod(thread->epoll_fd, conn->fd_a, i, LURE_EPOLL_SIDE_A, ev);
+            epoll_mod(thread->epoll_fd, conn->fd_a, idx, LURE_EPOLL_SIDE_A, ev);
             conn->dirty_a = 0;
         }
 
         if (conn->dirty_b) {
             uint32_t ev = build_events(conn_should_read_b(conn), conn_should_write_b(conn));
-            epoll_mod(thread->epoll_fd, conn->fd_b, i, LURE_EPOLL_SIDE_B, ev);
+            epoll_mod(thread->epoll_fd, conn->fd_b, idx, LURE_EPOLL_SIDE_B, ev);
             conn->dirty_b = 0;
         }
     }
+    thread->dirty_count = 0;
 }
 
 /* ============================================================================
-   BATCHED I/O EXECUTION
-   ============================================================================ */
-
-static void execute_reads(LureEpollThread* thread) {
-    if (thread->read_count == 0) return;
-
-    /* Execute all reads in batch */
-    for (int i = 0; i < thread->read_count; i++) {
-        struct iovec* iov = &thread->read_vec[i];
-        BatchEntry* entry = &thread->read_batch[i];
-        LureConnFast* conn = &thread->conns[entry->conn_idx];
-
-        /* Perform read */
-        ssize_t n = read(entry->side == LURE_EPOLL_SIDE_A ? conn->fd_a : conn->fd_b,
-                        iov->iov_base, iov->iov_len);
-
-        if (n > 0) {
-            /* Update ring position */
-            uint16_t buf_idx = entry->side == LURE_EPOLL_SIDE_A ? conn->buf_a2b : conn->buf_b2a;
-            RingPos* pos = &thread->buf_pool.positions[buf_idx];
-            pos->write_pos = (pos->write_pos + n) % thread->buf_pool.buf_size;
-
-            /* Update stats */
-            if (entry->side == LURE_EPOLL_SIDE_A) {
-                conn->c2s_bytes += n;
-                conn->c2s_chunks++;
-            } else {
-                conn->s2c_bytes += n;
-                conn->s2c_chunks++;
-            }
-            entry->bytes = n;
-        } else if (n == 0) {
-            /* EOF */
-            if (entry->side == LURE_EPOLL_SIDE_A) {
-                conn_set_eof_a(conn);
-            } else {
-                conn_set_eof_b(conn);
-            }
-        } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
-            /* Error */
-            conn_close(thread, entry->conn_idx);
-        }
-    }
-}
-
-static void execute_writes(LureEpollThread* thread) {
-    if (thread->write_count == 0) return;
-
-    for (int i = 0; i < thread->write_count; i++) {
-        struct iovec* iov = &thread->write_vec[i];
-        BatchEntry* entry = &thread->write_batch[i];
-        LureConnFast* conn = &thread->conns[entry->conn_idx];
-
-        /* Write to the OTHER side's fd */
-        ssize_t n = write(entry->side == LURE_EPOLL_SIDE_A ? conn->fd_b : conn->fd_a,
-                         iov->iov_base, iov->iov_len);
-
-        if (n > 0) {
-            /* Consume from the buffer that side is writing from */
-            uint16_t buf_idx = entry->side == LURE_EPOLL_SIDE_A ? conn->buf_a2b : conn->buf_b2a;
-            RingPos* pos = &thread->buf_pool.positions[buf_idx];
-            pos->read_pos = (pos->read_pos + n) % thread->buf_pool.buf_size;
-            entry->bytes = n;
-        } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-            conn_close(thread, entry->conn_idx);
-        }
-    }
-}
-
-/* ============================================================================
-   MAIN EVENT LOOP
+   MAIN EVENT LOOP (Phase 2: Single-Pass Optimized)
    ============================================================================ */
 
 int lure_epoll_thread_run(LureEpollThread* thread) {
@@ -478,10 +421,7 @@ int lure_epoll_thread_run(LureEpollThread* thread) {
 
         if (n == 0) continue;
 
-        /* Phase 1: Process events and collect I/O operations */
-        thread->read_count = 0;
-        thread->write_count = 0;
-
+        /* Phase 2 optimization: Single-pass event processing (inline I/O) */
         for (int i = 0; i < n; i++) {
             uint64_t key = events[i].data.u64;
 
@@ -494,79 +434,81 @@ int lure_epoll_thread_run(LureEpollThread* thread) {
             uint32_t idx = 0, side = 0;
             unpack_key(key, &idx, &side);
             uint32_t ev = events[i].events;
+            LureConnFast* conn = &thread->conns[idx];
 
             if (ev & (EPOLLERR | EPOLLHUP)) {
                 conn_close(thread, idx);
                 continue;
             }
 
-            /* Collect read operations */
+            /* Process reads immediately (inline) */
             if (ev & EPOLLIN) {
-                int fd = side == LURE_EPOLL_SIDE_A ? thread->conns[idx].fd_a : thread->conns[idx].fd_b;
-                if (fd >= 0 && thread->read_count < LURE_MAX_BATCH) {
-                    LureConnFast* conn = &thread->conns[idx];
+                int fd = side == LURE_EPOLL_SIDE_A ? conn->fd_a : conn->fd_b;
+                if (fd >= 0) {
                     uint16_t buf_idx = side == LURE_EPOLL_SIDE_A ? conn->buf_a2b : conn->buf_b2a;
                     RingPos* pos = &thread->buf_pool.positions[buf_idx];
-
                     size_t write_space = ring_contiguous_write(pos, thread->buf_pool.buf_size);
+
                     if (write_space > 0) {
                         uint8_t* buf_data = thread->buf_pool.data + buf_idx * thread->buf_pool.buf_size;
-                        thread->read_vec[thread->read_count].iov_base = buf_data + pos->write_pos;
-                        thread->read_vec[thread->read_count].iov_len = write_space;
-                        thread->read_batch[thread->read_count].conn_idx = idx;
-                        thread->read_batch[thread->read_count].side = side;
-                        thread->read_count++;
+                        ssize_t n = read(fd, buf_data + pos->write_pos, write_space);
+
+                        if (n > 0) {
+                            pos->write_pos = (pos->write_pos + n) % thread->buf_pool.buf_size;
+                            if (side == LURE_EPOLL_SIDE_A) {
+                                conn->c2s_bytes += n;
+                                conn->c2s_chunks++;
+                            } else {
+                                conn->s2c_bytes += n;
+                                conn->s2c_chunks++;
+                            }
+                            mark_dirty(thread, idx);
+                        } else if (n == 0) {
+                            if (side == LURE_EPOLL_SIDE_A) {
+                                conn_set_eof_a(conn);
+                            } else {
+                                conn_set_eof_b(conn);
+                            }
+                            mark_dirty(thread, idx);
+                        } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                            conn_close(thread, idx);
+                        }
                     }
                 }
             }
 
-            /* Collect write operations */
+            /* Process writes immediately (inline) */
             if (ev & EPOLLOUT) {
-                /* When side A is ready to write, it writes to fd_b */
-                int write_fd = side == LURE_EPOLL_SIDE_A ? thread->conns[idx].fd_b : thread->conns[idx].fd_a;
-                if (write_fd >= 0 && thread->write_count < LURE_MAX_BATCH) {
-                    LureConnFast* conn = &thread->conns[idx];
-                    /* Get buffer that this side is reading from (to write out) */
+                int write_fd = side == LURE_EPOLL_SIDE_A ? conn->fd_b : conn->fd_a;
+                if (write_fd >= 0) {
                     uint16_t buf_idx = side == LURE_EPOLL_SIDE_A ? conn->buf_a2b : conn->buf_b2a;
                     RingPos* pos = &thread->buf_pool.positions[buf_idx];
-
                     size_t avail = ring_contiguous_read(pos, thread->buf_pool.buf_size);
+
                     if (avail > 0) {
                         uint8_t* buf_data = thread->buf_pool.data + buf_idx * thread->buf_pool.buf_size;
-                        thread->write_vec[thread->write_count].iov_base = buf_data + pos->read_pos;
-                        thread->write_vec[thread->write_count].iov_len = avail;
-                        thread->write_batch[thread->write_count].conn_idx = idx;
-                        thread->write_batch[thread->write_count].side = side;
-                        thread->write_count++;
+                        ssize_t n = write(write_fd, buf_data + pos->read_pos, avail);
+
+                        if (n > 0) {
+                            pos->read_pos = (pos->read_pos + n) % thread->buf_pool.buf_size;
+                            mark_dirty(thread, idx);
+                        } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                            conn_close(thread, idx);
+                        }
                     }
                 }
             }
-        }
 
-        /* Phase 2: Execute batched I/O */
-        execute_reads(thread);
-        execute_writes(thread);
-
-        /* Phase 3: Update connection states based on I/O results */
-        for (int i = 0; i < n; i++) {
-            uint64_t key = events[i].data.u64;
-            if (key == LURE_EPOLL_CMD_KEY) continue;
-
-            uint32_t idx = 0, side = 0;
-            unpack_key(key, &idx, &side);
-            LureConnFast* conn = &thread->conns[idx];
-
-            if (conn->fd_a < 0 && conn->fd_b < 0) continue;
-
-            /* Check for connection completion */
-            int both_eof = conn_is_eof_a(conn) && conn_is_eof_b(conn);
-            if (both_eof) {
-                /* Check if buffers are empty */
-                RingPos* pos_a2b = &thread->buf_pool.positions[conn->buf_a2b];
-                RingPos* pos_b2a = &thread->buf_pool.positions[conn->buf_b2a];
-                if (ring_avail(pos_a2b, thread->buf_pool.buf_size) == 0 &&
-                    ring_avail(pos_b2a, thread->buf_pool.buf_size) == 0) {
-                    conn_close(thread, idx);
+            /* Check for connection completion (inline) */
+            if (conn->fd_a >= 0 || conn->fd_b >= 0) {
+                int both_eof = conn_is_eof_a(conn) && conn_is_eof_b(conn);
+                if (both_eof) {
+                    RingPos* pos_a2b = &thread->buf_pool.positions[conn->buf_a2b];
+                    RingPos* pos_b2a = &thread->buf_pool.positions[conn->buf_b2a];
+                    if (ring_avail(pos_a2b, thread->buf_pool.buf_size) == 0 &&
+                        ring_avail(pos_b2a, thread->buf_pool.buf_size) == 0) {
+                        conn_close(thread, idx);
+                    }
                 }
             }
         }
