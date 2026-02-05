@@ -228,10 +228,7 @@ static void set_tcp_opts(int fd) {
     int quickack = 1;
     (void)setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &quickack, sizeof(quickack));
 
-    int sndbuf = 512 * 1024;
-    int rcvbuf = 512 * 1024;
-    (void)setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
-    (void)setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+    /* Buffer sizes omitted - let kernel choose defaults for optimal splice() compatibility */
 
     /* TCP_CORK omitted: conflicts with TCP_NODELAY for low-latency forwarding */
 }

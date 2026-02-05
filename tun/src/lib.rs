@@ -208,3 +208,403 @@ pub fn decode_server_msg(buf: &[u8]) -> Result<Option<(ServerMsg, usize)>, Tunne
         other => Err(TunnelError::InvalidIntent(other)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    // ============================================================================
+    // encode_agent_hello tests
+    // ============================================================================
+
+    #[test]
+    fn test_encode_agent_hello_listen() {
+        let hello = AgentHello {
+            version: VERSION,
+            intent: Intent::Listen,
+            token: [42u8; 32],
+            session: None,
+        };
+        let mut buf = Vec::new();
+        assert!(encode_agent_hello(&hello, &mut buf).is_ok());
+        assert_eq!(&buf[..4], &MAGIC);
+        assert_eq!(buf[4], VERSION);
+        assert_eq!(buf[5], Intent::Listen as u8);
+        assert_eq!(&buf[6..38], &[42u8; 32]);
+        assert_eq!(buf.len(), 38);
+    }
+
+    #[test]
+    fn test_encode_agent_hello_connect() {
+        let hello = AgentHello {
+            version: VERSION,
+            intent: Intent::Connect,
+            token: [43u8; 32],
+            session: Some([44u8; 32]),
+        };
+        let mut buf = Vec::new();
+        assert!(encode_agent_hello(&hello, &mut buf).is_ok());
+        assert_eq!(&buf[..4], &MAGIC);
+        assert_eq!(buf[4], VERSION);
+        assert_eq!(buf[5], Intent::Connect as u8);
+        assert_eq!(&buf[6..38], &[43u8; 32]);
+        assert_eq!(&buf[38..70], &[44u8; 32]);
+        assert_eq!(buf.len(), 70);
+    }
+
+    #[test]
+    fn test_encode_agent_hello_connect_without_session_fails() {
+        let hello = AgentHello {
+            version: VERSION,
+            intent: Intent::Connect,
+            token: [43u8; 32],
+            session: None,
+        };
+        let mut buf = Vec::new();
+        assert!(encode_agent_hello(&hello, &mut buf).is_err());
+    }
+
+    #[test]
+    fn test_encode_agent_hello_listen_with_session_fails() {
+        let hello = AgentHello {
+            version: VERSION,
+            intent: Intent::Listen,
+            token: [42u8; 32],
+            session: Some([44u8; 32]),
+        };
+        let mut buf = Vec::new();
+        assert!(encode_agent_hello(&hello, &mut buf).is_err());
+    }
+
+    // ============================================================================
+    // decode_agent_hello tests
+    // ============================================================================
+
+    #[test]
+    fn test_decode_agent_hello_listen_roundtrip() {
+        let hello = AgentHello {
+            version: VERSION,
+            intent: Intent::Listen,
+            token: [42u8; 32],
+            session: None,
+        };
+        let mut buf = Vec::new();
+        encode_agent_hello(&hello, &mut buf).unwrap();
+
+        let (decoded, consumed) = decode_agent_hello(&buf).unwrap().unwrap();
+        assert_eq!(decoded.version, hello.version);
+        assert_eq!(decoded.intent, hello.intent);
+        assert_eq!(decoded.token, hello.token);
+        assert_eq!(decoded.session, hello.session);
+        assert_eq!(consumed, 38);
+    }
+
+    #[test]
+    fn test_decode_agent_hello_connect_roundtrip() {
+        let hello = AgentHello {
+            version: VERSION,
+            intent: Intent::Connect,
+            token: [43u8; 32],
+            session: Some([44u8; 32]),
+        };
+        let mut buf = Vec::new();
+        encode_agent_hello(&hello, &mut buf).unwrap();
+
+        let (decoded, consumed) = decode_agent_hello(&buf).unwrap().unwrap();
+        assert_eq!(decoded.version, hello.version);
+        assert_eq!(decoded.intent, hello.intent);
+        assert_eq!(decoded.token, hello.token);
+        assert_eq!(decoded.session, hello.session);
+        assert_eq!(consumed, 70);
+    }
+
+    #[test]
+    fn test_decode_agent_hello_buffer_too_short_for_magic() {
+        let buf = vec![1, 2, 3];
+        assert!(decode_agent_hello(&buf).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_decode_agent_hello_invalid_magic() {
+        let mut buf = vec![0u8; 38];
+        buf[0] = b'X';
+        buf[1] = b'X';
+        buf[2] = b'X';
+        buf[3] = b'X';
+        assert!(matches!(
+            decode_agent_hello(&buf),
+            Err(TunnelError::InvalidMagic)
+        ));
+    }
+
+    #[test]
+    fn test_decode_agent_hello_buffer_too_short_for_header() {
+        let mut buf = MAGIC.to_vec();
+        buf.push(VERSION);
+        assert!(decode_agent_hello(&buf).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_decode_agent_hello_unsupported_version() {
+        let mut buf = MAGIC.to_vec();
+        buf.push(99);
+        buf.push(Intent::Listen as u8);
+        buf.extend_from_slice(&[0u8; 32]);
+        assert!(matches!(
+            decode_agent_hello(&buf),
+            Err(TunnelError::UnsupportedVersion(99))
+        ));
+    }
+
+    #[test]
+    fn test_decode_agent_hello_invalid_intent() {
+        let mut buf = MAGIC.to_vec();
+        buf.push(VERSION);
+        buf.push(99);
+        buf.extend_from_slice(&[0u8; 32]);
+        assert!(matches!(
+            decode_agent_hello(&buf),
+            Err(TunnelError::InvalidIntent(99))
+        ));
+    }
+
+    #[test]
+    fn test_decode_agent_hello_connect_buffer_too_short() {
+        let mut buf = MAGIC.to_vec();
+        buf.push(VERSION);
+        buf.push(Intent::Connect as u8);
+        buf.extend_from_slice(&[0u8; 32]);
+        // Connect requires session but buffer is too short
+        assert!(decode_agent_hello(&buf).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_decode_agent_hello_listen_with_extra_bytes() {
+        let mut buf = MAGIC.to_vec();
+        buf.push(VERSION);
+        buf.push(Intent::Listen as u8);
+        buf.extend_from_slice(&[42u8; 32]);
+        buf.extend_from_slice(&[99u8; 50]);
+
+        let (decoded, consumed) = decode_agent_hello(&buf).unwrap().unwrap();
+        assert_eq!(decoded.intent, Intent::Listen);
+        assert_eq!(consumed, 38);
+        // Extra bytes are not consumed by decoder
+    }
+
+    // ============================================================================
+    // encode_server_msg tests - SessionOffer
+    // ============================================================================
+
+    #[test]
+    fn test_encode_server_msg_session_offer() {
+        let msg = ServerMsg::SessionOffer([55u8; 32]);
+        let mut buf = Vec::new();
+        encode_server_msg(&msg, &mut buf);
+        assert_eq!(buf[0], ServerMsgKind::SessionOffer as u8);
+        assert_eq!(&buf[1..33], &[55u8; 32]);
+        assert_eq!(buf.len(), 33);
+    }
+
+    // ============================================================================
+    // encode_server_msg tests - TargetAddr IPv4
+    // ============================================================================
+
+    #[test]
+    fn test_encode_server_msg_target_addr_ipv4() {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 8080);
+        let msg = ServerMsg::TargetAddr(addr);
+        let mut buf = Vec::new();
+        encode_server_msg(&msg, &mut buf);
+
+        assert_eq!(buf[0], ServerMsgKind::TargetAddr as u8);
+        assert_eq!(buf[1], 4); // IPv4
+        assert_eq!(u16::from_be_bytes([buf[2], buf[3]]), 8080);
+        assert_eq!(buf[4], 192);
+        assert_eq!(buf[5], 168);
+        assert_eq!(buf[6], 1);
+        assert_eq!(buf[7], 1);
+        assert_eq!(buf.len(), 8);
+    }
+
+    #[test]
+    fn test_encode_server_msg_target_addr_ipv4_min_port() {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 1);
+        let msg = ServerMsg::TargetAddr(addr);
+        let mut buf = Vec::new();
+        encode_server_msg(&msg, &mut buf);
+
+        assert_eq!(u16::from_be_bytes([buf[2], buf[3]]), 1);
+    }
+
+    #[test]
+    fn test_encode_server_msg_target_addr_ipv4_max_port() {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 65535);
+        let msg = ServerMsg::TargetAddr(addr);
+        let mut buf = Vec::new();
+        encode_server_msg(&msg, &mut buf);
+
+        assert_eq!(u16::from_be_bytes([buf[2], buf[3]]), 65535);
+    }
+
+    // ============================================================================
+    // encode_server_msg tests - TargetAddr IPv6
+    // ============================================================================
+
+    #[test]
+    fn test_encode_server_msg_target_addr_ipv6() {
+        let addr = SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+            9000,
+        );
+        let msg = ServerMsg::TargetAddr(addr);
+        let mut buf = Vec::new();
+        encode_server_msg(&msg, &mut buf);
+
+        assert_eq!(buf[0], ServerMsgKind::TargetAddr as u8);
+        assert_eq!(buf[1], 6); // IPv6
+        assert_eq!(u16::from_be_bytes([buf[2], buf[3]]), 9000);
+        assert_eq!(buf.len(), 20);
+    }
+
+    #[test]
+    fn test_encode_server_msg_target_addr_ipv6_loopback() {
+        let addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 443);
+        let msg = ServerMsg::TargetAddr(addr);
+        let mut buf = Vec::new();
+        encode_server_msg(&msg, &mut buf);
+
+        assert_eq!(buf[0], ServerMsgKind::TargetAddr as u8);
+        assert_eq!(buf[1], 6); // IPv6
+        assert_eq!(u16::from_be_bytes([buf[2], buf[3]]), 443);
+        assert_eq!(buf.len(), 20);
+    }
+
+    // ============================================================================
+    // decode_server_msg tests - SessionOffer
+    // ============================================================================
+
+    #[test]
+    fn test_decode_server_msg_session_offer_roundtrip() {
+        let msg = ServerMsg::SessionOffer([55u8; 32]);
+        let mut buf = Vec::new();
+        encode_server_msg(&msg, &mut buf);
+
+        let (decoded, consumed) = decode_server_msg(&buf).unwrap().unwrap();
+        if let ServerMsg::SessionOffer(token) = decoded {
+            assert_eq!(token, [55u8; 32]);
+        } else {
+            panic!("Expected SessionOffer");
+        }
+        assert_eq!(consumed, 33);
+    }
+
+    #[test]
+    fn test_decode_server_msg_session_offer_buffer_too_short() {
+        let buf = vec![ServerMsgKind::SessionOffer as u8, 1, 2, 3];
+        assert!(decode_server_msg(&buf).unwrap().is_none());
+    }
+
+    // ============================================================================
+    // decode_server_msg tests - TargetAddr IPv4
+    // ============================================================================
+
+    #[test]
+    fn test_decode_server_msg_target_addr_ipv4_roundtrip() {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 5000);
+        let msg = ServerMsg::TargetAddr(addr);
+        let mut buf = Vec::new();
+        encode_server_msg(&msg, &mut buf);
+
+        let (decoded, consumed) = decode_server_msg(&buf).unwrap().unwrap();
+        assert_eq!(decoded, msg);
+        assert_eq!(consumed, 8);
+    }
+
+    #[test]
+    fn test_decode_server_msg_target_addr_ipv4_buffer_too_short_for_family() {
+        let buf = vec![ServerMsgKind::TargetAddr as u8];
+        assert!(decode_server_msg(&buf).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_decode_server_msg_target_addr_ipv4_buffer_too_short_for_data() {
+        let buf = vec![ServerMsgKind::TargetAddr as u8, 4, 0, 80, 1, 2]; // Incomplete IPv4
+        assert!(decode_server_msg(&buf).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_decode_server_msg_target_addr_invalid_family() {
+        let buf = vec![ServerMsgKind::TargetAddr as u8, 5, 0, 80, 1, 2, 3, 4];
+        assert!(matches!(
+            decode_server_msg(&buf),
+            Err(TunnelError::InvalidAddrFamily(5))
+        ));
+    }
+
+    // ============================================================================
+    // decode_server_msg tests - TargetAddr IPv6
+    // ============================================================================
+
+    #[test]
+    fn test_decode_server_msg_target_addr_ipv6_roundtrip() {
+        let addr = SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+            8080,
+        );
+        let msg = ServerMsg::TargetAddr(addr);
+        let mut buf = Vec::new();
+        encode_server_msg(&msg, &mut buf);
+
+        let (decoded, consumed) = decode_server_msg(&buf).unwrap().unwrap();
+        assert_eq!(decoded, msg);
+        assert_eq!(consumed, 20);
+    }
+
+    #[test]
+    fn test_decode_server_msg_target_addr_ipv6_buffer_too_short_for_data() {
+        let mut buf = vec![ServerMsgKind::TargetAddr as u8, 6, 1, 187]; // Port 443 in big-endian
+        buf.extend_from_slice(&[1u8; 10]); // Incomplete IPv6
+        assert!(decode_server_msg(&buf).unwrap().is_none());
+    }
+
+    // ============================================================================
+    // Edge cases and error conditions
+    // ============================================================================
+
+    #[test]
+    fn test_decode_server_msg_empty_buffer() {
+        let buf = vec![];
+        assert!(decode_server_msg(&buf).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_decode_server_msg_invalid_message_kind() {
+        let buf = vec![99, 0, 0];
+        assert!(matches!(
+            decode_server_msg(&buf),
+            Err(TunnelError::InvalidIntent(99))
+        ));
+    }
+
+    #[test]
+    fn test_intent_listen_value() {
+        assert_eq!(Intent::Listen as u8, 1);
+    }
+
+    #[test]
+    fn test_intent_connect_value() {
+        assert_eq!(Intent::Connect as u8, 2);
+    }
+
+    #[test]
+    fn test_server_msg_kind_session_offer_value() {
+        assert_eq!(ServerMsgKind::SessionOffer as u8, 1);
+    }
+
+    #[test]
+    fn test_server_msg_kind_target_addr_value() {
+        assert_eq!(ServerMsgKind::TargetAddr as u8, 2);
+    }
+}

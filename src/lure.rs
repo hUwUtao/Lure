@@ -486,7 +486,7 @@ impl Lure {
                 .await
                 .map_err(|e| {
                     let re = ReportableError::from(e);
-                    LureLogger::connection_error(&address, Some(&server_address), &re);
+                    LureLogger::tunnel_session_error("session handling", &server_address, &re);
                     re
                 });
         } else {

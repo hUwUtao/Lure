@@ -1,9 +1,15 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
 
 use anyhow::Context;
+use log::debug;
 use tokio::sync::{RwLock, mpsc, oneshot};
+use tokio::time::{interval, Duration};
 
-use crate::{sock::LureConnection, utils::spawn_named};
+use crate::{logging::LureLogger, sock::LureConnection, utils::spawn_named};
+
+fn token_prefix(token: &[u8; 32]) -> String {
+    format!("{:02x}", token[0])
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TunnelToken(pub [u8; 32]);
@@ -14,6 +20,7 @@ pub struct SessionToken(pub [u8; 32]);
 pub struct TunnelRegistry {
     agents: RwLock<HashMap<TunnelToken, AgentHandle>>,
     pending: RwLock<HashMap<SessionToken, PendingSession>>,
+    expired_sessions: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Clone)]
@@ -25,6 +32,7 @@ struct PendingSession {
     tunnel_token: TunnelToken,
     target: SocketAddr,
     respond: oneshot::Sender<LureConnection>,
+    created_at: Instant,
 }
 
 enum TunnelCommand {
@@ -33,9 +41,34 @@ enum TunnelCommand {
 
 impl Default for TunnelRegistry {
     fn default() -> Self {
-        Self {
+        let registry = Self {
             agents: RwLock::new(HashMap::new()),
             pending: RwLock::new(HashMap::new()),
+            expired_sessions: std::sync::atomic::AtomicU64::new(0),
+        };
+
+        // Start cleanup task
+        let registry_clone = Arc::new(registry.clone());
+        spawn_named("tunnel-cleanup-task", async move {
+            let mut cleanup_interval = interval(Duration::from_secs(5));
+            loop {
+                cleanup_interval.tick().await;
+                registry_clone.cleanup_expired_sessions().await;
+            }
+        }).ok(); // Ignore spawn errors during initialization
+
+        registry
+    }
+}
+
+impl Clone for TunnelRegistry {
+    fn clone(&self) -> Self {
+        Self {
+            agents: RwLock::new(Default::default()),
+            pending: RwLock::new(Default::default()),
+            expired_sessions: std::sync::atomic::AtomicU64::new(
+                self.expired_sessions.load(std::sync::atomic::Ordering::Relaxed)
+            ),
         }
     }
 }
@@ -57,6 +90,8 @@ impl TunnelRegistry {
             agents.insert(token, AgentHandle { tx: tx.clone() });
         }
 
+        LureLogger::tunnel_agent_registered(&token_prefix(&token.0));
+
         // SPAWN TASK SECOND (after registration)
         let registry = Arc::clone(self);
         spawn_named("tunnel-agent-listener", async move {
@@ -76,6 +111,7 @@ impl TunnelRegistry {
             }
             let mut agents = registry.agents.write().await;
             agents.remove(&token);
+            LureLogger::tunnel_agent_disconnected(&token_prefix(&token.0));
         })
         .context("failed to spawn tunnel listener task")?;
 
@@ -91,8 +127,10 @@ impl TunnelRegistry {
         let (tx, rx) = oneshot::channel();
         {
             let mut pending = self.pending.write().await;
-            pending.insert(session, PendingSession { tunnel_token: token, target, respond: tx });
+            pending.insert(session, PendingSession { tunnel_token: token, target, respond: tx, created_at: Instant::now() });
         }
+
+        LureLogger::tunnel_session_offered(&token_prefix(&token.0), &target);
 
         let agent = {
             let agents = self.agents.read().await;
@@ -101,6 +139,7 @@ impl TunnelRegistry {
         let Some(agent) = agent else {
             let mut pending = self.pending.write().await;
             pending.remove(&session);
+            LureLogger::tunnel_agent_missing(&token_prefix(&token.0), &token_prefix(&session.0));
             anyhow::bail!("no active tunnel agent registered for token");
         };
 
@@ -113,6 +152,7 @@ impl TunnelRegistry {
             Err(_) => {
                 let mut pending = self.pending.write().await;
                 pending.remove(&session);
+                LureLogger::tunnel_agent_missing(&token_prefix(&token.0), &token_prefix(&session.0));
                 anyhow::bail!("failed to notify tunnel agent")
             }
         }
@@ -129,13 +169,17 @@ impl TunnelRegistry {
             pending.remove(&session)
         };
         let Some(pending) = pending else {
+            LureLogger::tunnel_session_missing(&token_prefix(&session.0));
             anyhow::bail!("no pending tunnel session");
         };
 
         // Validate that the provided token matches the one that created this session
         if pending.tunnel_token != token {
+            LureLogger::tunnel_token_mismatch(&token_prefix(&token.0), &token_prefix(&session.0));
             anyhow::bail!("tunnel token mismatch: unauthorized accept attempt");
         }
+
+        LureLogger::tunnel_session_accepted(&token_prefix(&token.0), &pending.target);
 
         let mut buf = Vec::new();
         tun::encode_server_msg(&tun::ServerMsg::TargetAddr(pending.target), &mut buf);
@@ -155,5 +199,23 @@ impl TunnelRegistry {
         }
 
         Ok(())
+    }
+
+    async fn cleanup_expired_sessions(&self) {
+        const SESSION_TIMEOUT: Duration = Duration::from_secs(30);
+
+        let mut pending = self.pending.write().await;
+        let now = Instant::now();
+        let expired: Vec<_> = pending
+            .iter()
+            .filter(|(_, session)| now.duration_since(session.created_at) > SESSION_TIMEOUT)
+            .map(|(token, _)| *token)
+            .collect();
+
+        for token in expired {
+            pending.remove(&token);
+            self.expired_sessions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            debug!("Tunnel session expired: {:?}", token.0[..8].to_vec());
+        }
     }
 }
