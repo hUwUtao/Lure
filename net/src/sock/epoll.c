@@ -1,6 +1,7 @@
 #include "epoll.h"
 
 #include <errno.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -10,6 +11,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/uio.h>
+#define EIO 5
 
 #define LURE_EPOLL_SIDE_A 0u
 #define LURE_EPOLL_SIDE_B 1u
@@ -310,7 +312,7 @@ static void conn_init(LureEpollThread* thread, LureConnFast* conn,
     conn->last_ev_b = 0;
 }
 
-static void conn_close(LureEpollThread* thread, uint32_t idx) {
+static void conn_close(LureEpollThread* thread, uint32_t idx, int result) {
     LureConnFast* conn = &thread->conns[idx];
 
     if (conn->fd_a >= 0) {
@@ -331,7 +333,7 @@ static void conn_close(LureEpollThread* thread, uint32_t idx) {
             .stats.s2c_bytes = conn->s2c_bytes,
             .stats.c2s_chunks = conn->c2s_chunks,
             .stats.s2c_chunks = conn->s2c_chunks,
-            .result = 0
+            .result = result
         };
         /* Robust write loop for done_fd completion */
         size_t bytes_to_write = sizeof(done);
@@ -451,8 +453,21 @@ static int read_cmds(LureEpollThread* thread) {
         set_tcp_opts(cmd.fd_a);
         set_tcp_opts(cmd.fd_b);
 
-        epoll_add(thread->epoll_fd, cmd.fd_a, idx, LURE_EPOLL_SIDE_A, build_events(1, 0));
-        epoll_add(thread->epoll_fd, cmd.fd_b, idx, LURE_EPOLL_SIDE_B, build_events(1, 0));
+        if (epoll_add(thread->epoll_fd, cmd.fd_a, idx, LURE_EPOLL_SIDE_A, build_events(1, 0)) < 0) {
+            close(cmd.fd_a);
+            close(cmd.fd_b);
+            thread->free_stack[thread->free_len++] = idx;
+            lure_panic_if(thread, 1);
+            continue;
+        }
+        if (epoll_add(thread->epoll_fd, cmd.fd_b, idx, LURE_EPOLL_SIDE_B, build_events(1, 0)) < 0) {
+            epoll_ctl(thread->epoll_fd, EPOLL_CTL_DEL, cmd.fd_a, NULL);
+            close(cmd.fd_a);
+            close(cmd.fd_b);
+            thread->free_stack[thread->free_len++] = idx;
+            lure_panic_if(thread, 1);
+            continue;
+        }
     }
 }
 
@@ -468,7 +483,7 @@ static void flush_epoll_updates(LureEpollThread* thread) {
             LureConnFast* conn = &thread->conns[idx];
             if (conn->fd_a < 0 && conn->fd_b < 0) continue;  /* Skip unused */
 
-            if (conn->dirty_a) {
+            if (conn->dirty_a && conn->fd_a >= 0) {
                 uint32_t ev = build_events(conn_should_read_a(conn), conn_should_write_a(conn));
                 if (ev != conn->last_ev_a) {
                     epoll_mod(thread->epoll_fd, conn->fd_a, idx, LURE_EPOLL_SIDE_A, ev);
@@ -477,7 +492,7 @@ static void flush_epoll_updates(LureEpollThread* thread) {
                 conn->dirty_a = 0;
             }
 
-            if (conn->dirty_b) {
+            if (conn->dirty_b && conn->fd_b >= 0) {
                 uint32_t ev = build_events(conn_should_read_b(conn), conn_should_write_b(conn));
                 if (ev != conn->last_ev_b) {
                     epoll_mod(thread->epoll_fd, conn->fd_b, idx, LURE_EPOLL_SIDE_B, ev);
@@ -492,7 +507,7 @@ static void flush_epoll_updates(LureEpollThread* thread) {
             uint32_t idx = thread->dirty_list[i];
             LureConnFast* conn = &thread->conns[idx];
 
-            if (conn->dirty_a) {
+            if (conn->dirty_a && conn->fd_a >= 0) {
                 uint32_t ev = build_events(conn_should_read_a(conn), conn_should_write_a(conn));
                 /* Only call epoll_ctl if event mask changed */
                 if (ev != conn->last_ev_a) {
@@ -502,7 +517,7 @@ static void flush_epoll_updates(LureEpollThread* thread) {
                 conn->dirty_a = 0;
             }
 
-            if (conn->dirty_b) {
+            if (conn->dirty_b && conn->fd_b >= 0) {
                 uint32_t ev = build_events(conn_should_read_b(conn), conn_should_write_b(conn));
                 /* Only call epoll_ctl if event mask changed */
                 if (ev != conn->last_ev_b) {
@@ -552,7 +567,15 @@ int lure_epoll_thread_run(LureEpollThread* thread) {
             LureConnFast* conn = &thread->conns[idx];
 
             if (ev & (EPOLLERR | EPOLLHUP)) {
-                conn_close(thread, idx);
+                /* Read socket error to get the actual error code */
+                int sock_error = 0;
+                socklen_t error_len = sizeof(sock_error);
+                int fd_to_check = (side == LURE_EPOLL_SIDE_A) ? conn->fd_a : conn->fd_b;
+                if (fd_to_check >= 0) {
+                    getsockopt(fd_to_check, SOL_SOCKET, SO_ERROR, &sock_error, &error_len);
+                }
+                int result = sock_error ? -sock_error : -EIO;
+                conn_close(thread, idx, result);
                 continue;
             }
 
@@ -599,8 +622,9 @@ int lure_epoll_thread_run(LureEpollThread* thread) {
                             conn_disable_splice(conn);
                             /* Fall through to buffered I/O below */
                         } else {
-                            /* Unexpected error: close connection */
-                            conn_close(thread, idx);
+                            /* Unexpected error: close connection with error code */
+                            int err = -errno;
+                            conn_close(thread, idx, err);
                             continue;
                         }
                     }
@@ -641,7 +665,8 @@ int lure_epoll_thread_run(LureEpollThread* thread) {
                             } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
                                 break;  /* No more data available */
                             } else {
-                                conn_close(thread, idx);
+                                int err = -errno;
+                                conn_close(thread, idx, err);
                                 break;
                             }
                         }
@@ -670,7 +695,8 @@ int lure_epoll_thread_run(LureEpollThread* thread) {
                         } else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
                             break;  /* Socket buffer full, stop draining */
                         } else if (n < 0) {
-                            conn_close(thread, idx);
+                            int err = -errno;
+                            conn_close(thread, idx, err);
                             break;
                         }
                     }
@@ -694,7 +720,7 @@ int lure_epoll_thread_run(LureEpollThread* thread) {
                     RingPos* pos_b2a = &thread->buf_pool.positions[conn->buf_b2a];
                     if (ring_avail(pos_a2b, thread->buf_pool.buf_size) == 0 &&
                         ring_avail(pos_b2a, thread->buf_pool.buf_size) == 0) {
-                        conn_close(thread, idx);
+                        conn_close(thread, idx, 0);
                     }
                 }
             }
@@ -707,6 +733,11 @@ int lure_epoll_thread_run(LureEpollThread* thread) {
    ============================================================================ */
 
 LureEpollThread* lure_epoll_thread_new(int cmd_fd, int done_fd, size_t max_conns, size_t buf_cap) {
+    /* Validate buf_cap against UINT16_MAX (RingPos uses uint16_t for positions) */
+    if (buf_cap == 0 || buf_cap > UINT16_MAX) {
+        return NULL;
+    }
+
     LureEpollThread* thread = (LureEpollThread*)calloc(1, sizeof(LureEpollThread));
     if (!thread) return NULL;
 
@@ -843,7 +874,14 @@ int lure_epoll_passthrough(int fd_a, int fd_b, LureEpollStats* stats) {
             uint32_t side = events[i].data.u64 & 1;
 
             if (events[i].events & (EPOLLERR | EPOLLHUP)) {
-                goto done;
+                /* Read socket error to detect real socket errors vs normal shutdown */
+                int sock_error = 0;
+                socklen_t error_len = sizeof(sock_error);
+                int fd_to_check = (side == LURE_EPOLL_SIDE_A) ? fd_a : fd_b;
+                if (getsockopt(fd_to_check, SOL_SOCKET, SO_ERROR, &sock_error, &error_len) < 0 || sock_error != 0) {
+                    goto fail;  /* Real socket error */
+                }
+                goto done;  /* Normal shutdown (EPOLLRDHUP without error) */
             }
 
             if (events[i].events & EPOLLIN) {
@@ -899,6 +937,24 @@ int lure_epoll_passthrough(int fd_a, int fd_b, LureEpollStats* stats) {
                         } else {
                             conn.s2c_bytes += n_read;
                             conn.s2c_chunks++;
+                        }
+
+                        /* Try immediate write to destination */
+                        int dest_fd = side == LURE_EPOLL_SIDE_A ? fd_b : fd_a;
+                        uint16_t dest_buf_idx = side == LURE_EPOLL_SIDE_A ? 1 : 0;
+                        RingPos* dest_pos = &thread.buf_pool.positions[dest_buf_idx];
+                        uint8_t* dest_buf_data = thread.buf_pool.data + dest_buf_idx * LURE_SMALL_BUF_SIZE;
+                        size_t avail = ring_contiguous_read(dest_pos, LURE_SMALL_BUF_SIZE);
+
+                        if (avail > 0) {
+                            ssize_t n_write = write(dest_fd, dest_buf_data + dest_pos->read_pos, avail);
+                            if (n_write > 0) {
+                                dest_pos->read_pos = (dest_pos->read_pos + n_write) % LURE_SMALL_BUF_SIZE;
+                            } else if (n_write < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                                /* Need to wait for destination to become writable */
+                                uint32_t ev = build_events(1, 1);
+                                epoll_mod(thread.epoll_fd, dest_fd, 0, side == LURE_EPOLL_SIDE_A ? LURE_EPOLL_SIDE_B : LURE_EPOLL_SIDE_A, ev);
+                            }
                         }
                     } else if (n_read == 0) {
                         if (side == LURE_EPOLL_SIDE_A) {

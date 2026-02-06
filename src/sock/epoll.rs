@@ -58,7 +58,7 @@ pub(crate) async fn passthrough_now(
 
     if done.result < 0 {
         let err = std::io::Error::from_raw_os_error(-done.result);
-        return Err(ReportableError::from(anyhow::anyhow!("epoll passthrough failed: {}", err)).into());
+        return Err(anyhow::anyhow!("epoll passthrough failed: {}", err));
     }
 
     session.inspect.record_c2s(done.stats.c2s_bytes);

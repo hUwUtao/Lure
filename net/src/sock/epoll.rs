@@ -469,7 +469,7 @@ fn forward_done(fd: RawFd, done_tx: Sender<EpollDone>) {
             if frame_buf.len() == frame_size {
                 let mut frame_data = [0u8; std::mem::size_of::<EpollDone>()];
                 frame_data.copy_from_slice(&frame_buf);
-                let done = unsafe { *(frame_data.as_ptr() as *const EpollDone) };
+                let done = unsafe { std::ptr::read_unaligned(frame_data.as_ptr() as *const EpollDone) };
                 let _ = done_tx.send(done);
                 frame_buf.clear();
             } else {
@@ -545,8 +545,14 @@ pub(crate) fn probe() -> io::Result<()> {
 pub async fn passthrough_basic(a: &mut Connection, b: &mut Connection) -> io::Result<()> {
     let fd_a = duplicate_fd(a.as_ref().as_raw_fd())?;
     let fd_b = duplicate_fd(b.as_ref().as_raw_fd())?;
-    tokio::task::spawn_blocking(move || passthrough(fd_a, fd_b))
-        .await
-        .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))??;
+    tokio::task::spawn_blocking(move || {
+        let res = passthrough(fd_a, fd_b);
+        // Close the duplicated FDs after passthrough completes
+        let _ = unsafe { close(fd_a) };
+        let _ = unsafe { close(fd_b) };
+        res
+    })
+    .await
+    .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))??;
     Ok(())
 }
