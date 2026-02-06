@@ -939,9 +939,9 @@ int lure_epoll_passthrough(int fd_a, int fd_b, LureEpollStats* stats) {
                             conn.s2c_chunks++;
                         }
 
-                        /* Try immediate write to destination */
+                        /* Try immediate write to destination using the same buffer we just filled */
                         int dest_fd = side == LURE_EPOLL_SIDE_A ? fd_b : fd_a;
-                        uint16_t dest_buf_idx = side == LURE_EPOLL_SIDE_A ? 1 : 0;
+                        uint16_t dest_buf_idx = side == LURE_EPOLL_SIDE_A ? 0 : 1;  /* Same buffer as read */
                         RingPos* dest_pos = &thread.buf_pool.positions[dest_buf_idx];
                         uint8_t* dest_buf_data = thread.buf_pool.data + dest_buf_idx * LURE_SMALL_BUF_SIZE;
                         size_t avail = ring_contiguous_read(dest_pos, LURE_SMALL_BUF_SIZE);
@@ -970,7 +970,7 @@ int lure_epoll_passthrough(int fd_a, int fd_b, LureEpollStats* stats) {
 
             if (events[i].events & EPOLLOUT) {
                 int write_fd = side == LURE_EPOLL_SIDE_A ? fd_b : fd_a;
-                uint16_t buf_idx = side == LURE_EPOLL_SIDE_A ? 1 : 0;
+                uint16_t buf_idx = side == LURE_EPOLL_SIDE_A ? 0 : 1;  /* Correct buffer for destination fd */
                 RingPos* pos = &thread.buf_pool.positions[buf_idx];
                 uint8_t* buf_data = thread.buf_pool.data + buf_idx * LURE_SMALL_BUF_SIZE;
 
