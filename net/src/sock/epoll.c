@@ -299,7 +299,7 @@ static void conn_init(LureEpollThread* thread, LureConnFast* conn,
     conn->fd_a = fd_a;
     conn->fd_b = fd_b;
     conn->id = id;
-    conn->flags = CONN_A_READ | CONN_B_READ;  /* Start with read enabled only */
+    conn->flags = CONN_A_READ | CONN_B_READ | CONN_A_WRITE | CONN_B_WRITE;  /* Enable both read and write */
     conn->dirty_a = 1;
     conn->dirty_b = 1;
     conn->buf_a2b = buf_a2b;
@@ -677,9 +677,9 @@ int lure_epoll_thread_run(LureEpollThread* thread) {
 
             /* Process writes immediately (drain buffer to reduce syscalls) */
             if (ev & EPOLLOUT) {
-                int write_fd = side == LURE_EPOLL_SIDE_A ? conn->fd_b : conn->fd_a;
+                int write_fd = side == LURE_EPOLL_SIDE_A ? conn->fd_a : conn->fd_b;
                 if (write_fd >= 0) {
-                    uint16_t buf_idx = side == LURE_EPOLL_SIDE_A ? conn->buf_a2b : conn->buf_b2a;
+                    uint16_t buf_idx = side == LURE_EPOLL_SIDE_A ? conn->buf_b2a : conn->buf_a2b;
                     RingPos* pos = &thread->buf_pool.positions[buf_idx];
 
                     /* Drain buffer: write until EAGAIN to minimize syscalls */
