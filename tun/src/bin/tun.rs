@@ -103,12 +103,12 @@ async fn run(ingress: SocketAddr, token: [u8; 32]) -> anyhow::Result<()> {
             let token = token;
             match net::sock::backend_kind() {
                 net::sock::BackendKind::Tokio => {
-                    tokio::spawn(async move {
+                    tokio::task::spawn_local(async move {
                         let _ = handle_session(ingress, token, session).await;
                     });
                 }
                 net::sock::BackendKind::Epoll => {
-                    tokio::spawn(async move {
+                    tokio::task::spawn_local(async move {
                         let _ = handle_session(ingress, token, session).await;
                     });
                 }
@@ -156,7 +156,8 @@ fn main() {
                 .enable_all()
                 .build()
                 .expect("failed to build tokio runtime");
-            if let Err(err) = rt.block_on(run(ingress, token)) {
+            let local = tokio::task::LocalSet::new();
+            if let Err(err) = rt.block_on(local.run_until(run(ingress, token))) {
                 eprintln!("tunnel agent failed: {err}");
                 std::process::exit(1);
             }
