@@ -431,11 +431,12 @@ fn forward_done(fd: RawFd, done_tx: Sender<EpollDone>) {
 
         // Data available - read frame-aligned notifications
         loop {
-            // Read bytes until we have a complete frame
+            // Read frame-sized chunks to minimize syscalls
             while frame_buf.len() < frame_size {
-                let mut byte = [0u8; 1];
+                let remaining = frame_size - frame_buf.len();
+                let mut read_buf = vec![0u8; remaining];
                 let bytes = unsafe {
-                    read(fd, byte.as_mut_ptr() as *mut c_void, 1)
+                    read(fd, read_buf.as_mut_ptr() as *mut c_void, remaining)
                 };
 
                 if bytes == 0 {
@@ -461,7 +462,7 @@ fn forward_done(fd: RawFd, done_tx: Sender<EpollDone>) {
                     }
                     return;
                 } else {
-                    frame_buf.push(byte[0]);
+                    frame_buf.extend_from_slice(&read_buf[..bytes as usize]);
                 }
             }
 
