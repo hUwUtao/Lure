@@ -7,22 +7,27 @@ use crate::{error::ReportableError, inspect::drive_transport_metrics, router::Se
 extern crate num_cpus;
 
 // Global thread pool for epoll-based passthrough
-static EPOLL_BACKEND: std::sync::OnceLock<Arc<EpollBackend>> = std::sync::OnceLock::new();
+static EPOLL_BACKEND: std::sync::OnceLock<Result<Arc<EpollBackend>, String>> = std::sync::OnceLock::new();
 
 fn get_epoll_backend() -> anyhow::Result<Arc<EpollBackend>> {
-    Ok(EPOLL_BACKEND
+    let result = EPOLL_BACKEND
         .get_or_init(|| {
             let workers = num_cpus::get();
             // Pre-allocate 1024 connection slots per worker
             match EpollBackend::new(workers, 1024, 8192) {
-                Ok(backend) => Arc::new(backend),
+                Ok(backend) => Ok(Arc::new(backend)),
                 Err(e) => {
-                    log::error!("Failed to initialize EpollBackend: {}", e);
-                    panic!("Failed to initialize EpollBackend: {}", e);
+                    let err_msg = format!("Failed to initialize EpollBackend: {}", e);
+                    log::error!("{}", err_msg);
+                    Err(err_msg)
                 }
             }
-        })
-        .clone())
+        });
+
+    result
+        .as_ref()
+        .map(|b| b.clone())
+        .map_err(|e| anyhow::anyhow!("{}", e))
 }
 
 pub(crate) async fn passthrough_now(

@@ -3,7 +3,7 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
 use anyhow::Context;
 use log::debug;
 use tokio::sync::{RwLock, mpsc, oneshot};
-use tokio::time::{interval, Duration};
+use tokio::time::Duration;
 
 use crate::{logging::LureLogger, sock::LureConnection, utils::spawn_named};
 
@@ -41,34 +41,10 @@ enum TunnelCommand {
 
 impl Default for TunnelRegistry {
     fn default() -> Self {
-        let registry = Self {
+        Self {
             agents: RwLock::new(HashMap::new()),
             pending: RwLock::new(HashMap::new()),
             expired_sessions: std::sync::atomic::AtomicU64::new(0),
-        };
-
-        // Start cleanup task
-        let registry_clone = Arc::new(registry.clone());
-        spawn_named("tunnel-cleanup-task", async move {
-            let mut cleanup_interval = interval(Duration::from_secs(5));
-            loop {
-                cleanup_interval.tick().await;
-                registry_clone.cleanup_expired_sessions().await;
-            }
-        }).ok(); // Ignore spawn errors during initialization
-
-        registry
-    }
-}
-
-impl Clone for TunnelRegistry {
-    fn clone(&self) -> Self {
-        Self {
-            agents: RwLock::new(Default::default()),
-            pending: RwLock::new(Default::default()),
-            expired_sessions: std::sync::atomic::AtomicU64::new(
-                self.expired_sessions.load(std::sync::atomic::Ordering::Relaxed)
-            ),
         }
     }
 }
@@ -201,7 +177,7 @@ impl TunnelRegistry {
         Ok(())
     }
 
-    async fn cleanup_expired_sessions(&self) {
+    pub(crate) async fn cleanup_expired_sessions(&self) {
         const SESSION_TIMEOUT: Duration = Duration::from_secs(30);
 
         let mut pending = self.pending.write().await;

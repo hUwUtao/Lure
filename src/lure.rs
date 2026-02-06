@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tokio::{
     sync::{RwLock, Semaphore},
     task::yield_now,
-    time::{error::Elapsed, timeout},
+    time::{error::Elapsed, interval, timeout},
 };
 
 use crate::{
@@ -76,13 +76,25 @@ impl Lure {
     pub fn new(config: LureConfig) -> Lure {
         let router = leak(RouterInstance::new());
         router.set_instance_name(config.inst.clone());
+        let tunnels = Arc::new(TunnelRegistry::default());
+
+        // Spawn cleanup task for tunnel registry
+        let tunnels_clone = Arc::clone(&tunnels);
+        spawn_named("tunnel-cleanup-task", async move {
+            let mut cleanup_interval = interval(Duration::from_secs(5));
+            loop {
+                cleanup_interval.tick().await;
+                tunnels_clone.cleanup_expired_sessions().await;
+            }
+        }).ok(); // Ignore spawn errors during initialization
+
         Lure {
             config: RwLock::new(config),
             router,
             threat: leak(ThreatControlService::new()),
             metrics: HandshakeMetrics::new(&get_meter()),
             errors: ErrorResponder::new(),
-            tunnels: Arc::new(TunnelRegistry::default()),
+            tunnels,
         }
     }
 

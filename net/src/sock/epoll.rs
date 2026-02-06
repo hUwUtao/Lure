@@ -1,6 +1,5 @@
 use std::{
     io,
-    mem::MaybeUninit,
     net::SocketAddr,
     os::fd::{AsRawFd, RawFd},
     sync::{
@@ -160,6 +159,7 @@ pub struct EpollBackend {
     next_id: AtomicU64,
     pending: Arc<DashMap<u64, tokio::sync::oneshot::Sender<EpollDone>>>,
     shutdown: AtomicBool,
+    done_forward_handle: Option<thread::JoinHandle<()>>,
 }
 
 impl EpollBackend {
@@ -169,7 +169,7 @@ impl EpollBackend {
             Arc::new(DashMap::new());
         let pending_forward = Arc::clone(&pending);
 
-        thread::Builder::new()
+        let done_forward_handle = thread::Builder::new()
             .name("lure-epoll-done".to_string())
             .spawn(move || {
                 while let Ok(done) = done_rx.recv() {
@@ -214,6 +214,7 @@ impl EpollBackend {
             next_id: AtomicU64::new(1),
             pending,
             shutdown: AtomicBool::new(false),
+            done_forward_handle: Some(done_forward_handle),
         })
     }
 
@@ -326,6 +327,12 @@ impl Drop for EpollBackend {
             let _ = worker.join.join();
             let _ = worker.done_join.join();
         }
+        // Join the main done_forward handler thread
+        if let Some(handle) = self.done_forward_handle.take() {
+            if let Err(e) = handle.join() {
+                log::warn!("done_forward_handle join failed: {:?}", e);
+            }
+        }
     }
 }
 
@@ -402,8 +409,9 @@ fn forward_done(fd: RawFd, done_tx: Sender<EpollDone>) {
         return;
     }
 
-    let mut buf: [MaybeUninit<EpollDone>; 32] = unsafe { MaybeUninit::uninit().assume_init() };
     let mut events = [libc::epoll_event { events: 0, u64: 0 }; 1];
+    let frame_size = std::mem::size_of::<EpollDone>();
+    let mut frame_buf: Vec<u8> = Vec::with_capacity(frame_size);
 
     loop {
         // Wait for events with 100ms timeout for clean shutdown
@@ -421,20 +429,52 @@ fn forward_done(fd: RawFd, done_tx: Sender<EpollDone>) {
             continue;
         }
 
-        // Data available - read all pending done notifications
+        // Data available - read frame-aligned notifications
         loop {
-            let bytes = unsafe {
-                read(fd, buf.as_mut_ptr() as *mut c_void, std::mem::size_of_val(&buf))
-            };
+            // Read bytes until we have a complete frame
+            while frame_buf.len() < frame_size {
+                let mut byte = [0u8; 1];
+                let bytes = unsafe {
+                    read(fd, byte.as_mut_ptr() as *mut c_void, 1)
+                };
 
-            if bytes <= 0 {
-                break; // No more data or error
+                if bytes == 0 {
+                    // EOF
+                    unsafe {
+                        libc::close(epoll_fd);
+                        libc::close(fd);
+                    }
+                    return;
+                } else if bytes < 0 {
+                    let errno = unsafe { *libc::__errno_location() };
+                    if errno == libc::EINTR {
+                        continue;  // Retry on EINTR
+                    }
+                    if errno == libc::EAGAIN || errno == libc::EWOULDBLOCK {
+                        // No more data available
+                        break;
+                    }
+                    // Fatal error
+                    unsafe {
+                        libc::close(epoll_fd);
+                        libc::close(fd);
+                    }
+                    return;
+                } else {
+                    frame_buf.push(byte[0]);
+                }
             }
 
-            let count = bytes as usize / std::mem::size_of::<EpollDone>();
-            for i in 0..count {
-                let done = unsafe { buf[i].assume_init() };
+            // If we have a complete frame, decode and send it
+            if frame_buf.len() == frame_size {
+                let mut frame_data = [0u8; std::mem::size_of::<EpollDone>()];
+                frame_data.copy_from_slice(&frame_buf);
+                let done = unsafe { *(frame_data.as_ptr() as *const EpollDone) };
                 let _ = done_tx.send(done);
+                frame_buf.clear();
+            } else {
+                // Need more data from epoll_wait
+                break;
             }
         }
     }

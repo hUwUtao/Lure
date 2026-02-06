@@ -147,7 +147,7 @@ fn tunnel_protocol_error_handling() {
     // Invalid message kind
     let bad_msg = vec![99u8; 10];
     let result = decode_server_msg(&bad_msg);
-    assert!(matches!(result, Err(TunnelError::InvalidIntent(99))));
+    assert!(matches!(result, Err(TunnelError::InvalidMsgKind(99))));
 
     // Invalid address family
     let mut bad_addr = vec![2u8, 99u8, 0, 80]; // TargetAddr with family 99

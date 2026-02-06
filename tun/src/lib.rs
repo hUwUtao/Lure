@@ -12,6 +12,8 @@ pub enum TunnelError {
     UnsupportedVersion(u8),
     #[error("invalid intent {0}")]
     InvalidIntent(u8),
+    #[error("invalid message kind {0}")]
+    InvalidMsgKind(u8),
     #[error("invalid address family {0}")]
     InvalidAddrFamily(u8),
 }
@@ -205,7 +207,7 @@ pub fn decode_server_msg(buf: &[u8]) -> Result<Option<(ServerMsg, usize)>, Tunne
                 other => Err(TunnelError::InvalidAddrFamily(other)),
             }
         }
-        other => Err(TunnelError::InvalidIntent(other)),
+        other => Err(TunnelError::InvalidMsgKind(other)),
     }
 }
 
@@ -584,7 +586,7 @@ mod tests {
         let buf = vec![99, 0, 0];
         assert!(matches!(
             decode_server_msg(&buf),
-            Err(TunnelError::InvalidIntent(99))
+            Err(TunnelError::InvalidMsgKind(99))
         ));
     }
 
