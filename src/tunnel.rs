@@ -81,16 +81,19 @@ pub struct TunnelRegistry {
     /// Optional mapping from zone -> key_id (set when token entries include zone).
     zones: RwLock<HashMap<u64, TokenKeyId>>,
     /// Active agents by key_id
-    agents: RwLock<HashMap<TokenKeyId, AgentHandle>>,
+    agents: RwLock<HashMap<TokenKeyId, AgentRecord>>,
+    /// Monotonic id for per-key agent generations.
+    agent_gen: std::sync::atomic::AtomicU64,
     /// Pending sessions
     pending: RwLock<HashMap<SessionToken, PendingSession>>,
     /// Expired sessions counter
     expired_sessions: std::sync::atomic::AtomicU64,
 }
 
-#[derive(Clone)]
-struct AgentHandle {
+struct AgentRecord {
+    id: u64,
     tx: mpsc::Sender<TunnelCommand>,
+    task: tokio::task::JoinHandle<()>,
 }
 
 struct PendingSession {
@@ -112,6 +115,7 @@ impl Default for TunnelRegistry {
             agents: RwLock::new(HashMap::new()),
             pending: RwLock::new(HashMap::new()),
             expired_sessions: std::sync::atomic::AtomicU64::new(0),
+            agent_gen: std::sync::atomic::AtomicU64::new(1),
         }
     }
 }
@@ -203,12 +207,15 @@ impl TunnelRegistry {
         session: Option<&[u8; 32]>,
         provided_hmac: &[u8; 32],
     ) -> anyhow::Result<Arc<TokenInfo>> {
-        // Check timestamp is within ±5 seconds for replay protection
+        // Check timestamp is within a small window for replay protection.
+        //
+        // In practice, production boxes (or containers) can drift a bit; keep this tolerant enough
+        // to avoid flapping when NTP isn't perfect.
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs();
 
-        if now.abs_diff(timestamp) > 5 {
+        if now.abs_diff(timestamp) > 60 {
             anyhow::bail!("timestamp out of range (replay protection failed)");
         }
 
@@ -249,21 +256,16 @@ impl TunnelRegistry {
             .await?;
 
         let (tx, mut rx) = mpsc::channel(8);
-
-        // INSERT INTO REGISTRY FIRST (before spawning task)
-        {
-            let mut agents = self.agents.write().await;
-            if agents.contains_key(&key_id) {
-                anyhow::bail!("tunnel token already registered");
-            }
-            agents.insert(key_id, AgentHandle { tx: tx.clone() });
-        }
+        let id = self
+            .agent_gen
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         LureLogger::tunnel_agent_registered(&key_id_prefix(&key_id.0));
 
-        // SPAWN TASK SECOND (after registration)
+        // Spawn the task that will push offers to the agent. If a new agent registers with the
+        // same key_id (restart), we abort the old task and replace it.
         let registry = Arc::clone(self);
-        spawn_named("tunnel-agent-listener", async move {
+        let task = spawn_named("tunnel-agent-listener", async move {
             while let Some(cmd) = rx.recv().await {
                 let mut buf = Vec::new();
                 match cmd {
@@ -276,10 +278,30 @@ impl TunnelRegistry {
                 }
             }
             let mut agents = registry.agents.write().await;
-            agents.remove(&key_id);
+            if let Some(active) = agents.get(&key_id) {
+                if active.id == id {
+                    agents.remove(&key_id);
+                }
+            }
             LureLogger::tunnel_agent_disconnected(&key_id_prefix(&key_id.0));
         })
         .context("failed to spawn tunnel listener task")?;
+
+        // Replace any existing registration for this key_id (common on agent restart).
+        {
+            let mut agents = self.agents.write().await;
+            if let Some(old) = agents.remove(&key_id) {
+                old.task.abort();
+            }
+            agents.insert(
+                key_id,
+                AgentRecord {
+                    id,
+                    tx: tx.clone(),
+                    task,
+                },
+            );
+        }
 
         Ok(())
     }
@@ -333,11 +355,8 @@ impl TunnelRegistry {
 
         LureLogger::tunnel_session_offered(&key_id_prefix(&key_id.0), &target);
 
-        let agent = {
-            let agents = self.agents.read().await;
-            agents.get(&key_id).cloned()
-        };
-        let Some(agent) = agent else {
+        let agent_tx = { self.agents.read().await.get(&key_id).map(|a| a.tx.clone()) };
+        let Some(agent_tx) = agent_tx else {
             let mut pending = self.pending.write().await;
             pending.remove(&session);
             LureLogger::tunnel_agent_missing(
@@ -347,7 +366,7 @@ impl TunnelRegistry {
             anyhow::bail!("no active tunnel agent registered for key_id");
         };
 
-        match agent.tx.send(TunnelCommand::OfferSession { session }).await {
+        match agent_tx.send(TunnelCommand::OfferSession { session }).await {
             Ok(()) => Ok(rx),
             Err(_) => {
                 let mut pending = self.pending.write().await;

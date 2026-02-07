@@ -379,7 +379,10 @@ impl Lure {
                 raw,
             } => (handshake, buffered, raw),
             IngressHello::Tunnel { hello } => {
-                self.handle_tunnel_ingress(connection, hello).await?;
+                if let Err(err) = self.handle_tunnel_ingress(connection, hello).await {
+                    LureLogger::tunnel_ingress_error("handle_tunnel_ingress", &err);
+                    return Err(err);
+                }
                 return Ok(());
             }
         };
@@ -631,11 +634,8 @@ impl Lure {
 
         let resolved_key_id: Option<TokenKeyId> = match tunnel {
             crate::router::TunnelOpt::KeyId(id) => Some(TokenKeyId(id)),
-            crate::router::TunnelOpt::ZoneDefault => self
-                .tunnels
-                .key_id_for_zone(route.zone)
-                .await
-                .or_else(|| {
+            crate::router::TunnelOpt::ZoneDefault => {
+                self.tunnels.key_id_for_zone(route.zone).await.or_else(|| {
                     route.tunnel_token.map(|token| {
                         // v2 backcompat: use the first 8 bytes of the 32-byte route token as key_id for HMAC.
                         TokenKeyId({
@@ -644,7 +644,8 @@ impl Lure {
                             arr
                         })
                     })
-                }),
+                })
+            }
             crate::router::TunnelOpt::None => {
                 if let Some(token) = route.tunnel_token {
                     Some(TokenKeyId({
@@ -653,9 +654,7 @@ impl Lure {
                         arr
                     }))
                 } else {
-                    self.tunnels
-                        .key_id_for_zone(route.zone)
-                        .await
+                    self.tunnels.key_id_for_zone(route.zone).await
                 }
             }
         };

@@ -572,10 +572,7 @@ async fn listen_once(ingress: SocketAddr, config: TunConfig) -> anyhow::Result<(
     )
     .await?;
 
-    info!(
-        "registered with proxy: key_id={}",
-        hex::encode(config.key_id)
-    );
+    info!("sent listen hello: key_id={}", hex::encode(config.key_id));
 
     let mut buf = Vec::new();
     let mut read_buf = vec![0u8; 1024];
