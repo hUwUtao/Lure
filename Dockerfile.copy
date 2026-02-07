@@ -1,9 +1,14 @@
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
-RUN apt-get update && apt-get upgrade -y && apt-get install -y openssl
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY lure /app/lure
-RUN chmod +x /app/lure
+RUN chmod 0755 /app/lure \
+    && useradd -r -u 10001 -g nogroup lure \
+    && chown -R lure:nogroup /app
 
+USER lure
 CMD ["/app/lure"]

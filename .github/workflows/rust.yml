@@ -12,54 +12,118 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  determine_stable:
+  determine:
     runs-on: ubuntu-latest
     outputs:
-      stable: ${{ steps.flag.outputs.stable }}
+      stable: ${{ steps.determine.outputs.stable }}
+      build_needed: ${{ steps.determine.outputs.build_needed }}
+      docker_needed: ${{ steps.determine.outputs.docker_needed }}
     steps:
-      - name: Determine stable flag
-        id: flag
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Install deps
         run: |
-          if [ "${{ github.event_name }}" != "push" ]; then
-            echo "stable=false" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          MSG="${{ github.event.head_commit.message }}"
-          if echo "$MSG" | grep -q '\[stable\]'; then
-            echo "stable=true" >> $GITHUB_OUTPUT
-          else
-            echo "stable=false" >> $GITHUB_OUTPUT
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends jq
+          sudo rm -rf /var/lib/apt/lists/*
+
+      - name: Determine flags and changed paths
+        id: determine
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Read event data from the event JSON to avoid any shell interpolation of commit messages.
+          EVENT_NAME="${GITHUB_EVENT_NAME}"
+          MSG=""
+          if [ -f "${GITHUB_EVENT_PATH}" ]; then
+            MSG="$(jq -r '.head_commit.message // ""' "${GITHUB_EVENT_PATH}" 2>/dev/null || true)"
           fi
 
-  build:
+          STABLE=false
+          if [ "${EVENT_NAME}" = "push" ] && printf '%s' "${MSG}" | grep -Fq '[stable]'; then
+            STABLE=true
+          fi
+          printf 'stable=%s\n' "${STABLE}" >> "${GITHUB_OUTPUT}"
+
+          BASE_SHA=""
+          if [ -f "${GITHUB_EVENT_PATH}" ]; then
+            # push: .before, pull_request: .pull_request.base.sha
+            BASE_SHA="$(jq -r 'if .pull_request then .pull_request.base.sha else .before end // ""' "${GITHUB_EVENT_PATH}" 2>/dev/null || true)"
+          fi
+          if [ -z "${BASE_SHA}" ] || [ "${BASE_SHA}" = "0000000000000000000000000000000000000000" ]; then
+            BASE_SHA="$(git rev-parse HEAD^ 2>/dev/null || true)"
+          fi
+          HEAD_SHA="${GITHUB_SHA}"
+
+          CHANGED_FILES=""
+          if [ -n "${BASE_SHA}" ]; then
+            CHANGED_FILES="$(git diff --name-only "${BASE_SHA}" "${HEAD_SHA}" || true)"
+          fi
+
+          # Decide whether to build/test and whether to publish docker based on changed files.
+          if printf '%s\n' "${CHANGED_FILES}" | grep -qE '^(src/|net/|tun/|Cargo\.toml|Cargo\.lock|\.github/workflows/|Dockerfile\.copy)' ; then
+            printf 'build_needed=true\n' >> "${GITHUB_OUTPUT}"
+          else
+            printf 'build_needed=false\n' >> "${GITHUB_OUTPUT}"
+          fi
+
+          if printf '%s\n' "${CHANGED_FILES}" | grep -qE '^(src/|net/|tun/|Cargo\.toml|Cargo\.lock|\.github/workflows/|Dockerfile\.copy)'; then
+            printf 'docker_needed=true\n' >> "${GITHUB_OUTPUT}"
+          else
+            printf 'docker_needed=false\n' >> "${GITHUB_OUTPUT}"
+          fi
+
+  build_default:
     runs-on: ubuntu-latest
-    #needs: determine_stable
-    outputs:
-      docker_needed: ${{ steps.check.outputs.docker_needed }}
+    needs: determine
+    if: needs.determine.outputs.build_needed == 'true'
+    # Build on Debian trixie so the produced binary links against trixie's glibc.
+    container:
+      image: rust:1-slim-trixie
     env:
       CARGO_TERM_COLOR: always
+      CARGO_HOME: /usr/local/cargo
+      RUSTUP_HOME: /usr/local/rustup
       CARGO_TARGET_DIR: target-default
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
 
+      - name: Install build deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates \
+            build-essential \
+            git \
+            pkg-config \
+            libssl-dev
+          rm -rf /var/lib/apt/lists/*
+
       - name: Cache cargo (default)
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
+            ${{ env.CARGO_HOME }}/bin/
+            ${{ env.CARGO_HOME }}/registry/index/
+            ${{ env.CARGO_HOME }}/registry/cache/
+            ${{ env.CARGO_HOME }}/git/db/
             ${{ env.CARGO_TARGET_DIR }}
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-default
           restore-keys: |
             ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-
 
+      - name: Install nightly toolchain
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup component add rustfmt --toolchain nightly || true
+
       - name: Build (default)
         run: cargo +nightly build --release --verbose
 
-      - name: Test
+      - name: Test (default)
         run: cargo +nightly test --release --verbose
 
       - name: Prepare default artifact
@@ -79,44 +143,56 @@ jobs:
           if-no-files-found: error
           overwrite: true
 
-      - name: Docker needed
-        id: check
-        run: |
-          CHANGED_FILES=$(git diff --name-only HEAD^ HEAD || true)
-          if echo "$CHANGED_FILES" | grep -qE '^(src/|net/|Cargo\.toml|Cargo\.lock|\.github/workflows/|Dockerfile\.copy)'; then
-            echo "docker_needed=true" >> $GITHUB_OUTPUT
-          else
-            echo "docker_needed=false" >> $GITHUB_OUTPUT
-          fi
-
-  stable_build:
+  build_stable:
     runs-on: ubuntu-latest
-    needs: determine_stable
-    if: needs.determine_stable.outputs.stable == 'true'
+    needs: determine
+    if: needs.determine.outputs.build_needed == 'true' && needs.determine.outputs.stable == 'true'
+    container:
+      image: rust:1-slim-trixie
     env:
       CARGO_TERM_COLOR: always
+      CARGO_HOME: /usr/local/cargo
+      RUSTUP_HOME: /usr/local/rustup
       CARGO_TARGET_DIR: target-stable
       RUSTFLAGS: "-Zdylib-lto -C opt-level=3 -C lto=fat -C codegen-units=8 --cfg tokio_unstable -C embed-bitcode=yes -C panic=abort -C incremental=no -C target-cpu=x86-64-v3"
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
 
-      - name: Cache cargo (stable)
+      - name: Install build deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates \
+            build-essential \
+            git \
+            pkg-config \
+            libssl-dev
+          rm -rf /var/lib/apt/lists/*
+
+      - name: Cache cargo ([stable])
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
+            ${{ env.CARGO_HOME }}/bin/
+            ${{ env.CARGO_HOME }}/registry/index/
+            ${{ env.CARGO_HOME }}/registry/cache/
+            ${{ env.CARGO_HOME }}/git/db/
             ${{ env.CARGO_TARGET_DIR }}
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-stable
           restore-keys: |
             ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-
 
-      - name: Build [stable] variant
+      - name: Install nightly toolchain
         run: |
-          cargo +nightly build --release --verbose
+          rustup toolchain install nightly --profile minimal
+          rustup component add rustfmt --toolchain nightly || true
+
+      - name: Build ([stable])
+        run: cargo +nightly build --release --verbose
+
+      - name: Prepare [stable] artifact
+        run: |
           mkdir -p release-stable
           cp ${{ env.CARGO_TARGET_DIR }}/release/lure release-stable/lure
           chmod +x release-stable/lure
@@ -134,8 +210,8 @@ jobs:
           
   docker_release:
     runs-on: ubuntu-latest
-    needs: build
-    if: github.ref == 'refs/heads/main' && needs.build.outputs.docker_needed == 'true'
+    needs: [determine, build_default]
+    if: github.ref == 'refs/heads/main' && needs.determine.outputs.build_needed == 'true' && needs.determine.outputs.docker_needed == 'true'
     permissions:
       contents: read
       packages: write
@@ -176,8 +252,8 @@ jobs:
 
   docker_release_stable:
     runs-on: ubuntu-latest
-    needs: stable_build
-    if: github.ref == 'refs/heads/main' && needs.stable_build.result == 'success'
+    needs: [determine, build_stable]
+    if: github.ref == 'refs/heads/main' && needs.determine.outputs.build_needed == 'true' && needs.determine.outputs.stable == 'true'
     permissions:
       contents: read
       packages: write
