@@ -1,5 +1,5 @@
 use std::{
-    net::SocketAddr,
+    net::{SocketAddr, ToSocketAddrs},
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
 };
@@ -272,6 +272,20 @@ WantedBy={}
         endpoint,
         wanted_by
     )
+}
+
+fn resolve_endpoint(endpoint: &str) -> anyhow::Result<SocketAddr> {
+    // Fast-path: allow raw SocketAddr (IP:port) without any resolver calls.
+    if let Ok(addr) = endpoint.parse::<SocketAddr>() {
+        return Ok(addr);
+    }
+
+    // Accept host:port and resolve via the system resolver.
+    // Note: this is a blocking call; acceptable for a CLI agent since it only runs on connect/reconnect.
+    let mut addrs = endpoint.to_socket_addrs()?;
+    addrs
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("no addresses found for endpoint: {endpoint}"))
 }
 
 fn run_systemd_install(args: SystemdInstallArgs) -> anyhow::Result<()> {
@@ -698,10 +712,11 @@ fn main() {
                 std::process::exit(1);
             };
 
-            let proxy: SocketAddr = match args.proxy.parse() {
+            let proxy: SocketAddr = match resolve_endpoint(&args.proxy) {
                 Ok(addr) => addr,
                 Err(err) => {
-                    eprintln!("error: invalid proxy address: {err}");
+                    eprintln!("error: invalid proxy endpoint {}: {err}", args.proxy);
+                    eprintln!("expected: <ip:port> or <host:port>");
                     std::process::exit(1);
                 }
             };
