@@ -43,9 +43,16 @@ impl crate::telemetry::event::EventHook<EventEnvelope, EventEnvelope> for Tunnel
     ) -> anyhow::Result<()> {
         match event {
             EventEnvelope::FlushTunnelTokens(_) => {
+                log::info!("tunnel: flush token registry (control-plane)");
                 let _ = self.tx.send(TunnelControlMsg::Flush);
             }
             EventEnvelope::SetTunnelToken(entry) => {
+                log::info!(
+                    "tunnel: upsert token (control-plane): key_id={} zone={:?} name={:?}",
+                    entry.key_id,
+                    entry.zone,
+                    entry.name
+                );
                 let _ = self.tx.send(TunnelControlMsg::Upsert(entry.clone()));
             }
             _ => {}
@@ -148,6 +155,7 @@ impl TunnelRegistry {
             );
         }
 
+        log::info!("tunnel: loaded {} tokens (settings.toml)", tokens.len());
         Ok(())
     }
 
@@ -169,6 +177,7 @@ impl TunnelRegistry {
             let mut pending = self.pending.write().await;
             pending.clear();
         }
+        log::info!("tunnel: cleared runtime token/zone/pending state");
     }
 
     pub async fn upsert_token(&self, entry: &TokenEntry) -> anyhow::Result<()> {
@@ -190,6 +199,13 @@ impl TunnelRegistry {
                 created_at: Instant::now(),
                 last_used: RwLock::new(Instant::now()),
             }),
+        );
+        log::info!(
+            "tunnel: token upserted: key_id={} zone={:?} name={:?} (total={})",
+            entry.key_id,
+            entry.zone,
+            entry.name,
+            tokens.len()
         );
         Ok(())
     }
