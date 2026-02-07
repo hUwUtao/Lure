@@ -11,14 +11,40 @@ use std::{
 };
 
 use anyhow::Context;
-
 use lure::sock::{self, BackendKind};
+
+// High-precision nanosecond timer using CLOCK_MONOTONIC
+fn get_nanos() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    unsafe {
+        libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
+    }
+    (ts.tv_sec as u64) * 1_000_000_000 + (ts.tv_nsec as u64)
+}
 
 const DEFAULT_DURATION_SECS: u64 = 15;
 const DEFAULT_WARMUP_SECS: u64 = 5;
 const DEFAULT_CONCURRENCY: usize = 32;
 const DEFAULT_PAYLOAD: usize = 1024;
 const PROXY_BUF_SIZE: usize = 16 * 1024;
+
+// Nanosecond precision timestamps for each operation
+struct TimestampedLatency {
+    total_ns: u64, // Total round-trip latency (send_start to recv_end)
+    send_ns: u64,  // Send phase latency (time to write)
+    recv_ns: u64,  // Receive phase latency (time to read response)
+}
+
+// Request with embedded timestamp for validation
+#[repr(C)]
+struct PipelinedRequest {
+    seq_num: u64,        // Sequence number for matching
+    send_ts_ns: u64,     // Send timestamp (nanoseconds)
+    padding: [u8; 1008], // Pad to payload size
+}
 
 struct BenchConfig {
     duration: Duration,
@@ -31,17 +57,20 @@ struct BenchResult {
     duration: Duration,
     total_ops: u64,
     total_bytes: u64,
-    latencies_ns: Vec<u64>,
+    latencies: Vec<TimestampedLatency>,
 }
 
 struct LatencyStats {
     count: usize,
-    mean_us: f64,
-    median_us: f64,
-    p95_us: f64,
-    p99_us: f64,
-    max_us: f64,
-    stdev_us: f64,
+    mean_ms: f64,
+    median_ms: f64,
+    p50_ms: f64,
+    p95_ms: f64,
+    p99_ms: f64,
+    max_ms: f64,
+    stdev_ms: f64,
+    send_mean_ms: f64,
+    recv_mean_ms: f64,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -152,13 +181,13 @@ fn run_client_load(
     let start = Instant::now();
     let mut total_ops = 0u64;
     let mut total_bytes = 0u64;
-    let mut latencies_ns = Vec::new();
+    let mut latencies = Vec::new();
 
     for thread_result in rx {
         total_ops += thread_result.total_ops;
         total_bytes += thread_result.total_bytes;
         if record_latencies {
-            latencies_ns.extend(thread_result.latencies_ns);
+            latencies.extend(thread_result.latencies);
         }
     }
 
@@ -166,14 +195,14 @@ fn run_client_load(
         duration: start.elapsed(),
         total_ops,
         total_bytes,
-        latencies_ns,
+        latencies,
     })
 }
 
 struct ThreadResult {
     total_ops: u64,
     total_bytes: u64,
-    latencies_ns: Vec<u64>,
+    latencies: Vec<TimestampedLatency>,
 }
 
 fn client_worker(
@@ -183,7 +212,7 @@ fn client_worker(
     record_latencies: bool,
 ) -> ThreadResult {
     let mut total_ops = 0u64;
-    let mut latencies_ns = Vec::new();
+    let mut latencies = Vec::new();
 
     let mut stream = match TcpStream::connect(proxy_addr) {
         Ok(stream) => stream,
@@ -191,33 +220,84 @@ fn client_worker(
             return ThreadResult {
                 total_ops: 0,
                 total_bytes: 0,
-                latencies_ns,
-            }
+                latencies,
+            };
         }
     };
     let _ = stream.set_nodelay(true);
 
-    let write_buf = vec![0u8; payload];
+    // Pipelined I/O: send multiple requests, then drain responses
+    // This measures send and receive latency separately
+    const PIPELINE_DEPTH: usize = 8;
+    let mut write_buf = vec![0u8; payload];
     let mut read_buf = vec![0u8; payload];
+    let mut pending_timestamps = Vec::new(); // vec of send_timestamp
 
-    while Instant::now() < deadline {
-        let start = Instant::now();
-        if stream.write_all(&write_buf).is_err() {
+    // Pre-fill write buffer with data
+    for i in 0..payload {
+        write_buf[i] = (i % 256) as u8;
+    }
+
+    loop {
+        let now = Instant::now();
+        if now >= deadline && pending_timestamps.is_empty() {
             break;
         }
-        if stream.read_exact(&mut read_buf).is_err() {
-            break;
+
+        // Send phase: queue up to PIPELINE_DEPTH requests in parallel
+        while pending_timestamps.len() < PIPELINE_DEPTH && now < deadline {
+            let send_start_ns = get_nanos();
+            match stream.write_all(&write_buf) {
+                Ok(_) => {
+                    let send_end_ns = get_nanos();
+                    pending_timestamps.push((send_start_ns, send_end_ns));
+                }
+                Err(_) => {
+                    return ThreadResult {
+                        total_ops,
+                        total_bytes: total_ops * payload as u64 * 2,
+                        latencies,
+                    };
+                }
+            }
         }
-        total_ops += 1;
-        if record_latencies {
-            latencies_ns.push(start.elapsed().as_nanos() as u64);
+
+        // Receive phase: drain responses in FIFO order
+        while !pending_timestamps.is_empty() {
+            let recv_start_ns = get_nanos();
+            match stream.read_exact(&mut read_buf) {
+                Ok(_) => {
+                    let recv_end_ns = get_nanos();
+                    let (send_start_ns, send_end_ns) = pending_timestamps.remove(0);
+
+                    let send_ns = send_end_ns - send_start_ns;
+                    let recv_ns = recv_end_ns - recv_start_ns;
+                    let total_ns = recv_end_ns - send_start_ns;
+
+                    total_ops += 1;
+                    if record_latencies {
+                        latencies.push(TimestampedLatency {
+                            total_ns,
+                            send_ns,
+                            recv_ns,
+                        });
+                    }
+                }
+                Err(_) => {
+                    return ThreadResult {
+                        total_ops,
+                        total_bytes: total_ops * payload as u64 * 2,
+                        latencies,
+                    };
+                }
+            }
         }
     }
 
     ThreadResult {
         total_ops,
         total_bytes: total_ops * payload as u64 * 2,
-        latencies_ns,
+        latencies,
     }
 }
 
@@ -233,65 +313,84 @@ fn report(result: &BenchResult) {
     println!("  ops/sec: {:.2}", ops_per_sec);
     println!("  throughput: {:.2} MiB/s", mib_per_sec);
 
-    if result.latencies_ns.is_empty() {
+    if result.latencies.is_empty() {
         println!("  latency: (none)");
         return;
     }
 
-    let mut latencies = result.latencies_ns.clone();
-    if let Some(stats) = latency_stats(&mut latencies) {
-        println!("  latency (us):");
-        println!("    mean: {:.2}", stats.mean_us);
-        println!("    median: {:.2}", stats.median_us);
-        println!("    p95: {:.2}", stats.p95_us);
-        println!("    p99: {:.2}", stats.p99_us);
-        println!("    max: {:.2}", stats.max_us);
-        println!("    stdev: {:.2}", stats.stdev_us);
+    if let Some(stats) = latency_stats(&result.latencies) {
+        println!("  latency (ms):");
+        println!("    mean: {:.4}", stats.mean_ms);
+        println!("    median (p50): {:.4}", stats.p50_ms);
+        println!("    p95: {:.4}", stats.p95_ms);
+        println!("    p99: {:.4}", stats.p99_ms);
+        println!("    max: {:.4}", stats.max_ms);
+        println!("    stdev: {:.4}", stats.stdev_ms);
+        println!("  latency components (ms):");
+        println!("    send avg: {:.4}", stats.send_mean_ms);
+        println!("    recv avg: {:.4}", stats.recv_mean_ms);
         println!("    samples: {}", stats.count);
     }
 }
 
-fn latency_stats(latencies_ns: &mut [u64]) -> Option<LatencyStats> {
-    if latencies_ns.is_empty() {
+fn latency_stats(latencies: &[TimestampedLatency]) -> Option<LatencyStats> {
+    if latencies.is_empty() {
         return None;
     }
 
-    latencies_ns.sort_unstable();
-    let count = latencies_ns.len();
-    let mut sum = 0f64;
-    let mut sum_sq = 0f64;
+    let count = latencies.len();
 
-    for &value in latencies_ns.iter() {
-        let us = value as f64 / 1_000.0;
-        sum += us;
-        sum_sq += us * us;
+    // Extract total latencies for percentile calculation (in ns)
+    let mut total_latencies: Vec<u64> = latencies.iter().map(|l| l.total_ns).collect();
+    total_latencies.sort_unstable();
+
+    let mut total_sum = 0f64;
+    let mut total_sum_sq = 0f64;
+    let mut send_sum = 0f64;
+    let mut recv_sum = 0f64;
+
+    for lat in latencies.iter() {
+        let total_ms = lat.total_ns as f64 / 1_000_000.0;
+        let send_ms = lat.send_ns as f64 / 1_000_000.0;
+        let recv_ms = lat.recv_ns as f64 / 1_000_000.0;
+
+        total_sum += total_ms;
+        total_sum_sq += total_ms * total_ms;
+        send_sum += send_ms;
+        recv_sum += recv_ms;
     }
 
-    let mean_us = sum / count as f64;
-    let variance = (sum_sq / count as f64) - (mean_us * mean_us);
-    let stdev_us = variance.max(0.0).sqrt();
-    let median_us = percentile_us(latencies_ns, 50.0);
-    let p95_us = percentile_us(latencies_ns, 95.0);
-    let p99_us = percentile_us(latencies_ns, 99.0);
-    let max_us = *latencies_ns.last().unwrap() as f64 / 1_000.0;
+    let mean_ms = total_sum / count as f64;
+    let variance = (total_sum_sq / count as f64) - (mean_ms * mean_ms);
+    let stdev_ms = variance.max(0.0).sqrt();
+    let send_mean_ms = send_sum / count as f64;
+    let recv_mean_ms = recv_sum / count as f64;
+
+    let p50_ms = percentile_ms(&total_latencies, 50.0);
+    let p95_ms = percentile_ms(&total_latencies, 95.0);
+    let p99_ms = percentile_ms(&total_latencies, 99.0);
+    let max_ms = *total_latencies.last().unwrap() as f64 / 1_000_000.0;
 
     Some(LatencyStats {
         count,
-        mean_us,
-        median_us,
-        p95_us,
-        p99_us,
-        max_us,
-        stdev_us,
+        mean_ms,
+        median_ms: p50_ms,
+        p50_ms,
+        p95_ms,
+        p99_ms,
+        max_ms,
+        stdev_ms,
+        send_mean_ms,
+        recv_mean_ms,
     })
 }
 
-fn percentile_us(latencies_ns: &[u64], pct: f64) -> f64 {
+fn percentile_ms(latencies_ns: &[u64], pct: f64) -> f64 {
     if latencies_ns.is_empty() {
         return 0.0;
     }
     let rank = ((pct / 100.0) * (latencies_ns.len() as f64 - 1.0)).round() as usize;
-    latencies_ns[rank.min(latencies_ns.len() - 1)] as f64 / 1_000.0
+    latencies_ns[rank.min(latencies_ns.len() - 1)] as f64 / 1_000_000.0
 }
 
 struct EchoServer {
@@ -359,6 +458,7 @@ impl ProxyServer {
 
         let join = thread::spawn(move || match kind {
             BackendKind::Tokio => run_proxy_tokio(backend_addr, payload, addr_tx, stop_rx),
+            BackendKind::Epoll => run_proxy_tokio(backend_addr, payload, addr_tx, stop_rx),
             BackendKind::Uring => run_proxy_uring(backend_addr, payload, addr_tx, stop_rx),
         });
 
@@ -390,7 +490,7 @@ fn run_proxy_tokio(
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async move {
-                let listener = sock::Listener::bind("127.0.0.1:0".parse()?).await?;
+                let listener = sock::LureListener::bind("127.0.0.1:0".parse()?).await?;
                 let addr = listener.local_addr()?;
                 let _ = addr_tx.send(addr);
 
@@ -417,8 +517,8 @@ fn run_proxy_uring(
     addr_tx: std::sync::mpsc::Sender<SocketAddr>,
     mut stop_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> anyhow::Result<()> {
-    tokio_uring::start(async move {
-        let listener = sock::Listener::bind("127.0.0.1:0".parse()?).await?;
+    net::sock::uring::start(async move {
+        let listener = sock::LureListener::bind("127.0.0.1:0".parse()?).await?;
         let addr = listener.local_addr()?;
         let _ = addr_tx.send(addr);
 
@@ -427,7 +527,7 @@ fn run_proxy_uring(
                 _ = &mut stop_rx => break,
                 res = listener.accept() => {
                     let (client, _) = res?;
-                    tokio_uring::spawn(async move {
+                    net::sock::uring::spawn(async move {
                         let _ = proxy_connection(client, backend_addr, payload).await;
                     });
                 }
@@ -438,11 +538,11 @@ fn run_proxy_uring(
 }
 
 async fn proxy_connection(
-    mut client: sock::Connection,
+    mut client: sock::LureConnection,
     backend_addr: SocketAddr,
     payload: usize,
 ) -> io::Result<()> {
-    let mut server = sock::Connection::connect(backend_addr).await?;
+    let mut server = sock::LureConnection::connect(backend_addr).await?;
     let _ = client.set_nodelay(true);
     let _ = server.set_nodelay(true);
 
@@ -466,8 +566,8 @@ async fn proxy_connection(
 }
 
 async fn relay_exact(
-    from: &mut sock::Connection,
-    to: &mut sock::Connection,
+    from: &mut sock::LureConnection,
+    to: &mut sock::LureConnection,
     mut buf: Vec<u8>,
     mut remaining: usize,
 ) -> io::Result<Vec<u8>> {
@@ -478,10 +578,7 @@ async fn relay_exact(
         }
         let (n, mut out) = from.read_chunk(buf).await?;
         if n == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "peer closed",
-            ));
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "peer closed"));
         }
         out.truncate(n);
         out = to.write_all(out).await?;

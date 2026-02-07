@@ -95,4 +95,60 @@ impl LureLogger {
             duration, context
         );
     }
+
+    // ============================================================================
+    // Tunnel-specific logging
+    // ============================================================================
+
+    pub fn tunnel_agent_registered(token_prefix: &str) {
+        info!("Tunnel agent registered: token={}", token_prefix);
+    }
+
+    pub fn tunnel_agent_disconnected(token_prefix: &str) {
+        debug!("Tunnel agent disconnected: token={}", token_prefix);
+    }
+
+    pub fn tunnel_session_offered(token_prefix: &str, target: &SocketAddr) {
+        debug!(
+            "Tunnel session offered: token={} target={}",
+            token_prefix, target
+        );
+    }
+
+    pub fn tunnel_session_accepted(token_prefix: &str, target: &SocketAddr) {
+        debug!(
+            "Tunnel session accepted: token={} target={}",
+            token_prefix, target
+        );
+    }
+
+    pub fn tunnel_session_timeout(session_prefix: &str) {
+        debug!("Tunnel session expired: session={}", session_prefix);
+    }
+
+    pub fn tunnel_session_missing(session_prefix: &str) {
+        warn!("Tunnel session not found: session={}", session_prefix);
+    }
+
+    pub fn tunnel_agent_missing(token_prefix: &str, session_prefix: &str) {
+        warn!(
+            "Tunnel agent not found: token={} session={}",
+            token_prefix, session_prefix
+        );
+    }
+
+    pub fn tunnel_token_mismatch(agent_token_prefix: &str, session_token_prefix: &str) {
+        warn!(
+            "Tunnel token mismatch (unauthorized accept attempt): agent={} session={}",
+            agent_token_prefix, session_token_prefix
+        );
+    }
+
+    pub fn tunnel_ingress_error(stage: &str, err: &Error) {
+        warn!("Tunnel ingress error during {stage}: {err}");
+    }
+
+    pub fn tunnel_session_error(stage: &str, target: &SocketAddr, err: impl Display) {
+        error!("Tunnel session error during {stage} (target {target}): {err}");
+    }
 }

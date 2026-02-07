@@ -2,6 +2,7 @@ use std::{
     fmt::Debug,
     io::{self, ErrorKind},
 };
+
 // use futures::FutureExt;
 use net::{
     LoginDisconnectS2c, LoginStartC2s, PacketDecode, PacketDecoder, PacketEncode, PacketEncoder,
@@ -12,13 +13,14 @@ use opentelemetry::{
     metrics::{Counter, Histogram, Meter},
 };
 use serde_json::to_string as json_string;
-use crate::{sock::Connection, telemetry::get_meter};
+
+use crate::{sock::LureConnection, telemetry::get_meter};
 
 pub(crate) struct EncodedConnection<'a> {
     enc: PacketEncoder,
     dec: PacketDecoder,
     frame: PacketFrame,
-    stream: &'a mut Connection,
+    stream: &'a mut LureConnection,
     read_buf: Vec<u8>,
     metric: ConnectionMetric,
     intent: KeyValue,
@@ -77,7 +79,7 @@ impl<'a, 'b> PacketEncode for VersionedLoginStart<'a, 'b> {
 }
 
 impl<'a> EncodedConnection<'a> {
-    pub fn new(stream: &'a mut Connection, intent: SocketIntent) -> Self {
+    pub fn new(stream: &'a mut LureConnection, intent: SocketIntent) -> Self {
         let metric = get_meter();
         Self {
             enc: PacketEncoder::new(),
@@ -92,6 +94,18 @@ impl<'a> EncodedConnection<'a> {
             intent: intent.as_attr(),
             _reserved_lifetime: std::marker::PhantomData,
         }
+    }
+
+    pub fn with_buffered(
+        stream: &'a mut LureConnection,
+        intent: SocketIntent,
+        buffered: Vec<u8>,
+    ) -> Self {
+        let mut conn = Self::new(stream, intent);
+        if !buffered.is_empty() {
+            conn.dec.queue_slice(&buffered);
+        }
+        conn
     }
 
     fn packet_record(&self, size: usize) {
@@ -234,11 +248,11 @@ impl<'a> EncodedConnection<'a> {
         Ok(())
     }
 
-    pub fn as_inner_mut(&mut self) -> &mut Connection {
+    pub fn as_inner_mut(&mut self) -> &mut LureConnection {
         self.stream
     }
 
-    pub fn as_inner(&self) -> &Connection {
+    pub fn as_inner(&self) -> &LureConnection {
         self.stream
     }
 

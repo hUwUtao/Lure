@@ -49,6 +49,8 @@ pub(crate) enum EventEnvelope {
     Hello(Empty),
     SetRoute(crate::router::Route),
     RemoveRoute(Id),
+    FlushTunnelTokens(Empty),
+    SetTunnelToken(crate::config::TokenEntry),
     ListRouteRequest(Empty),
     ListRouteResponse(NonObj<Vec<crate::router::Route>>),
     ListSessionsRequest(InspectRequest),

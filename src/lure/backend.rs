@@ -8,7 +8,7 @@ use crate::{
     connection::{EncodedConnection, SocketIntent},
     logging::LureLogger,
     packet::{OwnedHandshake, encode_uncompressed_packet},
-    sock::Connection,
+    sock::LureConnection,
 };
 
 mod headers;
@@ -30,7 +30,7 @@ pub(crate) async fn connect(
     proxied: bool,
     config: &LureConfig,
     client_addr: SocketAddr,
-) -> Result<Connection, BackendConnectError> {
+) -> Result<LureConnection, BackendConnectError> {
     let mut backend = open_backend_connection(address)
         .await
         .map_err(BackendConnectError::Connect)?;
@@ -108,8 +108,8 @@ async fn init_handshake(
     Ok(())
 }
 
-async fn open_backend_connection(address: SocketAddr) -> anyhow::Result<Connection> {
-    let stream = timeout(Duration::from_secs(3), Connection::connect(address)).await??;
+async fn open_backend_connection(address: SocketAddr) -> anyhow::Result<LureConnection> {
+    let stream = timeout(Duration::from_secs(3), LureConnection::connect(address)).await??;
     debug!("Connected to backend: {}", address);
 
     if dotenvy::var("NO_NODELAY").is_err()

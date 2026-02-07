@@ -33,6 +33,12 @@ pub struct ClientIntent {
 #[derive(Debug)]
 pub struct ThreatControlService;
 
+impl Default for ThreatControlService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ThreatControlService {
     pub fn new() -> Self {
         Self {}

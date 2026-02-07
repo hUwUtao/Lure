@@ -10,10 +10,12 @@ use std::{
 use serde::Serialize;
 use tokio::sync::RwLock;
 
-use crate::utils::UnsafeCounterU64;
-use crate::telemetry::inspect::{
-    InstanceStats, RouteStats, SessionAttributes, SessionInspect, SessionStats, TenantStats,
-    TrafficCounters,
+use crate::{
+    telemetry::inspect::{
+        InstanceStats, RouteStats, SessionAttributes, SessionInspect, SessionStats, TenantStats,
+        TrafficCounters,
+    },
+    utils::UnsafeCounterU64,
 };
 
 #[derive(Debug)]
@@ -383,16 +385,14 @@ impl SessionInspectState {
 
     pub fn record_c2s(&self, bytes: u64) {
         self.traffic.record_c2s(bytes);
-        self.last_activity_ms.store(
-            self.instance.started_at.elapsed().as_millis() as u64,
-        );
+        self.last_activity_ms
+            .store(self.instance.started_at.elapsed().as_millis() as u64);
     }
 
     pub fn record_s2c(&self, bytes: u64) {
         self.traffic.record_s2c(bytes);
-        self.last_activity_ms.store(
-            self.instance.started_at.elapsed().as_millis() as u64,
-        );
+        self.last_activity_ms
+            .store(self.instance.started_at.elapsed().as_millis() as u64);
     }
 
     pub fn session_stats_snapshot(&self) -> SessionStats {
@@ -416,13 +416,12 @@ pub struct InspectRegistry {
 
 impl InspectRegistry {
     pub fn new() -> Self {
-        let registry = Self {
+        Self {
             instance: Arc::new(InstanceStatsAtomic::new()),
             routes: RwLock::new(HashMap::new()),
             tenants: RwLock::new(HashMap::new()),
             session_cursor: AtomicU64::new(1),
-        };
-        registry
+        }
     }
 
     pub fn set_instance_name(&self, inst: String) {

@@ -8,13 +8,16 @@ default-run = "lure"
 ignored = ["tonic"]
 
 [workspace]
-members = ["net"]
+members = ["net", "tun"]
 
 [dependencies]
 anyhow = "1.0"
 bytes = "1.10"
 log = "0.4.27"
+libc = "0.2"
 net = { path = "net" }
+num_cpus = "1.16"
+tun = { path = "tun" }
 opentelemetry = "0.31"
 opentelemetry-otlp = { version = "0.31", features = ["tokio", "http-proto", "reqwest-rustls-webpki-roots", "http-json"] }
 dotenvy = "0.15"
@@ -33,14 +36,16 @@ thiserror = "2.0"
 base64 = "0.22"
 ed25519-dalek = { version = "2.1", features = ["std"] }
 getrandom = "0.3"
+hmac = "0.12"
+sha2 = "0.10"
+subtle = "2.5"
+hex = "0.4"
 mimalloc = { version = "0.1", optional = true }
 tonic = { version = "0.14", optional = true }
 tokio-metrics = "0.4"
 env_logger = "0.11"
 fake_serialize = "0.1"
 console-subscriber = "0.5"
-tokio-uring = { git = "https://github.com/hUwUtao/tokio-uring.git", version = "0.5.0", features = ["bytes"] }
-io-uring = "0.6.0"
 
 [features]
 # by default we build HTTP-only
@@ -61,4 +66,11 @@ incremental = true
 
 [profile.profiling]
 inherits = "release"
-debug = "line-tables-only"
+opt-level = 3
+debug = 2
+lto = "thin"
+codegen-unit = 4
+panic = "abort"
+incremental = false
+strip = "none"
+

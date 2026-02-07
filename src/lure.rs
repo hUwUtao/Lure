@@ -5,17 +5,17 @@ use std::{
 };
 
 use async_trait::async_trait;
-use futures::FutureExt;
-use log::{debug, info};
+use getrandom::fill as fill_random;
+use log::{debug, error, info};
 use net::{
-    HandshakeC2s, HandshakeNextState, StatusPingC2s, StatusPongS2c, StatusRequestC2s,
-    StatusResponseS2c,
+    HandshakeC2s, HandshakeNextState, PacketDecoder, ProtoError, StatusPingC2s, StatusPongS2c,
+    StatusRequestC2s, StatusResponseS2c, encode_raw_packet,
 };
 use serde::{Deserialize, Serialize};
 use tokio::{
     sync::{RwLock, Semaphore},
     task::yield_now,
-    time::{error::Elapsed, timeout},
+    time::{error::Elapsed, interval, timeout},
 };
 
 use crate::{
@@ -26,11 +26,12 @@ use crate::{
     metrics::HandshakeMetrics,
     packet::{OwnedHandshake, OwnedLoginStart, OwnedPacket},
     router::{Profile, ResolvedRoute, Route, RouterInstance, Session, SessionHandle},
-    sock::{BackendKind, Listener, backend_kind, passthrough_now},
+    sock::{BackendKind, LureListener, backend_kind, passthrough_now},
     telemetry::{EventEnvelope, EventServiceInstance, event::EventHook, get_meter, init_event},
     threat::{
         ClientFail, ClientIntent, IntentTag, ThreatControlService, ratelimit::RateLimiterController,
     },
+    tunnel::{SessionToken, TokenKeyId, TunnelRegistry},
     utils::{OwnedStatic, leak, spawn_named},
 };
 mod backend;
@@ -41,6 +42,7 @@ pub struct Lure {
     threat: &'static ThreatControlService,
     metrics: HandshakeMetrics,
     errors: ErrorResponder,
+    tunnels: Arc<TunnelRegistry>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -74,12 +76,38 @@ impl Lure {
     pub fn new(config: LureConfig) -> Lure {
         let router = leak(RouterInstance::new());
         router.set_instance_name(config.inst.clone());
+        let tunnels = Arc::new(TunnelRegistry::default());
+
+        // Load token registry from config
+        let tunnel_config = config.tunnel.clone();
+        let tunnels_clone = Arc::clone(&tunnels);
+        spawn_named("tunnel-config-loader", async move {
+            if let Err(e) = tunnels_clone.load_tokens(&tunnel_config).await {
+                error!("failed to load tunnel tokens: {e}");
+            } else {
+                info!("loaded tunnel token registry");
+            }
+        })
+        .ok();
+
+        // Spawn cleanup task for tunnel registry
+        let tunnels_clone = Arc::clone(&tunnels);
+        spawn_named("tunnel-cleanup-task", async move {
+            let mut cleanup_interval = interval(Duration::from_secs(5));
+            loop {
+                cleanup_interval.tick().await;
+                tunnels_clone.cleanup_expired_sessions().await;
+            }
+        })
+        .ok(); // Ignore spawn errors during initialization
+
         Lure {
             config: RwLock::new(config),
             router,
             threat: leak(ThreatControlService::new()),
             metrics: HandshakeMetrics::new(&get_meter()),
             errors: ErrorResponder::new(),
+            tunnels,
         }
     }
 
@@ -104,9 +132,128 @@ impl Lure {
     pub async fn reload_config(&'static self, config: LureConfig) -> anyhow::Result<()> {
         let routes = config.default_routes()?;
         self.install_routes(routes).await;
+        // Keep the tunnel registry in sync with runtime config reloads.
+        self.tunnels.load_tokens(&config.tunnel).await?;
         {
             *self.config.write().await = config;
         }
+        Ok(())
+    }
+
+    pub async fn sync_tunnel_tokens_from_config(&self) -> anyhow::Result<()> {
+        let snapshot = self.config_snapshot().await;
+        self.tunnels.load_tokens(&snapshot.tunnel).await
+    }
+
+    pub async fn start_with_shutdown(
+        &'static self,
+        ready: Option<tokio::sync::oneshot::Sender<SocketAddr>>,
+        mut shutdown: tokio::sync::oneshot::Receiver<()>,
+    ) -> anyhow::Result<()> {
+        // Listener config.
+        let config = self.config_snapshot().await;
+        let listener_cfg = config.bind.clone();
+        LureLogger::preparing_socket(&listener_cfg);
+        let address: SocketAddr = listener_cfg.parse()?;
+        let max_connections = config.max_conn as usize;
+        let cooldown = Duration::from_secs(config.cooldown);
+        let inst = config.inst.clone();
+        drop(config);
+
+        if let Ok(rpc_url) = dotenvy::var("LURE_RPC") {
+            // TunnelRegistry is not Send due to connection types; bridge RPC events to a local task.
+            let (tun_tx, mut tun_rx) = tokio::sync::mpsc::unbounded_channel();
+            let tunnels = Arc::clone(&self.tunnels);
+            spawn_named("tunnel-rpc-sync", async move {
+                while let Some(msg) = tun_rx.recv().await {
+                    match msg {
+                        crate::tunnel::TunnelControlMsg::Flush => {
+                            tunnels.clear_runtime().await;
+                        }
+                        crate::tunnel::TunnelControlMsg::Upsert(entry) => {
+                            if let Err(e) = tunnels.upsert_token(&entry).await {
+                                error!("failed to upsert tunnel token from rpc: {e}");
+                            }
+                        }
+                    }
+                }
+            })
+            .ok();
+
+            let event = init_event(rpc_url);
+            event.hook(EventIdent { id: inst }).await;
+            event.hook(OwnedStatic::from(self.router)).await;
+            event
+                .hook(crate::inspect::InspectHook::new(self.router))
+                .await;
+            event
+                .hook(crate::tunnel::TunnelControlHook::new(tun_tx))
+                .await;
+            event.clone().start();
+        }
+
+        // Start server.
+        let listener = LureListener::bind(address).await?;
+        if let Some(tx) = ready {
+            let _ = tx.send(listener.local_addr()?);
+        }
+        let semaphore = Arc::new(Semaphore::new(max_connections));
+        let rate_limiter: RateLimiterController<IpAddr> = RateLimiterController::new(10, cooldown);
+
+        loop {
+            tokio::select! {
+                _ = &mut shutdown => {
+                    break;
+                }
+                res = listener.accept() => {
+                    // Accept connection first
+                    let (client, addr) = res?;
+
+                    self.metrics.record_open();
+
+                    // Apply IP-based rate limiting
+                    let ip = addr.ip();
+                    if let crate::threat::ratelimit::RateLimitResult::Disallowed { retry_after: _ra } =
+                        rate_limiter.check(&ip)
+                    {
+                        LureLogger::rate_limited(&ip);
+                        drop(client);
+                        continue;
+                    }
+
+                    // Try to acquire semaphore (non-blocking)
+                    match semaphore.clone().try_acquire_owned() {
+                        Ok(permit) => {
+                            if dotenvy::var("NO_NODELAY").is_err()
+                                && let Err(e) = client.set_nodelay(true)
+                            {
+                                LureLogger::tcp_nodelay_failed(&e);
+                            }
+
+                            let lure = self;
+                            let handler = async move {
+                                // Apply timeout to connection handling
+                                if let Err(e) = lure.handle_connection(client, addr).await {
+                                    LureLogger::connection_closed(&addr, &e);
+                                }
+                                drop(permit);
+                            };
+                            if backend_kind() == BackendKind::Uring {
+                                net::sock::uring::spawn(handler);
+                            } else {
+                                spawn_named("Connection handler", handler)?;
+                            }
+                        }
+                        Err(_) => {
+                            // Too many connections, reject immediately
+                            drop(client);
+                        }
+                    }
+                    yield_now().await;
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -132,7 +279,7 @@ impl Lure {
         }
 
         // Start server.
-        let listener = Listener::bind(address).await?;
+        let listener = LureListener::bind(address).await?;
         let semaphore = Arc::new(Semaphore::new(max_connections));
         let rate_limiter: RateLimiterController<IpAddr> = RateLimiterController::new(10, cooldown);
 
@@ -170,7 +317,7 @@ impl Lure {
                         drop(permit);
                     };
                     if backend_kind() == BackendKind::Uring {
-                        tokio_uring::spawn(handler);
+                        net::sock::uring::spawn(handler);
                     } else {
                         spawn_named("Connection handler", handler)?;
                     }
@@ -186,7 +333,7 @@ impl Lure {
 
     async fn handle_connection(
         &self,
-        client_socket: crate::sock::Connection,
+        client_socket: crate::sock::LureConnection,
         address: SocketAddr,
     ) -> anyhow::Result<()> {
         LureLogger::new_connection(&address);
@@ -197,7 +344,7 @@ impl Lure {
 
     async fn handle_handshake(
         &self,
-        mut connection: crate::sock::Connection,
+        mut connection: crate::sock::LureConnection,
     ) -> anyhow::Result<()> {
         let start = Instant::now();
         let client_addr = *connection.addr();
@@ -205,18 +352,9 @@ impl Lure {
             tag: IntentTag::Handshake,
             duration: Duration::from_secs(5),
         };
-        let mut handler = EncodedConnection::new(&mut connection, SocketIntent::GreetToProxy);
-        let hs = self
+        let ingress = self
             .threat
-            .nuisance(
-                async {
-                    handler
-                        .recv::<HandshakeC2s>()
-                        .map(|f| f.map(OwnedHandshake::from_packet))
-                        .await
-                },
-                HANDSHAKE_INTENT,
-            )
+            .nuisance(self.read_ingress_hello(&mut connection), HANDSHAKE_INTENT)
             .await
             .inspect_err(|err| {
                 if let Some(ClientFail::Timeout { intent, .. }) = err.downcast_ref::<ClientFail>() {
@@ -233,6 +371,21 @@ impl Lure {
             .inspect_err(|err| {
                 LureLogger::parser_failure(&client_addr, "client handshake", err);
             })?;
+
+        let (hs, buffered, handshake_raw) = match ingress {
+            IngressHello::Minecraft {
+                handshake,
+                buffered,
+                raw,
+            } => (handshake, buffered, raw),
+            IngressHello::Tunnel { hello } => {
+                self.handle_tunnel_ingress(connection, hello).await?;
+                return Ok(());
+            }
+        };
+
+        let handler =
+            EncodedConnection::with_buffered(&mut connection, SocketIntent::GreetToProxy, buffered);
         let state_attr = match hs.next_state {
             HandshakeNextState::Status => "status",
             HandshakeNextState::Login => "login",
@@ -262,7 +415,10 @@ impl Lure {
 
         match hs.next_state {
             HandshakeNextState::Status => self.handle_status(handler, &hs, resolved).await,
-            HandshakeNextState::Login => self.handle_proxy(handler, &hs, resolved).await,
+            HandshakeNextState::Login => {
+                self.handle_proxy(handler, &hs, resolved, handshake_raw)
+                    .await
+            }
         }
     }
 
@@ -418,6 +574,7 @@ impl Lure {
         mut client: EncodedConnection<'a>,
         handshake: &OwnedHandshake,
         resolved: Option<ResolvedRoute>,
+        handshake_raw: Vec<u8>,
     ) -> anyhow::Result<()> {
         const INTENT: ClientIntent = ClientIntent {
             tag: IntentTag::Handshake,
@@ -462,16 +619,195 @@ impl Lure {
         };
 
         let server_address = session.destination_addr;
-        let _ = self
-            .handle_proxy_session(client, handshake, route.as_ref(), &session, &login_raw)
-            .await
-            .map_err(|e| {
-                let re = ReportableError::from(e);
-                LureLogger::connection_error(&address, Some(&server_address), &re);
-                re
-            });
+        let tunnel_id = resolved.tunnel_id;
+        if route.tunnel() || tunnel_id.is_some() {
+            let _ = self
+                .handle_tunnel_session(
+                    client,
+                    handshake_raw,
+                    &login_raw,
+                    route.as_ref(),
+                    &session,
+                    tunnel_id,
+                )
+                .await
+                .map_err(|e| {
+                    let re = ReportableError::from(e);
+                    LureLogger::tunnel_session_error("session handling", &server_address, &re);
+                    re
+                });
+        } else {
+            let _ = self
+                .handle_proxy_session(client, handshake, route.as_ref(), &session, &login_raw)
+                .await
+                .map_err(|e| {
+                    let re = ReportableError::from(e);
+                    LureLogger::connection_error(&address, Some(&server_address), &re);
+                    re
+                });
+        }
 
         Ok(())
+    }
+
+    async fn handle_tunnel_session(
+        &self,
+        mut client: EncodedConnection<'_>,
+        handshake_raw: Vec<u8>,
+        login_raw: &[u8],
+        route: &Route,
+        session: &Session,
+        tunnel_id: Option<[u8; 8]>,
+    ) -> anyhow::Result<()> {
+        let key_id = if let Some(id) = tunnel_id {
+            TokenKeyId(id)
+        } else if let Some(token) = route.tunnel_token {
+            // v2 backcompat: use the first 8 bytes of the 32-byte route token as key_id for HMAC.
+            TokenKeyId({
+                let mut arr = [0u8; 8];
+                arr.copy_from_slice(&token[..8]);
+                arr
+            })
+        } else {
+            self.disconnect_login(&mut client, session.client_addr, |config| {
+                (
+                    config.string_value("TUNNEL_TOKEN_MISSING"),
+                    "TUNNEL_TOKEN_MISSING: route missing tunnel token or endpoint @tunnel-id",
+                )
+            })
+            .await;
+            return Ok(());
+        };
+
+        let mut session_bytes = [0u8; 32];
+        fill_random(&mut session_bytes)?;
+        let session_token = SessionToken(session_bytes);
+
+        let receiver = self
+            .tunnels
+            .offer_session(
+                key_id,
+                session_token,
+                session.destination_addr,
+                &route.auth_mode,
+            )
+            .await?;
+
+        let mut agent_connection = match timeout(Duration::from_secs(10), receiver).await {
+            Ok(Ok(conn)) => conn,
+            Ok(Err(_)) => anyhow::bail!("tunnel agent dropped session"),
+            Err(_) => anyhow::bail!("tunnel agent connect timeout"),
+        };
+
+        let mut agent = EncodedConnection::new(&mut agent_connection, SocketIntent::GreetToBackend);
+        agent.send_raw(&handshake_raw).await?;
+        agent.send_raw(login_raw).await?;
+
+        let pending = client.take_pending_inbound();
+        if !pending.is_empty() {
+            agent.send_raw(&pending).await?;
+        }
+
+        passthrough_now(&mut client, &mut agent, session).await?;
+        Ok(())
+    }
+
+    async fn handle_tunnel_ingress(
+        &self,
+        connection: crate::sock::LureConnection,
+        hello: tun::AgentHello,
+    ) -> anyhow::Result<()> {
+        let key_id = TokenKeyId(hello.key_id);
+        match hello.intent {
+            tun::Intent::Listen => {
+                self.tunnels
+                    .register_listener(key_id, hello.timestamp, hello.hmac, connection)
+                    .await?;
+            }
+            tun::Intent::Connect => {
+                let Some(session) = hello.session else {
+                    anyhow::bail!("tunnel connect missing session token");
+                };
+                self.tunnels
+                    .accept_connect(
+                        key_id,
+                        hello.timestamp,
+                        hello.hmac,
+                        SessionToken(session),
+                        connection,
+                    )
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn read_ingress_hello(
+        &self,
+        connection: &mut crate::sock::LureConnection,
+    ) -> anyhow::Result<IngressHello> {
+        let mut buf = Vec::new();
+        let mut read_buf = vec![0u8; 1024];
+        loop {
+            let (n, next) = connection.read_chunk(read_buf).await?;
+            read_buf = next;
+            if n == 0 {
+                anyhow::bail!("unexpected eof while reading hello");
+            }
+            buf.extend_from_slice(&read_buf[..n]);
+            if buf.len() < 4 {
+                continue;
+            }
+            break;
+        }
+
+        if buf.starts_with(&tun::MAGIC) {
+            let hello = self.read_tunnel_hello(connection, buf).await?;
+            return Ok(IngressHello::Tunnel { hello });
+        }
+
+        let mut decoder = PacketDecoder::new();
+        decoder.queue_slice(&buf);
+        loop {
+            if let Some(frame) = decoder.try_next_packet()? {
+                let handshake = decode_handshake_frame(&frame)?;
+                let mut raw = Vec::new();
+                encode_raw_packet(&mut raw, frame.id, &frame.body)?;
+                let pending = decoder.take_pending_bytes();
+                return Ok(IngressHello::Minecraft {
+                    handshake: OwnedHandshake::from_packet(handshake),
+                    buffered: pending,
+                    raw,
+                });
+            }
+            let (n, next) = connection.read_chunk(read_buf).await?;
+            read_buf = next;
+            if n == 0 {
+                return Err(anyhow::anyhow!("unexpected eof while reading handshake"));
+            }
+            decoder.queue_slice(&read_buf[..n]);
+        }
+    }
+
+    async fn read_tunnel_hello(
+        &self,
+        connection: &mut crate::sock::LureConnection,
+        mut buf: Vec<u8>,
+    ) -> anyhow::Result<tun::AgentHello> {
+        loop {
+            match tun::decode_agent_hello(&buf)? {
+                Some((hello, _consumed)) => return Ok(hello),
+                None => {
+                    let mut read_buf = vec![0u8; 1024];
+                    let (n, next) = connection.read_chunk(read_buf).await?;
+                    read_buf = next;
+                    if n == 0 {
+                        anyhow::bail!("unexpected eof while reading tunnel hello");
+                    }
+                    buf.extend_from_slice(&read_buf[..n]);
+                }
+            }
+        }
     }
 
     async fn handle_proxy_session(
@@ -642,4 +978,31 @@ impl Lure {
             .await?;
         Ok(err)
     }
+}
+
+fn decode_handshake_frame<'a>(frame: &'a net::PacketFrame) -> anyhow::Result<HandshakeC2s<'a>> {
+    if frame.id != HandshakeC2s::ID {
+        return Err(anyhow::anyhow!(
+            "unexpected packet id {} (expected {})",
+            frame.id,
+            HandshakeC2s::ID
+        ));
+    }
+    let mut body = frame.body.as_slice();
+    let pkt = HandshakeC2s::decode_body(&mut body)?;
+    if !body.is_empty() {
+        return Err(ProtoError::TrailingBytes(body.len()).into());
+    }
+    Ok(pkt)
+}
+
+enum IngressHello {
+    Minecraft {
+        handshake: OwnedHandshake,
+        buffered: Vec<u8>,
+        raw: Vec<u8>,
+    },
+    Tunnel {
+        hello: tun::AgentHello,
+    },
 }

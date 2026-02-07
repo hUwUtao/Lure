@@ -1,8 +1,7 @@
 use std::{env, error::Error, io::ErrorKind};
 
 use lure::{
-    config::{LureConfigLoadError, ProxySigningKey},
-    config::LureConfig,
+    config::{LureConfig, LureConfigLoadError, ProxySigningKey},
     lure::Lure,
     sock::{BackendKind, backend_selection},
     telemetry::{oltp::init_meter, process::ProcessMetricsService},
@@ -23,10 +22,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     match backend.kind {
         BackendKind::Uring => {
             log::info!("socket backend: tokio-uring ({})", backend.reason);
-            tokio_uring::start(async {
+            net::sock::uring::start(async {
                 let local = tokio::task::LocalSet::new();
                 local.run_until(run()).await
             })
+        }
+        BackendKind::Epoll => {
+            log::info!("socket backend: epoll ({})", backend.reason);
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            let local = tokio::task::LocalSet::new();
+            runtime.block_on(local.run_until(run()))
         }
         BackendKind::Tokio => {
             if backend.reason.contains("init failed") {

@@ -1,16 +1,14 @@
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use opentelemetry::metrics::Counter;
-use opentelemetry::KeyValue;
+use opentelemetry::{KeyValue, metrics::Counter};
 
 use crate::{
-    telemetry::get_meter,
-    router::RouterInstance,
-    router::inspect::SessionInspectState,
+    router::{RouterInstance, inspect::SessionInspectState},
     telemetry::{
         EventEnvelope, EventServiceInstance,
         event::EventHook,
+        get_meter,
         inspect::{InspectRequest, ListSessionsResponse, ListStatsResponse},
     },
 };
@@ -64,18 +62,10 @@ pub(crate) async fn drive_transport_metrics<F>(
         packet_record.add(delta_c2s_chunks, core::slice::from_ref(&c2st));
         packet_record.add(delta_s2c_chunks, core::slice::from_ref(&s2ct));
 
-        inspect
-            .route
-            .record_c2s(delta_c2s_bytes, delta_c2s_chunks);
-        inspect
-            .route
-            .record_s2c(delta_s2c_bytes, delta_s2c_chunks);
-        inspect
-            .tenant
-            .record_c2s(delta_c2s_bytes, delta_c2s_chunks);
-        inspect
-            .tenant
-            .record_s2c(delta_s2c_bytes, delta_s2c_chunks);
+        inspect.route.record_c2s(delta_c2s_bytes, delta_c2s_chunks);
+        inspect.route.record_s2c(delta_s2c_bytes, delta_s2c_chunks);
+        inspect.tenant.record_c2s(delta_c2s_bytes, delta_c2s_chunks);
+        inspect.tenant.record_s2c(delta_s2c_bytes, delta_s2c_chunks);
         inspect
             .instance
             .record_c2s(delta_c2s_bytes, delta_c2s_chunks);
