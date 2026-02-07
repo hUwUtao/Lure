@@ -1,16 +1,12 @@
 use futures::FutureExt;
+use net::sock::tokio::Connection;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::broadcast,
 };
 
-use net::sock::tokio::Connection;
-
 use crate::{
-    error::ReportableError,
-    inspect::drive_transport_metrics,
-    logging::LureLogger,
-    router::Session,
+    error::ReportableError, inspect::drive_transport_metrics, logging::LureLogger, router::Session,
 };
 
 async fn copy_with_abort<R, W, L>(

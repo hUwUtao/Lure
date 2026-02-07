@@ -1,8 +1,7 @@
 use std::{env, error::Error, io::ErrorKind};
 
 use lure::{
-    config::{LureConfigLoadError, ProxySigningKey},
-    config::LureConfig,
+    config::{LureConfig, LureConfigLoadError, ProxySigningKey},
     lure::Lure,
     sock::{BackendKind, backend_selection},
     telemetry::{oltp::init_meter, process::ProcessMetricsService},

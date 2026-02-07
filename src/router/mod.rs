@@ -26,10 +26,12 @@ use crate::{
 
 mod attr;
 mod dest;
+mod endpoint;
 pub(crate) mod inspect;
 mod profile;
 pub use attr::RouteAttr;
 pub use dest::Destination;
+pub use endpoint::Endpoint;
 pub use profile::Profile;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Copy)]
@@ -40,6 +42,23 @@ pub enum RouteFlags {
     ProxyProtocol,
     PreserveHost,
     Tunnel,
+}
+
+/// Authorization mode for tunnel routes
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthMode {
+    /// No authentication required - generates random identifier for tracking
+    Public,
+    /// Any valid registered token can access
+    Protected,
+    /// Only specific tokens (by key_id) can access
+    Restricted { allowed_tokens: Vec<[u8; 8]> },
+}
+
+impl Default for AuthMode {
+    fn default() -> Self {
+        AuthMode::Protected
+    }
 }
 
 /// Routing rule with matchers and endpoints, ordered by priority
@@ -54,10 +73,13 @@ pub struct Route {
     pub flags: attr::RouteAttr,
     /// Optional tunnel token (32-byte identifier)
     pub tunnel_token: Option<[u8; 32]>,
+    /// Tunnel authentication mode
+    #[serde(skip)]
+    pub auth_mode: AuthMode,
     /// Domain patterns or hostnames this route matches
     pub matchers: Vec<String>,
     /// Available endpoint specifications for this route
-    pub endpoints: Vec<Destination>,
+    pub endpoints: Vec<Endpoint>,
 }
 
 impl Route {
@@ -158,9 +180,12 @@ impl Drop for SessionHandle {
     fn drop(&mut self) {
         let router = self.router;
         let addr = self.inner.client_addr;
-        tokio::spawn(async move {
-            let _ = router.terminate_session(&addr).await;
-        });
+        // Drop can run outside a Tokio runtime during shutdown/teardown; don't panic.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let _ = router.terminate_session(&addr).await;
+            });
+        }
     }
 }
 
@@ -168,6 +193,7 @@ impl Drop for SessionHandle {
 pub struct ResolvedRoute {
     pub endpoint: SocketAddr,
     pub endpoint_host: String,
+    pub tunnel_id: Option<[u8; 8]>,
     pub route: Arc<Route>,
 }
 
@@ -420,9 +446,10 @@ impl RouterInstance {
         port_override: Option<u16>,
     ) -> Option<ResolvedRoute> {
         self.select_balanced_endpoint(route.as_ref(), port_override)
-            .map(|(endpoint_host, endpoint)| ResolvedRoute {
+            .map(|(endpoint_host, endpoint, tunnel_id)| ResolvedRoute {
                 endpoint,
                 endpoint_host,
+                tunnel_id,
                 route,
             })
     }
@@ -435,18 +462,18 @@ impl RouterInstance {
         &self,
         route: &Route,
         port_override: Option<u16>,
-    ) -> Option<(String, SocketAddr)> {
-        let mut candidates: Vec<(Arc<str>, SocketAddr)> = Vec::new();
+    ) -> Option<(String, SocketAddr, Option<[u8; 8]>)> {
+        let mut candidates: Vec<(Arc<str>, SocketAddr, Option<[u8; 8]>)> = Vec::new();
 
         for destination in &route.endpoints {
-            if let Ok(resolved) = destination.resolve() {
+            if let Ok(resolved) = destination.destination().resolve() {
                 for (host, mut addr) in resolved {
                     if let Some(port) = port_override
                         && addr.port() == 0
                     {
                         addr.set_port(port);
                     }
-                    candidates.push((host, addr));
+                    candidates.push((host, addr, destination.tunnel_id()));
                 }
             }
         }
@@ -456,8 +483,8 @@ impl RouterInstance {
         }
 
         let idx = (self.next_balance_index() % candidates.len() as u64) as usize;
-        let (host, addr) = &candidates[idx];
-        Some((host.to_string(), *addr))
+        let (host, addr, tunnel_id) = &candidates[idx];
+        Some((host.to_string(), *addr, *tunnel_id))
     }
 
     fn match_wildcard(matcher: &str, hostname: &str) -> Option<u16> {
@@ -741,8 +768,9 @@ impl crate::telemetry::event::EventHook<EventEnvelope, EventEnvelope> for Router
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::future::Future;
+
+    use super::*;
 
     async fn run_in_local<F, T>(future: F) -> T
     where
@@ -758,7 +786,7 @@ mod tests {
             let route = Route {
                 id: 1,
                 matchers: vec!["10000-10245*.abc.xyz.com".to_string()],
-                endpoints: vec![Destination::parse("123.245.122.21:0").unwrap()],
+                endpoints: vec![Endpoint::parse("123.245.122.21:0").unwrap()],
                 ..Default::default()
             };
             router.apply_route(route).await;
@@ -776,7 +804,7 @@ mod tests {
             let disabled_route = Route {
                 id: 1,
                 matchers: vec!["example.com".to_string()],
-                endpoints: vec![Destination::parse("127.0.0.1:8080").unwrap()],
+                endpoints: vec![Endpoint::parse("127.0.0.1:8080").unwrap()],
                 flags: attr::RouteAttr::from(RouteFlags::Disabled),
                 ..Default::default()
             };
@@ -798,7 +826,7 @@ mod tests {
             let proxied_route = Route {
                 id: 2,
                 matchers: vec!["proxy.example.com".to_string()],
-                endpoints: vec![Destination::parse("127.0.0.1:25565").unwrap()],
+                endpoints: vec![Endpoint::parse("127.0.0.1:25565").unwrap()],
                 flags: attr::RouteAttr::from(RouteFlags::ProxyProtocol),
                 ..Default::default()
             };
@@ -812,7 +840,7 @@ mod tests {
             let normal_route = Route {
                 id: 3,
                 matchers: vec!["normal.example.com".to_string()],
-                endpoints: vec![Destination::parse("127.0.0.1:25565").unwrap()],
+                endpoints: vec![Endpoint::parse("127.0.0.1:25565").unwrap()],
                 flags: attr::RouteAttr::from_u64(0),
                 ..Default::default()
             };
@@ -833,8 +861,8 @@ mod tests {
                 id: 10,
                 matchers: vec!["balanced.example.com".to_string()],
                 endpoints: vec![
-                    Destination::parse("10.0.0.1:25565").unwrap(),
-                    Destination::parse("10.0.0.2:25565").unwrap(),
+                    Endpoint::parse("10.0.0.1:25565").unwrap(),
+                    Endpoint::parse("10.0.0.2:25565").unwrap(),
                 ],
                 ..Default::default()
             };

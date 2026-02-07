@@ -2,6 +2,7 @@ use std::{
     fmt::Debug,
     io::{self, ErrorKind},
 };
+
 // use futures::FutureExt;
 use net::{
     LoginDisconnectS2c, LoginStartC2s, PacketDecode, PacketDecoder, PacketEncode, PacketEncoder,
@@ -12,6 +13,7 @@ use opentelemetry::{
     metrics::{Counter, Histogram, Meter},
 };
 use serde_json::to_string as json_string;
+
 use crate::{sock::LureConnection, telemetry::get_meter};
 
 pub(crate) struct EncodedConnection<'a> {

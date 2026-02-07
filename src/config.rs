@@ -10,7 +10,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use log::warn;
 use serde::{Deserialize, Serialize, Serializer};
 
-use crate::router::{Destination, Route, RouteAttr, RouteFlags};
+use crate::router::{AuthMode, Endpoint, Route, RouteAttr, RouteFlags};
 
 const DEFAULT_ROUTE_ID_BASE: u64 = u64::MAX - u32::MAX as u64;
 
@@ -98,6 +98,10 @@ pub struct LureConfig {
     #[serde(default)]
     pub strings: HashMap<Box<str>, Arc<str>>,
 
+    /// Tunnel configuration (token registry)
+    #[serde(default)]
+    pub tunnel: TunnelConfig,
+
     /// Default, statically-configured routes.
     #[serde(default)]
     pub route: Vec<RouteConfig>,
@@ -134,6 +138,29 @@ pub struct RouteFlagsConfig {
     pub override_query: bool,
     pub preserve_host: bool,
     pub tunnel: bool,
+    /// Authentication mode: "public", "protected", "restricted"
+    pub auth_mode: String,
+    /// For auth_mode = "restricted", list of allowed token key_ids
+    pub allowed_tokens: Vec<String>,
+}
+
+/// Tunnel configuration for HMAC token registry
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct TunnelConfig {
+    /// List of registered tokens
+    pub token: Vec<TokenEntry>,
+}
+
+/// Individual token entry for tunnel authentication
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TokenEntry {
+    /// 8-byte key ID (16 hex characters)
+    pub key_id: String,
+    /// 32-byte secret key (64 hex characters or base64)
+    pub secret: String,
+    /// Optional human-readable name
+    pub name: Option<String>,
 }
 
 fn default_inst() -> String {
@@ -148,6 +175,10 @@ fn default_max_conn() -> u32 {
     65535
 }
 
+fn default_auth_mode() -> String {
+    "protected".to_string()
+}
+
 impl Default for LureConfig {
     fn default() -> Self {
         Self {
@@ -158,6 +189,7 @@ impl Default for LureConfig {
             max_conn: default_max_conn(),
             cooldown: 3,
             strings: HashMap::new(),
+            tunnel: TunnelConfig::default(),
             route: Vec::new(),
             other_fields: HashMap::new(),
         }
@@ -220,13 +252,13 @@ impl RouteConfig {
             anyhow::bail!("route entry {offset} missing endpoints");
         }
 
-        let mut endpoints: Vec<Destination> = Vec::with_capacity(endpoint_specs.len());
+        let mut endpoints: Vec<Endpoint> = Vec::with_capacity(endpoint_specs.len());
         for spec in endpoint_specs {
             let trimmed = spec.trim();
             if trimmed.is_empty() {
                 anyhow::bail!("route entry {offset} contains empty endpoint");
             }
-            let destination = Destination::parse_with_default(trimmed, 25565).map_err(|err| {
+            let destination = Endpoint::parse_with_default(trimmed, 25565).map_err(|err| {
                 anyhow::anyhow!("invalid endpoint '{trimmed}' in route {offset}: {err}")
             })?;
             endpoints.push(destination);
@@ -236,24 +268,30 @@ impl RouteConfig {
             anyhow::bail!("route entry index {offset} exceeds reserved id range");
         }
 
-        let tunnel_token = if let Some(token) = &self.tunnel_token {
-            Some(parse_tunnel_token(token).map_err(|err| {
-                anyhow::anyhow!("invalid tunnel token for route {offset}: {err}")
-            })?)
+        let tunnel_token =
+            if let Some(token) = &self.tunnel_token {
+                Some(parse_tunnel_token(token).map_err(|err| {
+                    anyhow::anyhow!("invalid tunnel token for route {offset}: {err}")
+                })?)
+            } else {
+                None
+            };
+
+        let (flags, auth_mode) = if let Some(flags_cfg) = &self.flags {
+            let attr = flags_cfg.to_attr();
+            let auth_mode = flags_cfg.parse_auth_mode(offset)?;
+            (attr, auth_mode)
         } else {
-            None
+            (RouteAttr::default(), AuthMode::default())
         };
 
         Ok(Route {
             id: DEFAULT_ROUTE_ID_BASE + offset as u64,
             zone: u64::MAX,
             priority: self.priority,
-            flags: self
-                .flags
-                .as_ref()
-                .map(RouteFlagsConfig::to_attr)
-                .unwrap_or_default(),
+            flags,
             tunnel_token,
+            auth_mode,
             matchers,
             endpoints,
         })
@@ -283,6 +321,36 @@ impl RouteFlagsConfig {
         }
         attr
     }
+
+    fn parse_auth_mode(&self, route_offset: usize) -> anyhow::Result<AuthMode> {
+        match self.auth_mode.as_str() {
+            "public" => Ok(AuthMode::Public),
+            "protected" => Ok(AuthMode::Protected),
+            "restricted" => {
+                if self.allowed_tokens.is_empty() {
+                    anyhow::bail!(
+                        "route entry {route_offset} with auth_mode=\"restricted\" must have allowed_tokens"
+                    );
+                }
+                let mut allowed = Vec::with_capacity(self.allowed_tokens.len());
+                for token_str in &self.allowed_tokens {
+                    let key_id = parse_key_id_8(token_str).map_err(|err| {
+                        anyhow::anyhow!(
+                            "invalid key_id in allowed_tokens for route {route_offset}: {err}"
+                        )
+                    })?;
+                    allowed.push(key_id);
+                }
+                Ok(AuthMode::Restricted {
+                    allowed_tokens: allowed,
+                })
+            }
+            other => anyhow::bail!(
+                "route entry {route_offset} has invalid auth_mode \"{}\", must be \"public\", \"protected\", or \"restricted\"",
+                other
+            ),
+        }
+    }
 }
 
 fn parse_tunnel_token(token: &str) -> anyhow::Result<[u8; 32]> {
@@ -298,6 +366,46 @@ fn parse_tunnel_token(token: &str) -> anyhow::Result<[u8; 32]> {
     let decoded = STANDARD.decode(trimmed)?;
     if decoded.len() != 32 {
         anyhow::bail!("expected 32 bytes, got {}", decoded.len());
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&decoded);
+    Ok(out)
+}
+
+fn parse_key_id_8(key_id_str: &str) -> anyhow::Result<[u8; 8]> {
+    let trimmed = key_id_str.trim();
+    if trimmed.len() != 16 {
+        anyhow::bail!("key_id must be 16 hex characters, got {}", trimmed.len());
+    }
+    if !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        anyhow::bail!("key_id must be hex-encoded");
+    }
+    let mut out = [0u8; 8];
+    for i in 0..8 {
+        let byte = u8::from_str_radix(&trimmed[i * 2..i * 2 + 2], 16)?;
+        out[i] = byte;
+    }
+    Ok(out)
+}
+
+fn parse_secret_32(secret_str: &str) -> anyhow::Result<[u8; 32]> {
+    let trimmed = secret_str.trim();
+    // Try hex first
+    if trimmed.len() == 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        let mut out = [0u8; 32];
+        for i in 0..32 {
+            let byte = u8::from_str_radix(&trimmed[i * 2..i * 2 + 2], 16)?;
+            out[i] = byte;
+        }
+        return Ok(out);
+    }
+    // Try base64
+    let decoded = STANDARD.decode(trimmed)?;
+    if decoded.len() != 32 {
+        anyhow::bail!(
+            "secret must be 64-char hex or valid base64 for 32 bytes, got {}",
+            decoded.len()
+        );
     }
     let mut out = [0u8; 32];
     out.copy_from_slice(&decoded);

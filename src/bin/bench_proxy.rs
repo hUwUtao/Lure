@@ -11,7 +11,6 @@ use std::{
 };
 
 use anyhow::Context;
-
 use lure::sock::{self, BackendKind};
 
 // High-precision nanosecond timer using CLOCK_MONOTONIC
@@ -34,16 +33,16 @@ const PROXY_BUF_SIZE: usize = 16 * 1024;
 
 // Nanosecond precision timestamps for each operation
 struct TimestampedLatency {
-    total_ns: u64,      // Total round-trip latency (send_start to recv_end)
-    send_ns: u64,       // Send phase latency (time to write)
-    recv_ns: u64,       // Receive phase latency (time to read response)
+    total_ns: u64, // Total round-trip latency (send_start to recv_end)
+    send_ns: u64,  // Send phase latency (time to write)
+    recv_ns: u64,  // Receive phase latency (time to read response)
 }
 
 // Request with embedded timestamp for validation
 #[repr(C)]
 struct PipelinedRequest {
-    seq_num: u64,       // Sequence number for matching
-    send_ts_ns: u64,    // Send timestamp (nanoseconds)
+    seq_num: u64,        // Sequence number for matching
+    send_ts_ns: u64,     // Send timestamp (nanoseconds)
     padding: [u8; 1008], // Pad to payload size
 }
 
@@ -222,7 +221,7 @@ fn client_worker(
                 total_ops: 0,
                 total_bytes: 0,
                 latencies,
-            }
+            };
         }
     };
     let _ = stream.set_nodelay(true);
@@ -579,10 +578,7 @@ async fn relay_exact(
         }
         let (n, mut out) = from.read_chunk(buf).await?;
         if n == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "peer closed",
-            ));
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "peer closed"));
         }
         out.truncate(n);
         out = to.write_all(out).await?;

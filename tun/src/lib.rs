@@ -19,7 +19,7 @@ pub enum TunnelError {
 }
 
 pub const MAGIC: [u8; 4] = *b"LTUN";
-pub const VERSION: u8 = 1;
+pub const VERSION: u8 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -42,7 +42,9 @@ impl Intent {
 pub struct AgentHello {
     pub version: u8,
     pub intent: Intent,
-    pub token: [u8; 32],
+    pub key_id: [u8; 8],
+    pub timestamp: u64,
+    pub hmac: [u8; 32],
     pub session: Option<[u8; 32]>,
 }
 
@@ -74,7 +76,8 @@ pub fn decode_agent_hello(buf: &[u8]) -> Result<Option<(AgentHello, usize)>, Tun
     if buf[..4] != MAGIC {
         return Err(TunnelError::InvalidMagic);
     }
-    if buf.len() < 4 + 1 + 1 + 32 {
+    if buf.len() < 5 {
+        // Need at least magic + version.
         return Ok(None);
     }
 
@@ -83,11 +86,25 @@ pub fn decode_agent_hello(buf: &[u8]) -> Result<Option<(AgentHello, usize)>, Tun
         return Err(TunnelError::UnsupportedVersion(version));
     }
 
-    let intent = Intent::from_u8(buf[5])?;
-    let mut token = [0u8; 32];
-    token.copy_from_slice(&buf[6..38]);
+    // Need at least: magic(4) + version(1) + intent(1) + key_id(8) + timestamp(8) + hmac(32)
+    // = 54 bytes
+    if buf.len() < 54 {
+        return Ok(None);
+    }
 
-    let mut consumed = 38;
+    let intent = Intent::from_u8(buf[5])?;
+
+    let mut key_id = [0u8; 8];
+    key_id.copy_from_slice(&buf[6..14]);
+
+    let timestamp = u64::from_be_bytes([
+        buf[14], buf[15], buf[16], buf[17], buf[18], buf[19], buf[20], buf[21],
+    ]);
+
+    let mut hmac = [0u8; 32];
+    hmac.copy_from_slice(&buf[22..54]);
+
+    let mut consumed = 54;
     let session = if intent == Intent::Connect {
         if buf.len() < consumed + 32 {
             return Ok(None);
@@ -104,7 +121,9 @@ pub fn decode_agent_hello(buf: &[u8]) -> Result<Option<(AgentHello, usize)>, Tun
         AgentHello {
             version,
             intent,
-            token,
+            key_id,
+            timestamp,
+            hmac,
             session,
         },
         consumed,
@@ -131,7 +150,9 @@ pub fn encode_agent_hello(hello: &AgentHello, out: &mut Vec<u8>) -> Result<(), T
     out.extend_from_slice(&MAGIC);
     out.push(hello.version);
     out.push(hello.intent as u8);
-    out.extend_from_slice(&hello.token);
+    out.extend_from_slice(&hello.key_id);
+    out.extend_from_slice(&hello.timestamp.to_be_bytes());
+    out.extend_from_slice(&hello.hmac);
     if let Some(session) = hello.session {
         out.extend_from_slice(&session);
     }
@@ -211,10 +232,38 @@ pub fn decode_server_msg(buf: &[u8]) -> Result<Option<(ServerMsg, usize)>, Tunne
     }
 }
 
+/// Compute HMAC-SHA256 for agent authentication
+pub fn compute_agent_hmac(
+    secret: &[u8; 32],
+    key_id: &[u8; 8],
+    timestamp: u64,
+    intent: Intent,
+    session: Option<&[u8; 32]>,
+) -> [u8; 32] {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    type HmacSha256 = Hmac<Sha256>;
+
+    let mut mac = HmacSha256::new_from_slice(secret).unwrap();
+    mac.update(key_id);
+    mac.update(&timestamp.to_be_bytes());
+    mac.update(&[intent as u8]);
+    if let Some(session) = session {
+        mac.update(session);
+    }
+
+    let result = mac.finalize();
+    let mut hmac_array = [0u8; 32];
+    hmac_array.copy_from_slice(result.into_bytes().as_ref());
+    hmac_array
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
+
+    use super::*;
 
     // ============================================================================
     // encode_agent_hello tests
@@ -225,7 +274,9 @@ mod tests {
         let hello = AgentHello {
             version: VERSION,
             intent: Intent::Listen,
-            token: [42u8; 32],
+            key_id: [1u8; 8],
+            timestamp: 1234567890,
+            hmac: [42u8; 32],
             session: None,
         };
         let mut buf = Vec::new();
@@ -233,8 +284,10 @@ mod tests {
         assert_eq!(&buf[..4], &MAGIC);
         assert_eq!(buf[4], VERSION);
         assert_eq!(buf[5], Intent::Listen as u8);
-        assert_eq!(&buf[6..38], &[42u8; 32]);
-        assert_eq!(buf.len(), 38);
+        assert_eq!(&buf[6..14], &[1u8; 8]); // key_id
+        assert_eq!(&buf[14..22], &1234567890u64.to_be_bytes()); // timestamp
+        assert_eq!(&buf[22..54], &[42u8; 32]); // hmac
+        assert_eq!(buf.len(), 54);
     }
 
     #[test]
@@ -242,7 +295,9 @@ mod tests {
         let hello = AgentHello {
             version: VERSION,
             intent: Intent::Connect,
-            token: [43u8; 32],
+            key_id: [2u8; 8],
+            timestamp: 9876543210,
+            hmac: [43u8; 32],
             session: Some([44u8; 32]),
         };
         let mut buf = Vec::new();
@@ -250,9 +305,11 @@ mod tests {
         assert_eq!(&buf[..4], &MAGIC);
         assert_eq!(buf[4], VERSION);
         assert_eq!(buf[5], Intent::Connect as u8);
-        assert_eq!(&buf[6..38], &[43u8; 32]);
-        assert_eq!(&buf[38..70], &[44u8; 32]);
-        assert_eq!(buf.len(), 70);
+        assert_eq!(&buf[6..14], &[2u8; 8]); // key_id
+        assert_eq!(&buf[14..22], &9876543210u64.to_be_bytes()); // timestamp
+        assert_eq!(&buf[22..54], &[43u8; 32]); // hmac
+        assert_eq!(&buf[54..86], &[44u8; 32]); // session
+        assert_eq!(buf.len(), 86);
     }
 
     #[test]
@@ -260,7 +317,9 @@ mod tests {
         let hello = AgentHello {
             version: VERSION,
             intent: Intent::Connect,
-            token: [43u8; 32],
+            key_id: [2u8; 8],
+            timestamp: 9876543210,
+            hmac: [43u8; 32],
             session: None,
         };
         let mut buf = Vec::new();
@@ -272,7 +331,9 @@ mod tests {
         let hello = AgentHello {
             version: VERSION,
             intent: Intent::Listen,
-            token: [42u8; 32],
+            key_id: [1u8; 8],
+            timestamp: 1234567890,
+            hmac: [42u8; 32],
             session: Some([44u8; 32]),
         };
         let mut buf = Vec::new();
@@ -288,7 +349,9 @@ mod tests {
         let hello = AgentHello {
             version: VERSION,
             intent: Intent::Listen,
-            token: [42u8; 32],
+            key_id: [1u8; 8],
+            timestamp: 1234567890,
+            hmac: [42u8; 32],
             session: None,
         };
         let mut buf = Vec::new();
@@ -297,9 +360,11 @@ mod tests {
         let (decoded, consumed) = decode_agent_hello(&buf).unwrap().unwrap();
         assert_eq!(decoded.version, hello.version);
         assert_eq!(decoded.intent, hello.intent);
-        assert_eq!(decoded.token, hello.token);
+        assert_eq!(decoded.key_id, hello.key_id);
+        assert_eq!(decoded.timestamp, hello.timestamp);
+        assert_eq!(decoded.hmac, hello.hmac);
         assert_eq!(decoded.session, hello.session);
-        assert_eq!(consumed, 38);
+        assert_eq!(consumed, 54);
     }
 
     #[test]
@@ -307,7 +372,9 @@ mod tests {
         let hello = AgentHello {
             version: VERSION,
             intent: Intent::Connect,
-            token: [43u8; 32],
+            key_id: [2u8; 8],
+            timestamp: 9876543210,
+            hmac: [43u8; 32],
             session: Some([44u8; 32]),
         };
         let mut buf = Vec::new();
@@ -316,9 +383,11 @@ mod tests {
         let (decoded, consumed) = decode_agent_hello(&buf).unwrap().unwrap();
         assert_eq!(decoded.version, hello.version);
         assert_eq!(decoded.intent, hello.intent);
-        assert_eq!(decoded.token, hello.token);
+        assert_eq!(decoded.key_id, hello.key_id);
+        assert_eq!(decoded.timestamp, hello.timestamp);
+        assert_eq!(decoded.hmac, hello.hmac);
         assert_eq!(decoded.session, hello.session);
-        assert_eq!(consumed, 70);
+        assert_eq!(consumed, 86);
     }
 
     #[test]
@@ -344,6 +413,8 @@ mod tests {
     fn test_decode_agent_hello_buffer_too_short_for_header() {
         let mut buf = MAGIC.to_vec();
         buf.push(VERSION);
+        buf.push(Intent::Listen as u8);
+        buf.extend_from_slice(&[0u8; 20]); // partial key_id and timestamp
         assert!(decode_agent_hello(&buf).unwrap().is_none());
     }
 
@@ -352,7 +423,7 @@ mod tests {
         let mut buf = MAGIC.to_vec();
         buf.push(99);
         buf.push(Intent::Listen as u8);
-        buf.extend_from_slice(&[0u8; 32]);
+        buf.extend_from_slice(&[0u8; 48]); // key_id(8) + timestamp(8) + hmac(32)
         assert!(matches!(
             decode_agent_hello(&buf),
             Err(TunnelError::UnsupportedVersion(99))
@@ -364,7 +435,7 @@ mod tests {
         let mut buf = MAGIC.to_vec();
         buf.push(VERSION);
         buf.push(99);
-        buf.extend_from_slice(&[0u8; 32]);
+        buf.extend_from_slice(&[0u8; 48]); // key_id(8) + timestamp(8) + hmac(32)
         assert!(matches!(
             decode_agent_hello(&buf),
             Err(TunnelError::InvalidIntent(99))
@@ -376,7 +447,7 @@ mod tests {
         let mut buf = MAGIC.to_vec();
         buf.push(VERSION);
         buf.push(Intent::Connect as u8);
-        buf.extend_from_slice(&[0u8; 32]);
+        buf.extend_from_slice(&[0u8; 48]); // partial: key_id(8) + timestamp(8) + hmac(32)
         // Connect requires session but buffer is too short
         assert!(decode_agent_hello(&buf).unwrap().is_none());
     }
@@ -386,12 +457,14 @@ mod tests {
         let mut buf = MAGIC.to_vec();
         buf.push(VERSION);
         buf.push(Intent::Listen as u8);
-        buf.extend_from_slice(&[42u8; 32]);
-        buf.extend_from_slice(&[99u8; 50]);
+        buf.extend_from_slice(&[1u8; 8]); // key_id
+        buf.extend_from_slice(&1234567890u64.to_be_bytes()); // timestamp
+        buf.extend_from_slice(&[42u8; 32]); // hmac
+        buf.extend_from_slice(&[99u8; 50]); // extra bytes
 
         let (decoded, consumed) = decode_agent_hello(&buf).unwrap().unwrap();
         assert_eq!(decoded.intent, Intent::Listen);
-        assert_eq!(consumed, 38);
+        assert_eq!(consumed, 54);
         // Extra bytes are not consumed by decoder
     }
 
@@ -609,4 +682,119 @@ mod tests {
     fn test_server_msg_kind_target_addr_value() {
         assert_eq!(ServerMsgKind::TargetAddr as u8, 2);
     }
+
+    // ============================================================================
+    // compute_agent_hmac tests
+    // ============================================================================
+
+    #[test]
+    fn test_compute_agent_hmac_listen() {
+        let secret = [0x42u8; 32];
+        let key_id = [0x01u8; 8];
+        let timestamp = 1234567890u64;
+
+        let hmac = compute_agent_hmac(&secret, &key_id, timestamp, Intent::Listen, None);
+        // HMAC should be 32 bytes
+        assert_eq!(hmac.len(), 32);
+    }
+
+    #[test]
+    fn test_compute_agent_hmac_connect() {
+        let secret = [0x42u8; 32];
+        let key_id = [0x01u8; 8];
+        let timestamp = 1234567890u64;
+        let session = [0x99u8; 32];
+
+        let hmac = compute_agent_hmac(&secret, &key_id, timestamp, Intent::Connect, Some(&session));
+        // HMAC should be 32 bytes
+        assert_eq!(hmac.len(), 32);
+    }
+
+    #[test]
+    fn test_compute_agent_hmac_listen_vs_connect_different() {
+        let secret = [0x42u8; 32];
+        let key_id = [0x01u8; 8];
+        let timestamp = 1234567890u64;
+        let session = [0x99u8; 32];
+
+        let hmac_listen = compute_agent_hmac(&secret, &key_id, timestamp, Intent::Listen, None);
+        let hmac_connect =
+            compute_agent_hmac(&secret, &key_id, timestamp, Intent::Connect, Some(&session));
+
+        // Different intents should produce different HMACs
+        assert_ne!(hmac_listen, hmac_connect);
+    }
+
+    #[test]
+    fn test_compute_agent_hmac_with_without_session_different() {
+        let secret = [0x42u8; 32];
+        let key_id = [0x01u8; 8];
+        let timestamp = 1234567890u64;
+        let session = [0x99u8; 32];
+
+        let hmac_without_session =
+            compute_agent_hmac(&secret, &key_id, timestamp, Intent::Connect, None);
+        let hmac_with_session =
+            compute_agent_hmac(&secret, &key_id, timestamp, Intent::Connect, Some(&session));
+
+        // Session should change the HMAC
+        assert_ne!(hmac_without_session, hmac_with_session);
+    }
+
+    #[test]
+    fn test_compute_agent_hmac_deterministic() {
+        let secret = [0x42u8; 32];
+        let key_id = [0x01u8; 8];
+        let timestamp = 1234567890u64;
+
+        let hmac1 = compute_agent_hmac(&secret, &key_id, timestamp, Intent::Listen, None);
+        let hmac2 = compute_agent_hmac(&secret, &key_id, timestamp, Intent::Listen, None);
+
+        // Same inputs should produce same HMAC
+        assert_eq!(hmac1, hmac2);
+    }
+
+    #[test]
+    fn test_compute_agent_hmac_different_key_id() {
+        let secret = [0x42u8; 32];
+        let key_id1 = [0x01u8; 8];
+        let key_id2 = [0x02u8; 8];
+        let timestamp = 1234567890u64;
+
+        let hmac1 = compute_agent_hmac(&secret, &key_id1, timestamp, Intent::Listen, None);
+        let hmac2 = compute_agent_hmac(&secret, &key_id2, timestamp, Intent::Listen, None);
+
+        // Different key_ids should produce different HMACs
+        assert_ne!(hmac1, hmac2);
+    }
+
+    #[test]
+    fn test_compute_agent_hmac_different_timestamp() {
+        let secret = [0x42u8; 32];
+        let key_id = [0x01u8; 8];
+        let timestamp1 = 1234567890u64;
+        let timestamp2 = 1234567891u64;
+
+        let hmac1 = compute_agent_hmac(&secret, &key_id, timestamp1, Intent::Listen, None);
+        let hmac2 = compute_agent_hmac(&secret, &key_id, timestamp2, Intent::Listen, None);
+
+        // Different timestamps should produce different HMACs
+        assert_ne!(hmac1, hmac2);
+    }
+
+    #[test]
+    fn test_compute_agent_hmac_different_secret() {
+        let secret1 = [0x42u8; 32];
+        let secret2 = [0x43u8; 32];
+        let key_id = [0x01u8; 8];
+        let timestamp = 1234567890u64;
+
+        let hmac1 = compute_agent_hmac(&secret1, &key_id, timestamp, Intent::Listen, None);
+        let hmac2 = compute_agent_hmac(&secret2, &key_id, timestamp, Intent::Listen, None);
+
+        // Different secrets should produce different HMACs
+        assert_ne!(hmac1, hmac2);
+    }
+
+    // v2 only: no protocol flags.
 }

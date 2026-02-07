@@ -109,11 +109,17 @@ impl LureLogger {
     }
 
     pub fn tunnel_session_offered(token_prefix: &str, target: &SocketAddr) {
-        debug!("Tunnel session offered: token={} target={}", token_prefix, target);
+        debug!(
+            "Tunnel session offered: token={} target={}",
+            token_prefix, target
+        );
     }
 
     pub fn tunnel_session_accepted(token_prefix: &str, target: &SocketAddr) {
-        debug!("Tunnel session accepted: token={} target={}", token_prefix, target);
+        debug!(
+            "Tunnel session accepted: token={} target={}",
+            token_prefix, target
+        );
     }
 
     pub fn tunnel_session_timeout(session_prefix: &str) {

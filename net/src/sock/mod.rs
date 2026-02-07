@@ -2,14 +2,7 @@ pub mod epoll;
 pub mod tokio;
 pub mod uring;
 
-use std::{
-    any::Any,
-    future::Future,
-    io,
-    net::SocketAddr,
-    pin::Pin,
-    sync::OnceLock,
-};
+use std::{any::Any, future::Future, io, net::SocketAddr, pin::Pin, sync::OnceLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
@@ -449,4 +442,3 @@ impl LureConnection {
         self.0.shutdown().await
     }
 }
-

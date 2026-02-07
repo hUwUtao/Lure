@@ -3,12 +3,7 @@ pub(crate) mod tokio;
 pub(crate) mod uring;
 
 pub use net::sock::{
-    BackendKind,
-    BackendSelection,
-    LureConnection,
-    LureListener,
-    backend_kind,
-    backend_selection,
+    BackendKind, BackendSelection, LureConnection, LureListener, backend_kind, backend_selection,
 };
 
 pub(crate) async fn passthrough_now<'a, 'b>(

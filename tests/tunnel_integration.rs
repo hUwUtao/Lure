@@ -5,19 +5,18 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 #[test]
 fn tunnel_basic_types() {
     // Test: Basic tunnel types are valid
-    use lure::tunnel::{SessionToken, TunnelToken};
+    use lure::tunnel::{SessionToken, TokenKeyId};
 
-    let token = TunnelToken([0u8; 32]);
+    let key_id = TokenKeyId([0u8; 8]);
     let session = SessionToken([1u8; 32]);
 
     // Verify these can be cloned and compared
-    let token2 = token;
-    assert_eq!(token, token2);
+    let key_id2 = key_id;
+    assert_eq!(key_id, key_id2);
 
     let session2 = session;
     assert_eq!(session, session2);
 }
-
 
 #[test]
 fn tunnel_protocol_agent_hello_roundtrip() {
@@ -30,7 +29,9 @@ fn tunnel_protocol_agent_hello_roundtrip() {
     let hello = AgentHello {
         version: tun::VERSION,
         intent: Intent::Connect,
-        token: [20u8; 32],
+        key_id: [20u8; 8],
+        timestamp: 1234567890,
+        hmac: [25u8; 32],
         session: Some([21u8; 32]),
     };
 
@@ -49,28 +50,35 @@ fn tunnel_protocol_agent_hello_roundtrip() {
 
     assert_eq!(decoded.version, hello.version);
     assert_eq!(decoded.intent, hello.intent);
-    assert_eq!(decoded.token, hello.token);
+    assert_eq!(decoded.key_id, hello.key_id);
+    assert_eq!(decoded.timestamp, hello.timestamp);
+    assert_eq!(decoded.hmac, hello.hmac);
     assert_eq!(decoded.session, hello.session);
-    assert_eq!(consumed, 70, "Connect message should be 70 bytes");
+    assert_eq!(consumed, 86, "Connect message should be 86 bytes");
 
     // Test Listen intent
     let hello_listen = AgentHello {
         version: tun::VERSION,
         intent: Intent::Listen,
-        token: [22u8; 32],
+        key_id: [22u8; 8],
+        timestamp: 9876543210,
+        hmac: [23u8; 32],
         session: None,
     };
 
     let mut buf2 = Vec::new();
     encode_agent_hello(&hello_listen, &mut buf2).expect("encode should work");
-    assert_eq!(buf2.len(), 38, "Listen message should be 38 bytes");
+    assert_eq!(buf2.len(), 54, "Listen message should be 54 bytes");
 
     let (decoded2, consumed2) = decode_agent_hello(&buf2)
         .expect("decode should work")
         .expect("should have complete message");
 
     assert_eq!(decoded2.intent, Intent::Listen);
-    assert_eq!(consumed2, 38);
+    assert_eq!(decoded2.key_id, hello_listen.key_id);
+    assert_eq!(decoded2.timestamp, hello_listen.timestamp);
+    assert_eq!(decoded2.hmac, hello_listen.hmac);
+    assert_eq!(consumed2, 54);
 }
 
 #[test]
@@ -132,14 +140,13 @@ fn tunnel_session_offer_roundtrip() {
     assert_eq!(consumed, 33, "SessionOffer message should be 33 bytes");
 }
 
-
 #[test]
 fn tunnel_protocol_error_handling() {
     // Test: Protocol errors are handled correctly
-    use tun::{decode_agent_hello, decode_server_msg, TunnelError};
+    use tun::{TunnelError, decode_agent_hello, decode_server_msg};
 
     // Invalid magic bytes
-    let mut buf = vec![0u8; 38];
+    let mut buf = vec![0u8; 54];
     buf[0] = b'X';
     let result = decode_agent_hello(&buf);
     assert!(matches!(result, Err(TunnelError::InvalidMagic)));
@@ -164,10 +171,54 @@ fn tunnel_buffer_handling() {
     // Buffer too short for AgentHello header
     let short_buf = vec![b'L', b'T', b'U', b'N']; // Only magic, no header
     let result = decode_agent_hello(&short_buf);
-    assert!(result.unwrap().is_none(), "Should return None for incomplete buffer");
+    assert!(
+        result.unwrap().is_none(),
+        "Should return None for incomplete buffer"
+    );
 
     // Buffer too short for ServerMsg
     let msg_header = vec![1u8]; // Only message kind
     let result = decode_server_msg(&msg_header);
-    assert!(result.unwrap().is_none(), "Should return None for incomplete message");
+    assert!(
+        result.unwrap().is_none(),
+        "Should return None for incomplete message"
+    );
+}
+
+#[test]
+fn tunnel_hmac_computation() {
+    // Test: HMAC computation for authentication
+    use tun::{Intent, compute_agent_hmac};
+
+    let secret = [0x42u8; 32];
+    let key_id = [0x01u8; 8];
+    let timestamp = 1234567890u64;
+    let session = [0x99u8; 32];
+
+    // Listen intent (no session)
+    let hmac_listen = compute_agent_hmac(&secret, &key_id, timestamp, Intent::Listen, None);
+    assert_eq!(hmac_listen.len(), 32, "HMAC should be 32 bytes");
+
+    // Connect intent (with session)
+    let hmac_connect =
+        compute_agent_hmac(&secret, &key_id, timestamp, Intent::Connect, Some(&session));
+    assert_eq!(hmac_connect.len(), 32, "HMAC should be 32 bytes");
+
+    // Different intents should produce different HMACs
+    assert_ne!(
+        hmac_listen, hmac_connect,
+        "Listen and Connect should produce different HMACs"
+    );
+
+    // Same inputs should be deterministic
+    let hmac_listen2 = compute_agent_hmac(&secret, &key_id, timestamp, Intent::Listen, None);
+    assert_eq!(hmac_listen, hmac_listen2, "HMAC should be deterministic");
+
+    // Different key_id should change HMAC
+    let key_id2 = [0x02u8; 8];
+    let hmac_different_key = compute_agent_hmac(&secret, &key_id2, timestamp, Intent::Listen, None);
+    assert_ne!(
+        hmac_listen, hmac_different_key,
+        "Different key_id should produce different HMAC"
+    );
 }

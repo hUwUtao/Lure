@@ -3,8 +3,8 @@ use std::{
     net::SocketAddr,
     os::fd::{AsRawFd, RawFd},
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     thread,
 };
@@ -12,8 +12,7 @@ use std::{
 use crossbeam_channel::Sender;
 use dashmap::DashMap;
 use libc::{
-    c_int, c_void, close, dup, pipe2, read, setpriority, write,
-    O_CLOEXEC, O_NONBLOCK, PRIO_PROCESS,
+    O_CLOEXEC, O_NONBLOCK, PRIO_PROCESS, c_int, c_void, close, dup, pipe2, read, setpriority, write,
 };
 use tokio::net::{TcpListener, TcpStream};
 
@@ -218,7 +217,11 @@ impl EpollBackend {
         })
     }
 
-    pub fn spawn_pair(&self, fd_a: RawFd, fd_b: RawFd) -> io::Result<tokio::sync::oneshot::Receiver<EpollDone>> {
+    pub fn spawn_pair(
+        &self,
+        fd_a: RawFd,
+        fd_b: RawFd,
+    ) -> io::Result<tokio::sync::oneshot::Receiver<EpollDone>> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.pending.insert(id, tx);
@@ -231,7 +234,10 @@ impl EpollBackend {
         };
 
         let cmd_bytes = unsafe {
-            std::slice::from_raw_parts(&cmd as *const EpollCmd as *const u8, std::mem::size_of::<EpollCmd>())
+            std::slice::from_raw_parts(
+                &cmd as *const EpollCmd as *const u8,
+                std::mem::size_of::<EpollCmd>(),
+            )
         };
         let mut bytes_written = 0;
         let mut backoff_ms = 1u64;
@@ -277,7 +283,10 @@ impl EpollBackend {
             id: 0,
         };
         let cmd_bytes = unsafe {
-            std::slice::from_raw_parts(&cmd as *const EpollCmd as *const u8, std::mem::size_of::<EpollCmd>())
+            std::slice::from_raw_parts(
+                &cmd as *const EpollCmd as *const u8,
+                std::mem::size_of::<EpollCmd>(),
+            )
         };
         for worker in &self.workers {
             let mut bytes_written = 0;
@@ -311,7 +320,6 @@ impl EpollBackend {
             }
         }
     }
-
 }
 
 impl Drop for EpollBackend {
@@ -342,11 +350,7 @@ fn pin_to_core(core_id: usize) -> io::Result<()> {
         let mut cpu_set: libc::cpu_set_t = std::mem::zeroed();
         libc::CPU_ZERO(&mut cpu_set);
         libc::CPU_SET(core_id, &mut cpu_set);
-        let result = libc::sched_setaffinity(
-            0,
-            std::mem::size_of::<libc::cpu_set_t>(),
-            &cpu_set,
-        );
+        let result = libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &cpu_set);
         if result != 0 {
             return Err(io::Error::last_os_error());
         }
@@ -356,7 +360,13 @@ fn pin_to_core(core_id: usize) -> io::Result<()> {
     Ok(())
 }
 
-fn run_c_thread(cmd_fd: RawFd, done_fd: RawFd, max_conns: usize, buf_cap: usize, core_id: Option<usize>) {
+fn run_c_thread(
+    cmd_fd: RawFd,
+    done_fd: RawFd,
+    max_conns: usize,
+    buf_cap: usize,
+    core_id: Option<usize>,
+) {
     // Pin to specific core if requested
     if let Some(core) = core_id {
         if let Err(e) = pin_to_core(core) {
@@ -368,9 +378,8 @@ fn run_c_thread(cmd_fd: RawFd, done_fd: RawFd, max_conns: usize, buf_cap: usize,
 
     set_worker_priority();
 
-    let thread = unsafe {
-        lure_epoll_thread_new(cmd_fd as c_int, done_fd as c_int, max_conns, buf_cap)
-    };
+    let thread =
+        unsafe { lure_epoll_thread_new(cmd_fd as c_int, done_fd as c_int, max_conns, buf_cap) };
     if thread.is_null() {
         unsafe {
             let _ = close(cmd_fd);
@@ -435,9 +444,7 @@ fn forward_done(fd: RawFd, done_tx: Sender<EpollDone>) {
             while frame_buf.len() < frame_size {
                 let remaining = frame_size - frame_buf.len();
                 let mut read_buf = vec![0u8; remaining];
-                let bytes = unsafe {
-                    read(fd, read_buf.as_mut_ptr() as *mut c_void, remaining)
-                };
+                let bytes = unsafe { read(fd, read_buf.as_mut_ptr() as *mut c_void, remaining) };
 
                 if bytes == 0 {
                     // EOF
@@ -449,7 +456,7 @@ fn forward_done(fd: RawFd, done_tx: Sender<EpollDone>) {
                 } else if bytes < 0 {
                     let errno = unsafe { *libc::__errno_location() };
                     if errno == libc::EINTR {
-                        continue;  // Retry on EINTR
+                        continue; // Retry on EINTR
                     }
                     if errno == libc::EAGAIN || errno == libc::EWOULDBLOCK {
                         // No more data available
@@ -470,7 +477,8 @@ fn forward_done(fd: RawFd, done_tx: Sender<EpollDone>) {
             if frame_buf.len() == frame_size {
                 let mut frame_data = [0u8; std::mem::size_of::<EpollDone>()];
                 frame_data.copy_from_slice(&frame_buf);
-                let done = unsafe { std::ptr::read_unaligned(frame_data.as_ptr() as *const EpollDone) };
+                let done =
+                    unsafe { std::ptr::read_unaligned(frame_data.as_ptr() as *const EpollDone) };
                 let _ = done_tx.send(done);
                 frame_buf.clear();
             } else {

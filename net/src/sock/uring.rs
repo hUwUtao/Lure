@@ -169,7 +169,7 @@ pub async fn passthrough_basic(a: &mut Connection, b: &mut Connection) -> io::Re
 }
 
 async fn relay(from: StreamHandle, to: StreamHandle) -> io::Result<()> {
-    const BUF_CAP: usize = 64 * 1024;  /* Increased from 16KB to reduce syscalls on high throughput */
+    const BUF_CAP: usize = 64 * 1024; /* Increased from 16KB to reduce syscalls on high throughput */
     let mut buf = vec![0u8; BUF_CAP];
     loop {
         let (n, out) = read_into_handle(&from, buf).await?;
@@ -205,7 +205,7 @@ async fn write_all_stream_handle(stream: &TcpStream, buf: Vec<u8>) -> io::Result
                 return Err(io::Error::new(
                     io::ErrorKind::Other,
                     "failed to convert io_uring buffer",
-                ))
+                ));
             }
         };
         if written >= out.len() {

@@ -17,3 +17,9 @@ net = { path = "../net" }
 tokio = { version = "1.48", features = ["full", "rt-multi-thread", "tracing"] }
 base64 = "0.22"
 anyhow = "1.0"
+hmac = "0.12"
+sha2 = "0.10"
+clap = { version = "4", features = ["derive", "env"] }
+hex = "0.4"
+log = "0.4"
+env_logger = "0.11"

@@ -36,6 +36,10 @@ thiserror = "2.0"
 base64 = "0.22"
 ed25519-dalek = { version = "2.1", features = ["std"] }
 getrandom = "0.3"
+hmac = "0.12"
+sha2 = "0.10"
+subtle = "2.5"
+hex = "0.4"
 mimalloc = { version = "0.1", optional = true }
 tonic = { version = "0.14", optional = true }
 tokio-metrics = "0.4"

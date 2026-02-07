@@ -3,10 +3,7 @@ use std::{rc::Rc, sync::Arc};
 use net::sock::uring::{Connection, StreamHandle, read_into_handle, spawn, write_all_handle};
 
 use crate::{
-    error::ReportableError,
-    inspect::drive_transport_metrics,
-    logging::LureLogger,
-    router::Session,
+    error::ReportableError, inspect::drive_transport_metrics, logging::LureLogger, router::Session,
     utils::UnsafeCounterU64,
 };
 
@@ -67,7 +64,7 @@ async fn forward_loop<L>(
 where
     L: Fn(u64),
 {
-    const BUF_CAP: usize = 64 * 1024;  /* Increased from 16KB to reduce syscalls on high throughput */
+    const BUF_CAP: usize = 64 * 1024; /* Increased from 16KB to reduce syscalls on high throughput */
     let mut buf = Vec::with_capacity(BUF_CAP);
     loop {
         let (bytes_read, buf_out) = match read_into_handle(&from, buf).await {
