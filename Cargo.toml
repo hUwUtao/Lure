@@ -1,6 +1,6 @@
 [package]
 name = "lure"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2024"
 default-run = "lure"
 
@@ -29,13 +29,13 @@ tokio = { version = "1.48", features = ["full", "rt-multi-thread", "tracing"] }
 toml = "0.9"
 async-trait = "0.1"
 futures = "0.3"
-reqwest = { version = "0.12", features = ["stream", "gzip"] }
+reqwest = { version = "0.13", features = ["stream", "gzip"] }
 serde_json = "1.0"
 governor = "0.10"
 thiserror = "2.0"
 base64 = "0.22"
 ed25519-dalek = { version = "2.1", features = ["std"] }
-getrandom = "0.3"
+getrandom = "0.4"
 hmac = "0.12"
 sha2 = "0.10"
 subtle = "2.5"
