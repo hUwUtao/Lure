@@ -5,7 +5,7 @@ use std::{
 };
 
 use clap::{Args, Parser, Subcommand};
-use log::{error, info};
+use log::{debug, error, info};
 use tun::{AgentHello, Intent, ServerMsg};
 
 #[derive(Parser)]
@@ -498,6 +498,8 @@ async fn handle_session(
     config: TunConfig,
     session: [u8; 32],
 ) -> anyhow::Result<()> {
+    let session_prefix = format!("{:02x}", session[0]);
+    info!("session offer accepted: session={session_prefix} (connecting to proxy)");
     let mut agent_conn = tun::connect_agent(ingress).await?;
 
     let timestamp = std::time::SystemTime::now()
@@ -534,18 +536,35 @@ async fn handle_session(
         }
     };
 
+    info!("tunnel target received: session={session_prefix} target={target}");
     let mut target_conn = net::sock::Connection::connect(target).await?;
+    debug!(
+        "backend connected: session={session_prefix} local={:?} peer={:?}",
+        target_conn.local_addr().ok(),
+        target_conn.peer_addr().ok()
+    );
     // If the server already sent some tunneled bytes after TargetAddr in the same read,
     // forward them to the backend before entering passthrough mode.
     if !buf.is_empty() {
+        debug!(
+            "forwarding buffered tunneled bytes: session={session_prefix} bytes={}",
+            buf.len()
+        );
         target_conn.write_all(std::mem::take(&mut buf)).await?;
     }
+    info!("tunnel passthrough start: session={session_prefix}");
     net::sock::passthrough_basic(&mut agent_conn, &mut target_conn).await?;
+    info!("tunnel passthrough end: session={session_prefix}");
     Ok(())
 }
 
 async fn listen_once(ingress: SocketAddr, config: TunConfig) -> anyhow::Result<()> {
     let mut listener = tun::connect_agent(ingress).await?;
+    debug!(
+        "connected to proxy: local={:?} peer={:?}",
+        listener.local_addr().ok(),
+        listener.peer_addr().ok()
+    );
 
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
@@ -579,6 +598,8 @@ async fn listen_once(ingress: SocketAddr, config: TunConfig) -> anyhow::Result<(
     loop {
         let msg = read_server_msg(&mut listener, &mut buf, &mut read_buf).await?;
         if let ServerMsg::SessionOffer(session) = msg {
+            let session_prefix = format!("{:02x}", session[0]);
+            info!("session offered: session={session_prefix}");
             let ingress = ingress;
             let config = TunConfig {
                 key_id: config.key_id,
@@ -717,6 +738,7 @@ fn main() {
                     std::process::exit(1);
                 }
             };
+            info!("proxy endpoint resolved: {} -> {}", args.proxy, proxy);
 
             let config = match TunConfig::from_token_string(&token_str) {
                 Ok(cfg) => cfg,
