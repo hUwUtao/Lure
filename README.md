@@ -3,100 +3,173 @@
 </p>
 
 <h1 align="center">Lure</h1>
-<p align="center"><em>A modern Minecraft native proxy and load balancer built with Rust</em></p>
+<p align="center"><em>The native Minecraft reverse proxy that works beyond L7.</em></p>
 
 ---
 
-## Overview
+## Contents
 
-**Lure** is a sophisticated, but lightweight enough, high-performance proxy for Minecraft.
-It reach high performance with
+- [What It Is](#what-it-is)
+- [Performance tuning](#performance-tuning)
+- [Features](#features)
+- [Quick Start](#quick-start)
+- [Configuration](#configuration)
+- [Running (I/O Backends)](#running-io-backends)
+- [Tunneling (Beta)](#tunneling-beta)
+- [Env Vars](#env-vars)
+- [Compatibility / Quirks](#compatibility--quirks)
+- [Development](#dev)
+- [Credits](#credits)
 
-- ~~Fair tokio socket polling~~ (kinda fast ngl)
-- Toasty io-uring, not even haproxy done this already
-- Unrailed safety prooven with hundred of hours of hardcore Forge connection, while handling few dozen player Minecraft network
+## What It Is
 
-## Philosophy
+Lure is a TCP proxy that speaks enough Minecraft to route, filter, and bridge connections without
+turning the config into a second programming language.
 
-Multi-tenancy design model, that to using well serialized configuration not config-generation and reloading
-(which prone gimmick at scale)
+Its only purpose is to correctly delivers the correct Minecraft server to the client, however it
+could be used to against quite the basic threats.
 
-Gate(lite), which is a mature proxy for this purpose, but I wasn't able to make it work on this model.
+Can be configured with a yet-not-quite-friendly controller. However, we have a nice GUI to actually
+control. If you really interested, you can be the early-adopter by contacting Discord @stdpi.
+
+## Performance tuning
+
+You can choose one of the connection backends that suits your use.
+
+- **tokio**: Stable, quite fast polling and scales on multiple cores.
+- **epoll**: Beta (Linux-only), the way HAProxy delivers million packets. Still have some scheduling issue that burns up a core.
+- **tokio-uring**: failed to 
 
 ## Features
 
-- Provision with an API backend for orchestration (via RPC, see [Elysia implementation](https://github.com/hUwUtao/Lucky))
-- Multi-server & multi-host support
-- Proxy Protocol (supported Paper-derived, Velocity and Bungeecord)
-- Highly observable system through OTEL
-- Global threat control (WIP), with socket ratelimit, etc.
-- Proxy-Protocol authentication (not even tcpshield doing this atm, but uhh we don't kinda need this are we?)
+- Multi-route and multi-endpoint routing (single or multiple matchers/endpoints), load balancing
+- Optional RPC control plane for orchestration (see [Lucky](https://github.com/hUwUtao/Lucky))
+- PROXY protocol support, with signing authorization from proxy, implemented with [BetterProxyProtocol](https://github.com/LangDuaMC/BetterProxyProtocol)
+- OTEL metrics observation
+- Basic connection rate limiting, and risky IP filtering in the future.
+- TCP tunnel agent (beta) to connect with the most efficient overhead
 
-### Cutting edge
+## Quick Start
 
-Future proof features, with considerations that some "unsafe" are fine. Project is using rustfmt nightly.
-To extends features like runtime monitoring \(I have some jealousy with go that they have actually mature otlp).
+```bash
+cargo run
+```
 
-### Updates
+Reads `settings.toml` from the current directory. If it does not exist, Lure will generate one.
+The generated default binds to `0.0.0.0:25577`.
 
-#### The shortest road
+Reload config on `SIGCONT`:
 
-With io-uring (test environment), up to 16% CPU instructions, and noticibly latency is reduced by 1μs 🥳. This cannot be made efficient in real time, but we can accelerate it!
+```bash
+kill -CONT <pid>
+```
 
-#### The coldest process
+Optional RPC backend (orchestration): set `LURE_RPC`.
 
-Optional [mimalloc](https://github.com/microsoft/mimalloc) crate feature allocator reduces CPU usage (4% → 1%) at the
-cost of higher memory usage (~47MiB vs ~20MiB).
+Telemetry: set `OTEL_EXPORTER_OTLP_ENDPOINT` to enable OTEL export.
 
-### Compatibility
+## Configuration
 
-- Guaranteed to work with 1.7+
-- Since HaProxyProtocol plaintext is not very common, only v2 is supported, most immplemented.
-- FML (Forge) Handshake support is added
+`settings.toml` is plain TOML. No generators. No templates. No "just run the installer".
 
-### Quirks
+Notes:
+- The config key is spelled `proxy_procol` (typo preserved for compatibility).
 
-- TL*uncher Guard seemingly causing trouble
-- Watch for any back-connect plugin like Geyser if proxy protocol is enabled. You have to enable both `proxy_protocol` key from desired plugin/paper config + geyser config
-- 0.1.2 -> 0.1.3 has major config layout changes
-
-### Configuration
-
-The server can now be configured stand-alone without the need of RPC backend
+Minimal example:
 
 ```toml
-# settings.toml
 inst = "main"
 bind = "0.0.0.0:25577"
 proxy_procol = false
-# key name to be changed
 max_conn = 65535
-cooldown = 3 
-# ---
+cooldown = 3
 
 [strings]
-# vendor specific, all keys optional
-MESSAGE_CANNOT_CONNECT = "Cannot connect to destinated server:"
-ERROR = "Error"
-SERVER_OFFLINE = "Server is offline :("
-ROUTE_NOT_FOUND = "The destinated server is not registered"
-SERVER_LIST_BRAND = "oops"
+ROUTE_NOT_FOUND = "route not found"
+SERVER_OFFLINE = "server offline"
 
 [[route]]
 matchers = ["mc.acme.co", "play.acme.co"]
-preserve_host = true # false by default
-proxy_protocol = true # false by default
-endpoints = ["craft-clust-1001.acme.co:25565", "craft-clust-1002.acme.co:25565"]
+endpoints = ["10.0.0.10:25565", "10.0.0.11:25565"]
+priority = 0
+
+[route.flags]
+proxy_protocol = true
+preserve_host = true
+auth_mode = "protected"
 
 [[route]]
 matcher = "eu.acme.co"
-preserve_host = false
+endpoint = "10.0.1.10:25565"
+priority = 0
+
+[route.flags]
 proxy_protocol = true
-endpoint = "craft-clust-1001.acme.co:25565"
+auth_mode = "public"
 ```
 
-> To configure RPC url, use `LURE_RPC` env
+## Running (I/O Backends)
+
+Default is Tokio:
+
+```bash
+cargo run
+```
+
+Epoll backend (beta, Linux-only):
+
+```bash
+LURE_IO_EPOLL=1 cargo run
+```
+
+tokio-uring (not recommended; "failed experiment"):
+
+```bash
+LURE_IO_URING=1 cargo run
+```
+
+## Tunneling (Beta)
+
+Need NAT passthrough? Lure can hand a connection to a tunnel agent that lives inside the network.
+
+- Docs: `docs/tunnel.md`
+- Security model: only to traverse NAT. yet encryptions needed, as internet is not that hell scary...
+
+Route example:
+
+```toml
+[[route]]
+matcher = "behind-nat.example.com"
+endpoint = "10.0.0.12:25565"
+priority = 0
+tunnel_token = "8f1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f00112233445566778899aabb" # lowkey not real token
+
+[route.flags]
+tunnel = true
+```
+
+## Env Vars
+
+- `LURE_RPC`: RPC backend URL (optional)
+- `LURE_PROXY_SIGNING_KEY`: base64 Ed25519 private key for signing proxy headers (optional)
+- `OTEL_EXPORTER_OTLP_ENDPOINT`: enable OTEL export when set
+- `LURE_IO_EPOLL=1`: enable epoll backend (beta)
+- `LURE_IO_URING=1`: enable tokio-uring backend (not recommended)
+
+## Compatibility / Quirks
+
+- Works with old clients (1.7+) and includes Forge (FML) handshake handling.
+- PROXY protocol support is v2.
+- If you enable proxy protocol, also enable it on anything behind the proxy that needs to parse it
+  (Paper/Velocity/Bungee/Geyser, etc).
+
+## Development
+
+- Build: `cargo build`
+- Run: `cargo run`
+- Test: `cargo test`
+- Format: `cargo fmt`
 
 ## Credits
 
-Original implementor [sammwyy](https://github.com/sammwyy)
+- Original implementor: [sammwyy](https://github.com/sammwyy)
