@@ -219,6 +219,7 @@ async fn run_suite(cfg: SuiteConfig) -> anyhow::Result<()> {
                 key_id: hex::encode(key_id),
                 secret: hex::encode(secret),
                 name: Some("instance_tcp_test".to_string()),
+                zone: None,
             }],
         };
         tunnel_config.route[0].flags = Some(RouteFlagsConfig {

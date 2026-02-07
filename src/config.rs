@@ -161,6 +161,9 @@ pub struct TokenEntry {
     pub secret: String,
     /// Optional human-readable name
     pub name: Option<String>,
+    /// Optional tenant/zone id for convenience lookups (control-plane managed).
+    #[serde(default)]
+    pub zone: Option<u64>,
 }
 
 fn default_inst() -> String {

@@ -32,6 +32,7 @@ mod profile;
 pub use attr::RouteAttr;
 pub use dest::Destination;
 pub use endpoint::Endpoint;
+pub use endpoint::TunnelOpt;
 pub use profile::Profile;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Copy)]
@@ -193,7 +194,7 @@ impl Drop for SessionHandle {
 pub struct ResolvedRoute {
     pub endpoint: SocketAddr,
     pub endpoint_host: String,
-    pub tunnel_id: Option<[u8; 8]>,
+    pub tunnel: TunnelOpt,
     pub route: Arc<Route>,
 }
 
@@ -446,10 +447,10 @@ impl RouterInstance {
         port_override: Option<u16>,
     ) -> Option<ResolvedRoute> {
         self.select_balanced_endpoint(route.as_ref(), port_override)
-            .map(|(endpoint_host, endpoint, tunnel_id)| ResolvedRoute {
+            .map(|(endpoint_host, endpoint, tunnel)| ResolvedRoute {
                 endpoint,
                 endpoint_host,
-                tunnel_id,
+                tunnel,
                 route,
             })
     }
@@ -462,8 +463,8 @@ impl RouterInstance {
         &self,
         route: &Route,
         port_override: Option<u16>,
-    ) -> Option<(String, SocketAddr, Option<[u8; 8]>)> {
-        let mut candidates: Vec<(Arc<str>, SocketAddr, Option<[u8; 8]>)> = Vec::new();
+    ) -> Option<(String, SocketAddr, TunnelOpt)> {
+        let mut candidates: Vec<(Arc<str>, SocketAddr, TunnelOpt)> = Vec::new();
 
         for destination in &route.endpoints {
             if let Ok(resolved) = destination.destination().resolve() {
@@ -473,7 +474,7 @@ impl RouterInstance {
                     {
                         addr.set_port(port);
                     }
-                    candidates.push((host, addr, destination.tunnel_id()));
+                    candidates.push((host, addr, destination.tunnel()));
                 }
             }
         }
@@ -483,8 +484,8 @@ impl RouterInstance {
         }
 
         let idx = (self.next_balance_index() % candidates.len() as u64) as usize;
-        let (host, addr, tunnel_id) = &candidates[idx];
-        Some((host.to_string(), *addr, *tunnel_id))
+        let (host, addr, tunnel) = &candidates[idx];
+        Some((host.to_string(), *addr, *tunnel))
     }
 
     fn match_wildcard(matcher: &str, hostname: &str) -> Option<u16> {

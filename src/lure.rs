@@ -619,24 +619,83 @@ impl Lure {
         };
 
         let server_address = session.destination_addr;
-        let tunnel_id = resolved.tunnel_id;
-        if route.tunnel() || tunnel_id.is_some() {
-            let _ = self
-                .handle_tunnel_session(
-                    client,
-                    handshake_raw,
-                    &login_raw,
-                    route.as_ref(),
-                    &session,
-                    tunnel_id,
-                )
+        let tunnel = resolved.tunnel;
+
+        // Tenant tunnel key is optional. We only hard-require it when an endpoint explicitly opts
+        // into tunnel mode with @tunnel-key or @<key_id>.
+        let requested_tunnel = match tunnel {
+            crate::router::TunnelOpt::KeyId(_) => true,
+            crate::router::TunnelOpt::ZoneDefault => true,
+            crate::router::TunnelOpt::None => route.tunnel(),
+        };
+
+        let resolved_key_id: Option<TokenKeyId> = match tunnel {
+            crate::router::TunnelOpt::KeyId(id) => Some(TokenKeyId(id)),
+            crate::router::TunnelOpt::ZoneDefault => self
+                .tunnels
+                .key_id_for_zone(route.zone)
                 .await
-                .map_err(|e| {
-                    let re = ReportableError::from(e);
-                    LureLogger::tunnel_session_error("session handling", &server_address, &re);
-                    re
-                });
-        } else {
+                .or_else(|| {
+                    route.tunnel_token.map(|token| {
+                        // v2 backcompat: use the first 8 bytes of the 32-byte route token as key_id for HMAC.
+                        TokenKeyId({
+                            let mut arr = [0u8; 8];
+                            arr.copy_from_slice(&token[..8]);
+                            arr
+                        })
+                    })
+                }),
+            crate::router::TunnelOpt::None => {
+                if let Some(token) = route.tunnel_token {
+                    Some(TokenKeyId({
+                        let mut arr = [0u8; 8];
+                        arr.copy_from_slice(&token[..8]);
+                        arr
+                    }))
+                } else {
+                    self.tunnels
+                        .key_id_for_zone(route.zone)
+                        .await
+                }
+            }
+        };
+
+        if requested_tunnel {
+            if let Some(key_id) = resolved_key_id {
+                let _ = self
+                    .handle_tunnel_session(
+                        client,
+                        handshake_raw,
+                        &login_raw,
+                        route.as_ref(),
+                        &session,
+                        key_id,
+                    )
+                    .await
+                    .map_err(|e| {
+                        let re = ReportableError::from(e);
+                        LureLogger::tunnel_session_error("session handling", &server_address, &re);
+                        re
+                    });
+                return Ok(());
+            }
+
+            // Endpoint explicitly requested tunnel but there is no usable key.
+            if !matches!(tunnel, crate::router::TunnelOpt::None) {
+                let _ = self
+                    .disconnect_login(&mut client, session.client_addr, |config| {
+                        (
+                            config.string_value("TUNNEL_TOKEN_MISSING"),
+                            "TUNNEL_TOKEN_MISSING: missing tenant tunnel key or route token for endpoint @tunnel-key/@<key_id>",
+                        )
+                    })
+                    .await;
+                return Ok(());
+            }
+        }
+
+        // Either tunnel wasn't requested, or it was best-effort and no key exists: use normal proxy.
+        {
             let _ = self
                 .handle_proxy_session(client, handshake, route.as_ref(), &session, &login_raw)
                 .await
@@ -657,27 +716,9 @@ impl Lure {
         login_raw: &[u8],
         route: &Route,
         session: &Session,
-        tunnel_id: Option<[u8; 8]>,
+        key_id: TokenKeyId,
     ) -> anyhow::Result<()> {
-        let key_id = if let Some(id) = tunnel_id {
-            TokenKeyId(id)
-        } else if let Some(token) = route.tunnel_token {
-            // v2 backcompat: use the first 8 bytes of the 32-byte route token as key_id for HMAC.
-            TokenKeyId({
-                let mut arr = [0u8; 8];
-                arr.copy_from_slice(&token[..8]);
-                arr
-            })
-        } else {
-            self.disconnect_login(&mut client, session.client_addr, |config| {
-                (
-                    config.string_value("TUNNEL_TOKEN_MISSING"),
-                    "TUNNEL_TOKEN_MISSING: route missing tunnel token or endpoint @tunnel-id",
-                )
-            })
-            .await;
-            return Ok(());
-        };
+        let _ = route; // key selection is performed in the caller
 
         let mut session_bytes = [0u8; 32];
         fill_random(&mut session_bytes)?;

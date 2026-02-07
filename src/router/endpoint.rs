@@ -4,26 +4,32 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::Destination;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TunnelOpt {
+    None,
+    /// Explicit tunnel key_id in hex (8 bytes / 16 hex chars).
+    KeyId([u8; 8]),
+    /// Use the tenant's registered tunnel key for this route's zone.
+    ZoneDefault,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint {
     destination: Destination,
-    tunnel_id: Option<[u8; 8]>,
+    tunnel: TunnelOpt,
 }
 
 impl Endpoint {
-    pub fn new(destination: Destination, tunnel_id: Option<[u8; 8]>) -> Self {
-        Self {
-            destination,
-            tunnel_id,
-        }
+    pub fn new(destination: Destination, tunnel: TunnelOpt) -> Self {
+        Self { destination, tunnel }
     }
 
     pub fn destination(&self) -> &Destination {
         &self.destination
     }
 
-    pub fn tunnel_id(&self) -> Option<[u8; 8]> {
-        self.tunnel_id
+    pub fn tunnel(&self) -> TunnelOpt {
+        self.tunnel
     }
 
     pub fn parse(s: &str) -> Result<Self, ParseEndpointError> {
@@ -42,9 +48,10 @@ impl Endpoint {
 
 impl fmt::Display for Endpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.tunnel_id {
-            Some(id) => write!(f, "{}@{}", self.destination, hex::encode(id)),
-            None => write!(f, "{}", self.destination),
+        match self.tunnel {
+            TunnelOpt::KeyId(id) => write!(f, "{}@{}", self.destination, hex::encode(id)),
+            TunnelOpt::ZoneDefault => write!(f, "{}@tunnel-key", self.destination),
+            TunnelOpt::None => write!(f, "{}", self.destination),
         }
     }
 }
@@ -95,14 +102,14 @@ impl fmt::Display for ParseEndpointError {
 
 impl std::error::Error for ParseEndpointError {}
 
-fn split_tunnel_suffix(s: &str) -> Result<(&str, Option<[u8; 8]>), ParseEndpointError> {
+fn split_tunnel_suffix(s: &str) -> Result<(&str, TunnelOpt), ParseEndpointError> {
     let trimmed = s.trim();
     if trimmed.is_empty() {
         return Err(ParseEndpointError::Empty);
     }
 
     let Some(at) = trimmed.rfind('@') else {
-        return Ok((trimmed, None));
+        return Ok((trimmed, TunnelOpt::None));
     };
 
     let dest = trimmed[..at].trim();
@@ -112,9 +119,14 @@ fn split_tunnel_suffix(s: &str) -> Result<(&str, Option<[u8; 8]>), ParseEndpoint
     }
     if suffix.is_empty() {
         return Err(ParseEndpointError::InvalidTunnelId(
-            "missing tunnel-id after '@'".to_string(),
+            "missing tunnel selector after '@'".to_string(),
         ));
     }
+
+    if suffix.eq_ignore_ascii_case("tunnel-key") {
+        return Ok((dest, TunnelOpt::ZoneDefault));
+    }
+
     if suffix.len() != 16 || !suffix.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(ParseEndpointError::InvalidTunnelId(
             "expected 16 hex characters (8 bytes)".to_string(),
@@ -129,7 +141,7 @@ fn split_tunnel_suffix(s: &str) -> Result<(&str, Option<[u8; 8]>), ParseEndpoint
         out[i] = byte;
     }
 
-    Ok((dest, Some(out)))
+    Ok((dest, TunnelOpt::KeyId(out)))
 }
 
 #[cfg(test)]
@@ -139,7 +151,7 @@ mod tests {
     #[test]
     fn parses_without_tunnel_id() {
         let e = Endpoint::parse("example.com:25565").unwrap();
-        assert_eq!(e.tunnel_id(), None);
+        assert_eq!(e.tunnel(), TunnelOpt::None);
         assert_eq!(e.to_string(), "example.com:25565");
     }
 
@@ -147,15 +159,22 @@ mod tests {
     fn parses_with_tunnel_id() {
         let e = Endpoint::parse("example.com:25565@0011223344556677").unwrap();
         assert_eq!(
-            e.tunnel_id(),
-            Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77])
+            e.tunnel(),
+            TunnelOpt::KeyId([0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77])
         );
         assert_eq!(e.to_string(), "example.com:25565@0011223344556677");
     }
 
     #[test]
+    fn parses_with_tunnel_key_selector() {
+        let e = Endpoint::parse("example.com:25565@tunnel-key").unwrap();
+        assert_eq!(e.tunnel(), TunnelOpt::ZoneDefault);
+        assert_eq!(e.to_string(), "example.com:25565@tunnel-key");
+    }
+
+    #[test]
     fn rejects_empty_tunnel_id() {
         let err = Endpoint::parse("example.com:25565@").unwrap_err();
-        assert!(err.to_string().contains("missing tunnel-id"));
+        assert!(err.to_string().contains("missing tunnel selector"));
     }
 }

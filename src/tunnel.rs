@@ -78,6 +78,8 @@ pub struct TokenInfo {
 pub struct TunnelRegistry {
     /// Token registry by key_id
     tokens: RwLock<HashMap<TokenKeyId, Arc<TokenInfo>>>,
+    /// Optional mapping from zone -> key_id (set when token entries include zone).
+    zones: RwLock<HashMap<u64, TokenKeyId>>,
     /// Active agents by key_id
     agents: RwLock<HashMap<TokenKeyId, AgentHandle>>,
     /// Pending sessions
@@ -106,6 +108,7 @@ impl Default for TunnelRegistry {
     fn default() -> Self {
         Self {
             tokens: RwLock::new(HashMap::new()),
+            zones: RwLock::new(HashMap::new()),
             agents: RwLock::new(HashMap::new()),
             pending: RwLock::new(HashMap::new()),
             expired_sessions: std::sync::atomic::AtomicU64::new(0),
@@ -117,14 +120,21 @@ impl TunnelRegistry {
     /// Load tokens from configuration
     pub async fn load_tokens(&self, config: &crate::config::TunnelConfig) -> anyhow::Result<()> {
         let mut tokens = self.tokens.write().await;
+        let mut zones = self.zones.write().await;
         tokens.clear();
+        zones.clear();
 
         for entry in &config.token {
             let key_id = parse_key_id(&entry.key_id).context("parsing key_id")?;
             let secret = parse_secret(&entry.secret).context("parsing secret")?;
 
+            let token_key = TokenKeyId(key_id);
+            if let Some(zone) = entry.zone {
+                zones.insert(zone, token_key);
+            }
+
             tokens.insert(
-                TokenKeyId(key_id),
+                token_key,
                 Arc::new(TokenInfo {
                     secret,
                     name: entry.name.clone(),
@@ -148,6 +158,10 @@ impl TunnelRegistry {
             tokens.clear();
         }
         {
+            let mut zones = self.zones.write().await;
+            zones.clear();
+        }
+        {
             let mut pending = self.pending.write().await;
             pending.clear();
         }
@@ -157,9 +171,15 @@ impl TunnelRegistry {
         let key_id = parse_key_id(&entry.key_id).context("parsing key_id")?;
         let secret = parse_secret(&entry.secret).context("parsing secret")?;
 
+        let token_key = TokenKeyId(key_id);
+
         let mut tokens = self.tokens.write().await;
+        let mut zones = self.zones.write().await;
+        if let Some(zone) = entry.zone {
+            zones.insert(zone, token_key);
+        }
         tokens.insert(
-            TokenKeyId(key_id),
+            token_key,
             Arc::new(TokenInfo {
                 secret,
                 name: entry.name.clone(),
@@ -168,6 +188,10 @@ impl TunnelRegistry {
             }),
         );
         Ok(())
+    }
+
+    pub async fn key_id_for_zone(&self, zone: u64) -> Option<TokenKeyId> {
+        self.zones.read().await.get(&zone).copied()
     }
 
     /// Validate HMAC authentication
@@ -454,4 +478,28 @@ fn parse_secret(secret_str: &str) -> anyhow::Result<[u8; 32]> {
     let mut out = [0u8; 32];
     out.copy_from_slice(&decoded);
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn zone_mapping_is_updated_on_upsert_and_cleared() {
+        let registry = TunnelRegistry::default();
+        let entry = TokenEntry {
+            key_id: "0011223344556677".to_string(),
+            secret: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            name: None,
+            zone: Some(42),
+        };
+
+        registry.upsert_token(&entry).await.unwrap();
+
+        let key = registry.key_id_for_zone(42).await.unwrap();
+        assert_eq!(key.0, [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77]);
+
+        registry.clear_runtime().await;
+        assert!(registry.key_id_for_zone(42).await.is_none());
+    }
 }
