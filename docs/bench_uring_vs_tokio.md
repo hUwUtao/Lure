@@ -7,7 +7,7 @@ Date: 2026-01-27
 - Payload: 1024 bytes per request
 - Concurrency: 32 client connections
 - Duration: 15s (after 5s warmup)
-- Backend selection: `LURE_IO_URING=0` vs `LURE_IO_URING=1`
+- Backend selection: `LURE_IO_URING=0` vs `LURE_IO_URING=1` (requires `--features uring`)
 
 ## Methodology
 - The proxy uses `sock::Listener` and `sock::Connection` for accept/connect and I/O.
@@ -19,7 +19,7 @@ Date: 2026-01-27
 ## Commands
 ```
 LURE_IO_URING=0 cargo run --bin bench_proxy --release -- --duration 15 --warmup 5 --concurrency 32 --payload 1024
-LURE_IO_URING=1 cargo run --bin bench_proxy --release -- --duration 15 --warmup 5 --concurrency 32 --payload 1024
+LURE_IO_URING=1 cargo run --features uring --bin bench_proxy --release -- --duration 15 --warmup 5 --concurrency 32 --payload 1024
 ```
 
 ## Results

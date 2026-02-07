@@ -10,8 +10,10 @@ libc = "0.2"
 log = "0.4.22"
 num_cpus = "1.16"
 tokio = { version = "1.48", features = ["full", "rt-multi-thread", "tracing"] }
-tokio-uring = { git = "https://github.com/hUwUtao/tokio-uring.git", version = "0.5.0", features = ["bytes"] }
-io-uring = "0.7.11"
+# tokio-uring is a Linux-only experimental backend. Keep it behind a feature so
+# musl builds (and non-uring users) don't pull in the dependency graph.
+tokio-uring = { git = "https://github.com/hUwUtao/tokio-uring.git", version = "0.5.0", features = ["bytes"], optional = true }
+io-uring = { version = "0.7.11", optional = true }
 
 [build-dependencies]
 cc = "1.0"
@@ -21,6 +23,7 @@ criterion = "0.8"
 
 [features]
 packet-debug = []
+uring = ["dep:tokio-uring", "dep:io-uring"]
 
 [[bench]]
 name = "mc"

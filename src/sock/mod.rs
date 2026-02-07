@@ -1,5 +1,21 @@
+#[cfg(target_os = "linux")]
 pub(crate) mod epoll;
+#[cfg(not(target_os = "linux"))]
+pub(crate) mod epoll {
+    use crate::router::Session;
+
+    pub(crate) async fn passthrough_now(
+        _client: &mut net::sock::epoll::Connection,
+        _server: &mut net::sock::epoll::Connection,
+        _session: &Session,
+    ) -> anyhow::Result<()> {
+        Err(anyhow::anyhow!(
+            "epoll backend is only supported on linux"
+        ))
+    }
+}
 pub(crate) mod tokio;
+#[cfg(feature = "uring")]
 pub(crate) mod uring;
 
 pub use net::sock::{
@@ -31,9 +47,14 @@ pub(crate) async fn passthrough_now<'a, 'b>(
         (net::sock::Connection::Epoll(client), net::sock::Connection::Epoll(server)) => {
             epoll::passthrough_now(client, server, session).await
         }
+        #[cfg(feature = "uring")]
         (net::sock::Connection::Uring(client), net::sock::Connection::Uring(server)) => {
             uring::passthrough_now(client, server, session).await
         }
+        #[cfg(not(feature = "uring"))]
+        (net::sock::Connection::Uring(_), net::sock::Connection::Uring(_)) => Err(anyhow::anyhow!(
+            "io_uring backend is disabled at compile time (build with `--features uring`)"
+        )),
         _ => Err(anyhow::anyhow!(
             "mismatched connection backends for passthrough"
         )),

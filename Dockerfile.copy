@@ -1,14 +1,13 @@
-FROM debian:trixie-slim
+FROM debian:bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends openssl ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY lure /app/lure
 RUN chmod 0755 /app/lure \
-    && useradd -r -u 10001 -g nogroup lure \
-    && chown -R lure:nogroup /app
+    # Smoke test: verify the binary starts and is executable.
+    && /app/lure --version
 
-USER lure
 CMD ["/app/lure"]

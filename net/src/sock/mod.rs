@@ -1,6 +1,226 @@
-pub mod epoll;
 pub mod tokio;
+// Linux-only backends.
+//
+// On non-Linux platforms we provide small compatibility shims so the crate
+// continues to compile and callers can still match on BackendKind values.
+#[cfg(target_os = "linux")]
+pub mod epoll;
+#[cfg(not(target_os = "linux"))]
+pub mod epoll {
+    use std::{io, net::SocketAddr};
+
+    pub(crate) fn probe() -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "epoll backend is only supported on linux",
+        ))
+    }
+
+    pub struct Listener {
+        inner: crate::sock::tokio::Listener,
+    }
+
+    impl Listener {
+        pub(crate) async fn bind(addr: SocketAddr) -> io::Result<Self> {
+            Ok(Self {
+                inner: crate::sock::tokio::Listener::bind(addr).await?,
+            })
+        }
+
+        pub(crate) async fn accept(&self) -> io::Result<(Connection, SocketAddr)> {
+            let (conn, addr) = self.inner.accept().await?;
+            Ok((Connection { inner: conn }, addr))
+        }
+
+        pub(crate) fn local_addr(&self) -> io::Result<SocketAddr> {
+            self.inner.local_addr()
+        }
+    }
+
+    pub struct Connection {
+        inner: crate::sock::tokio::Connection,
+    }
+
+    impl Connection {
+        pub(crate) async fn connect(addr: SocketAddr) -> io::Result<Self> {
+            Ok(Self {
+                inner: crate::sock::tokio::Connection::connect(addr).await?,
+            })
+        }
+
+        pub fn addr(&self) -> &SocketAddr {
+            self.inner.addr()
+        }
+
+        pub fn peer_addr(&self) -> io::Result<SocketAddr> {
+            self.inner.peer_addr()
+        }
+
+        pub fn local_addr(&self) -> io::Result<SocketAddr> {
+            self.inner.local_addr()
+        }
+
+        pub fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
+            self.inner.set_nodelay(nodelay)
+        }
+
+        pub(crate) async fn read_chunk(&mut self, buf: Vec<u8>) -> io::Result<(usize, Vec<u8>)> {
+            self.inner.read_chunk(buf).await
+        }
+
+        pub(crate) async fn write_all(&mut self, buf: Vec<u8>) -> io::Result<Vec<u8>> {
+            self.inner.write_all(buf).await
+        }
+
+        pub(crate) async fn flush(&mut self) -> io::Result<()> {
+            self.inner.flush().await
+        }
+
+        pub(crate) fn try_read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.inner.try_read(buf)
+        }
+
+        pub(crate) async fn shutdown(&mut self) -> io::Result<()> {
+            self.inner.shutdown().await
+        }
+    }
+
+    pub async fn passthrough_basic(a: &mut Connection, b: &mut Connection) -> io::Result<()> {
+        crate::sock::tokio::passthrough_basic(&mut a.inner, &mut b.inner).await
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "uring"))]
 pub mod uring;
+#[cfg(not(all(target_os = "linux", feature = "uring")))]
+pub mod uring {
+    use std::{future::Future, io, net::SocketAddr};
+
+    use tokio::net::{TcpListener, TcpStream};
+
+    pub(crate) fn probe() -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, if cfg!(target_os = "linux") {
+            "io_uring backend is disabled at compile time (enable net feature `uring`)"
+        } else {
+            "io_uring backend is only supported on linux"
+        }))
+    }
+
+    pub fn spawn<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+    where
+        // tokio-uring spawns !Send tasks on a LocalSet. Keep the same surface
+        // area so callers don't need extra bounds.
+        F: Future + 'static,
+        F::Output: 'static,
+    {
+        tokio::task::spawn_local(future)
+    }
+
+    pub fn start<F>(future: F) -> F::Output
+    where
+        // tokio-uring runs a single-threaded runtime that supports !Send tasks.
+        // Keep the same API shape so callers can use LocalSet / trait objects.
+        F: Future + 'static,
+        F::Output: 'static,
+    {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build tokio runtime")
+            .block_on(future)
+    }
+
+    pub struct Listener {
+        inner: TcpListener,
+    }
+
+    impl Listener {
+        pub(crate) fn bind(addr: SocketAddr) -> io::Result<Self> {
+            let std_listener = std::net::TcpListener::bind(addr)?;
+            std_listener.set_nonblocking(true)?;
+            let inner = TcpListener::from_std(std_listener)?;
+            Ok(Self { inner })
+        }
+
+        pub(crate) async fn accept(&self) -> io::Result<(Connection, SocketAddr)> {
+            let (stream, addr) = self.inner.accept().await?;
+            Ok((Connection::new(stream, addr), addr))
+        }
+
+        pub(crate) fn local_addr(&self) -> io::Result<SocketAddr> {
+            self.inner.local_addr()
+        }
+    }
+
+    pub struct Connection {
+        stream: TcpStream,
+        addr: SocketAddr,
+    }
+
+    impl Connection {
+        pub(crate) async fn connect(addr: SocketAddr) -> io::Result<Self> {
+            let stream = TcpStream::connect(addr).await?;
+            let addr = stream.peer_addr()?;
+            Ok(Self { stream, addr })
+        }
+
+        pub(crate) fn new(stream: TcpStream, addr: SocketAddr) -> Self {
+            Self { stream, addr }
+        }
+
+        pub fn addr(&self) -> &SocketAddr {
+            &self.addr
+        }
+
+        pub fn peer_addr(&self) -> io::Result<SocketAddr> {
+            self.stream.peer_addr()
+        }
+
+        pub fn local_addr(&self) -> io::Result<SocketAddr> {
+            self.stream.local_addr()
+        }
+
+        pub fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
+            self.stream.set_nodelay(nodelay)
+        }
+
+        pub(crate) async fn read_chunk(&mut self, mut buf: Vec<u8>) -> io::Result<(usize, Vec<u8>)> {
+            use tokio::io::AsyncReadExt;
+            let n = self.stream.read(&mut buf).await?;
+            Ok((n, buf))
+        }
+
+        pub(crate) async fn write_all(&mut self, buf: Vec<u8>) -> io::Result<Vec<u8>> {
+            use tokio::io::AsyncWriteExt;
+            self.stream.write_all(buf.as_slice()).await?;
+            Ok(buf)
+        }
+
+        pub(crate) async fn flush(&mut self) -> io::Result<()> {
+            use tokio::io::AsyncWriteExt;
+            self.stream.flush().await
+        }
+
+        pub(crate) fn try_read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.stream.try_read(buf)
+        }
+
+        pub(crate) async fn shutdown(&mut self) -> io::Result<()> {
+            use tokio::io::AsyncWriteExt;
+            self.stream.shutdown().await
+        }
+    }
+
+    pub async fn passthrough_basic(a: &mut Connection, b: &mut Connection) -> io::Result<()> {
+        let (mut a_read, mut a_write) = a.stream.split();
+        let (mut b_read, mut b_write) = b.stream.split();
+
+        let a_to_b = tokio::io::copy(&mut a_read, &mut b_write);
+        let b_to_a = tokio::io::copy(&mut b_read, &mut a_write);
+        let _ = tokio::try_join!(a_to_b, b_to_a)?;
+        Ok(())
+    }
+}
 
 use std::{any::Any, future::Future, io, net::SocketAddr, pin::Pin, sync::OnceLock};
 

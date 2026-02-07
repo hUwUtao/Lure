@@ -9,6 +9,22 @@ use lure::{
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
+    // Minimal CLI: used for Dockerfile smoke checks and quick inspection.
+    // Keep this lightweight (no clap) to avoid changing runtime behavior.
+    if let Some(arg) = env::args().nth(1) {
+        match arg.as_str() {
+            "--version" | "-V" => {
+                println!("{}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
+            "--help" | "-h" => {
+                println!("usage: lure [--version]");
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
     let _ = dotenvy::dotenv();
     console_subscriber::init();
     #[cfg(debug_assertions)]
@@ -84,38 +100,46 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let lure = leak(Lure::new(config));
     lure.sync_routes_from_config().await?;
 
-    let reload_path = config_file.clone();
-    let reload_lure = lure;
-    spawn_named("Reload handler", async move {
-        use tokio::signal::unix::{SignalKind, signal};
+    #[cfg(unix)]
+    {
+        let reload_path = config_file.clone();
+        let reload_lure = lure;
+        spawn_named("Reload handler", async move {
+            use tokio::signal::unix::{SignalKind, signal};
 
-        // SIGCONT=18
-        let mut sigcont = match signal(SignalKind::from_raw(18)) {
-            Ok(sig) => sig,
-            Err(err) => {
-                log::error!("Failed to register SIGCONT handler: {err}");
-                return;
-            }
-        };
-
-        while sigcont.recv().await.is_some() {
-            match LureConfig::load(&reload_path) {
-                Ok(cfg) => {
-                    if let Err(err) = reload_lure.reload_config(cfg).await {
-                        log::error!("Failed to apply reloaded config: {err:?}");
-                    }
-                }
-                Err(LureConfigLoadError::Io(io)) if io.kind() == ErrorKind::NotFound => {
-                    if let Err(err) = reload_lure.reload_config(LureConfig::default()).await {
-                        log::error!("Failed to apply default config during reload: {err:?}");
-                    }
-                }
+            // SIGCONT=18
+            let mut sigcont = match signal(SignalKind::from_raw(18)) {
+                Ok(sig) => sig,
                 Err(err) => {
-                    log::error!("Failed to load config during reload: {err}");
+                    log::error!("Failed to register SIGCONT handler: {err}");
+                    return;
+                }
+            };
+
+            while sigcont.recv().await.is_some() {
+                match LureConfig::load(&reload_path) {
+                    Ok(cfg) => {
+                        if let Err(err) = reload_lure.reload_config(cfg).await {
+                            log::error!("Failed to apply reloaded config: {err:?}");
+                        }
+                    }
+                    Err(LureConfigLoadError::Io(io)) if io.kind() == ErrorKind::NotFound => {
+                        if let Err(err) = reload_lure.reload_config(LureConfig::default()).await {
+                            log::error!("Failed to apply default config during reload: {err:?}");
+                        }
+                    }
+                    Err(err) => {
+                        log::error!("Failed to load config during reload: {err}");
+                    }
                 }
             }
-        }
-    })?;
+        })?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = &config_file;
+        log::info!("config reload via SIGCONT is not supported on this platform");
+    }
 
     spawn_named("Main thread", async move {
         if let Err(e) = lure.start().await {
@@ -126,20 +150,24 @@ async fn run() -> Result<(), Box<dyn Error>> {
             // providers.1.shutdown()?;
         }
     })?;
+    #[cfg(unix)]
     {
         use futures::future::{FutureExt, select_all};
         use tokio::signal::unix::{SignalKind, signal};
 
-        // Create futures for SIGINT, SIGTERM, and SIGKILL
         let mut sigint = signal(SignalKind::interrupt())?;
         let mut sigterm = signal(SignalKind::terminate())?;
 
-        // Wait for any of the signals
         let sigint_fut = sigint.recv().boxed();
         let sigterm_fut = sigterm.recv().boxed();
 
         let _ = select_all([sigint_fut, sigterm_fut]).await;
         log::info!("Received signal, stopping...");
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await?;
+        log::info!("Received Ctrl-C, stopping...");
     }
     Ok(())
 }

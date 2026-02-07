@@ -1,4 +1,7 @@
 /target
+/target-default
+/target-stable
+/target-*
 /settings.toml
 /*.png
 /flamegraph.svg

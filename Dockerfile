@@ -1,22 +1,15 @@
-FROM rust:1-slim-trixie AS builder
+FROM rust:1-slim AS builder
 WORKDIR /app
 
-ARG RUSTFLAGS
-ENV RUSTFLAGS=${RUSTFLAGS}
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends openssl libssl-dev pkg-config ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get upgrade && apt-get install -y openssl libssl-dev pkg-config
 
 COPY . .
 RUN cargo install --path .
 
 # Stage 2: Create the final image
-FROM debian:trixie-slim
+FROM debian:bookworm-slim
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends openssl ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get upgrade && apt-get install -y openssl
 
 WORKDIR /app
 COPY --from=builder /usr/local/cargo/bin/lure /app/lure

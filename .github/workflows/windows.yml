@@ -1,0 +1,26 @@
+name: Windows Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly toolchain
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup default nightly
+
+      # Build only the main binary; other `src/bin/*` tools are Linux-centric.
+      - name: Build (release)
+        run: cargo +nightly build -p lure --bin lure --release --verbose
+

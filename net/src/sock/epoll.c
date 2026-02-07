@@ -1,3 +1,8 @@
+/* Needed for Linux-specific APIs like splice() across libcs (glibc/musl). */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1
+#endif
+
 #include "epoll.h"
 
 #include <errno.h>
@@ -17,11 +22,13 @@
 #define LURE_EPOLL_SIDE_B 1u
 #define LURE_EPOLL_CMD_KEY UINT64_MAX
 
-/* splice syscall - zero-copy kernel-to-kernel data movement */
-extern ssize_t splice(int fd_in, loff_t *off_in, int fd_out, loff_t *off_out,
-                     size_t len, unsigned int flags);
-#define SPLICE_F_MOVE   1
+/* splice(2) flags: prefer libc headers, but keep fallbacks for portability. */
+#ifndef SPLICE_F_MOVE
+#define SPLICE_F_MOVE 1
+#endif
+#ifndef SPLICE_F_NONBLOCK
 #define SPLICE_F_NONBLOCK 2
+#endif
 
 /* Configuration */
 #define LURE_SMALL_BUF_SIZE (2 * 1024)     /* 2KB fits in L1 */
