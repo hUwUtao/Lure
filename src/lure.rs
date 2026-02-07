@@ -269,11 +269,33 @@ impl Lure {
         drop(config);
 
         if let Ok(rpc_url) = dotenvy::var("LURE_RPC") {
+            // TunnelRegistry is not Send due to connection types; bridge RPC events to a local task.
+            let (tun_tx, mut tun_rx) = tokio::sync::mpsc::unbounded_channel();
+            let tunnels = Arc::clone(&self.tunnels);
+            spawn_named("tunnel-rpc-sync", async move {
+                while let Some(msg) = tun_rx.recv().await {
+                    match msg {
+                        crate::tunnel::TunnelControlMsg::Flush => {
+                            tunnels.clear_runtime().await;
+                        }
+                        crate::tunnel::TunnelControlMsg::Upsert(entry) => {
+                            if let Err(e) = tunnels.upsert_token(&entry).await {
+                                error!("failed to upsert tunnel token from rpc: {e}");
+                            }
+                        }
+                    }
+                }
+            })
+            .ok();
+
             let event = init_event(rpc_url);
             event.hook(EventIdent { id: inst }).await;
             event.hook(OwnedStatic::from(self.router)).await;
             event
                 .hook(crate::inspect::InspectHook::new(self.router))
+                .await;
+            event
+                .hook(crate::tunnel::TunnelControlHook::new(tun_tx))
                 .await;
             event.clone().start();
         }
