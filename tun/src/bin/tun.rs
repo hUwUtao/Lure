@@ -1,11 +1,15 @@
-use std::net::SocketAddr;
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    process::Command as ProcessCommand,
+};
 
 use clap::{Args, Parser, Subcommand};
 use log::{error, info};
 use tun::{AgentHello, Intent, ServerMsg};
 
 #[derive(Parser)]
-#[command(name = "tun")]
+#[command(name = "tunure")]
 #[command(about = "Lure tunnel agent")]
 struct Cli {
     #[command(subcommand)]
@@ -18,11 +22,14 @@ enum Command {
     Agent(AgentArgs),
     /// Compute a valid HMAC signature for a hello message (development helper)
     Sign(SignArgs),
+    /// Install/uninstall tunure as a systemd service
+    Systemd(SystemdArgs),
 }
 
 #[derive(Args)]
 struct AgentArgs {
     /// Proxy address (host:port)
+    #[arg(env = "LURE_TUN_ENDPOINT")]
     proxy: String,
 
     /// Authentication token (format: key_id:secret, both hex-encoded)
@@ -47,6 +54,84 @@ struct SignArgs {
     /// Session token for connect intent (64 hex chars, 32 bytes)
     #[arg(long)]
     session: Option<String>,
+}
+
+#[derive(Args)]
+struct SystemdArgs {
+    #[command(subcommand)]
+    command: SystemdCommand,
+}
+
+#[derive(Subcommand)]
+enum SystemdCommand {
+    /// Install and enable a tunure-agent systemd unit
+    Install(SystemdInstallArgs),
+    /// Disable and remove the tunure-agent systemd unit
+    Uninstall(SystemdUninstallArgs),
+}
+
+#[derive(Args)]
+struct SystemdInstallArgs {
+    /// Proxy address (host:port) for the agent to connect to.
+    ///
+    /// You can also set LURE_TUN_ENDPOINT.
+    #[arg(long, env = "LURE_TUN_ENDPOINT")]
+    endpoint: String,
+
+    /// Authentication token (format: key_id:secret, both hex-encoded).
+    ///
+    /// You can also set LURE_TUN_TOKEN.
+    #[arg(short, long, env = "LURE_TUN_TOKEN")]
+    token: Option<String>,
+
+    /// Install as a per-user service (default).
+    #[arg(long)]
+    user: bool,
+
+    /// Install as a system-wide service (writes to /etc/systemd/system).
+    #[arg(long)]
+    system: bool,
+
+    /// Override the service name (without .service).
+    ///
+    /// Default is tunure-agent-<key_id>.
+    #[arg(long)]
+    name: Option<String>,
+
+    /// Copy the current tunure binary to a stable path and use it for the service.
+    #[arg(long, default_value_t = true)]
+    install_bin: bool,
+
+    /// Where to install the tunure binary to (overrides default).
+    ///
+    /// Defaults:
+    /// - user:   ~/.local/bin/tunure
+    /// - system: /usr/local/bin/tunure
+    #[arg(long)]
+    bin_path: Option<String>,
+
+    /// Extra RUST_LOG for the service (default: info)
+    #[arg(long, default_value = "info")]
+    rust_log: String,
+
+    /// After writing the unit, attempt to `systemctl enable --now`.
+    #[arg(long, default_value_t = true)]
+    enable_now: bool,
+}
+
+#[derive(Args)]
+struct SystemdUninstallArgs {
+    /// Uninstall from the per-user service directory (~/.config/systemd/user).
+    #[arg(long)]
+    user: bool,
+
+    /// Uninstall from the system service directory (/etc/systemd/system).
+    #[arg(long)]
+    system: bool,
+
+    /// Service name to uninstall (without .service).
+    #[arg(long)]
+    name: String,
 }
 
 struct TunConfig {
@@ -87,6 +172,282 @@ impl TunConfig {
 
         Ok(Self { key_id, secret })
     }
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+fn xdg_config_home() -> Option<PathBuf> {
+    if let Some(v) = std::env::var_os("XDG_CONFIG_HOME") {
+        return Some(PathBuf::from(v));
+    }
+    home_dir().map(|h| h.join(".config"))
+}
+
+fn ensure_dir(path: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(path)?;
+    Ok(())
+}
+
+fn ensure_parent_dir(path: &Path) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        ensure_dir(parent)?;
+    }
+    Ok(())
+}
+
+fn copy_self_to(target: &Path) -> anyhow::Result<()> {
+    let exe = std::env::current_exe()?;
+    ensure_parent_dir(target)?;
+    std::fs::copy(&exe, target)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(())
+}
+
+fn service_filename(service_name: &str) -> String {
+    if service_name.ends_with(".service") {
+        service_name.to_string()
+    } else {
+        format!("{service_name}.service")
+    }
+}
+
+fn systemctl(scope_user: bool, args: &[&str]) -> anyhow::Result<()> {
+    let mut cmd = ProcessCommand::new("systemctl");
+    if scope_user {
+        cmd.arg("--user");
+    }
+    cmd.args(args);
+    let status = cmd.status()?;
+    if !status.success() {
+        anyhow::bail!("systemctl failed: {status}");
+    }
+    Ok(())
+}
+
+fn write_secret_env_file(path: &Path, token: &str, rust_log: &str) -> anyhow::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
+    writeln!(f, "LURE_TUN_TOKEN={token}")?;
+    writeln!(f, "RUST_LOG={rust_log}")?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+fn render_unit(exe: &Path, endpoint: &str, env_file: &Path, scope_user: bool) -> String {
+    // Keep secrets out of ExecStart args; use EnvironmentFile instead.
+    let wanted_by = if scope_user {
+        "default.target"
+    } else {
+        "multi-user.target"
+    };
+    format!(
+        r#"[Unit]
+Description=Tunure tunnel agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile={}
+ExecStart={} agent {}
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy={}
+"#,
+        env_file.display(),
+        exe.display(),
+        endpoint,
+        wanted_by
+    )
+}
+
+fn run_systemd_install(args: SystemdInstallArgs) -> anyhow::Result<()> {
+    let scope_user = if args.system {
+        false
+    } else if args.user {
+        true
+    } else {
+        // Default to --user; it does not require root.
+        true
+    };
+
+    if args.user && args.system {
+        anyhow::bail!("choose one: --user or --system");
+    }
+
+    let token_str = args.token.ok_or_else(|| {
+        anyhow::anyhow!("token is required (use --token or LURE_TUN_TOKEN env var)")
+    })?;
+    let cfg = TunConfig::from_token_string(&token_str).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let key_id_hex = hex::encode(cfg.key_id);
+    let service_base = args
+        .name
+        .unwrap_or_else(|| format!("tunure-agent-{key_id_hex}"));
+    let service_file = service_filename(&service_base);
+
+    let exe = std::env::current_exe()?;
+
+    let (unit_dir, env_dir) = if scope_user {
+        let cfg_home = xdg_config_home()
+            .ok_or_else(|| anyhow::anyhow!("cannot resolve config dir (HOME required)"))?;
+        (
+            cfg_home.join("systemd").join("user"),
+            cfg_home.join("tunure"),
+        )
+    } else {
+        (
+            PathBuf::from("/etc/systemd/system"),
+            PathBuf::from("/etc/tunure"),
+        )
+    };
+
+    let default_bin_path = if scope_user {
+        home_dir()
+            .ok_or_else(|| anyhow::anyhow!("HOME is required for --user install"))?
+            .join(".local")
+            .join("bin")
+            .join("tunure")
+    } else {
+        PathBuf::from("/usr/local/bin/tunure")
+    };
+    let installed_bin = args
+        .bin_path
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or(default_bin_path);
+    if args.install_bin {
+        if let Err(err) = copy_self_to(&installed_bin) {
+            error!(
+                "failed to install tunure binary to {}: {err}; using current exe instead",
+                installed_bin.display()
+            );
+        }
+    }
+    let exec_bin = if args.install_bin && installed_bin.exists() {
+        installed_bin.clone()
+    } else {
+        exe.clone()
+    };
+
+    ensure_dir(&unit_dir)?;
+    ensure_dir(&env_dir)?;
+
+    let env_file = env_dir.join(format!("{service_base}.env"));
+    write_secret_env_file(&env_file, &token_str, &args.rust_log)?;
+
+    let unit_path = unit_dir.join(&service_file);
+    std::fs::write(
+        &unit_path,
+        render_unit(&exec_bin, &args.endpoint, &env_file, scope_user),
+    )?;
+
+    info!("wrote unit: {}", unit_path.display());
+    info!("wrote env:  {}", env_file.display());
+    if args.install_bin {
+        info!("service exe: {}", exec_bin.display());
+    }
+
+    if args.enable_now {
+        if let Err(err) = systemctl(scope_user, &["daemon-reload"]) {
+            error!("systemctl daemon-reload failed: {err}");
+        }
+        if let Err(err) = systemctl(scope_user, &["enable", "--now", &service_file]) {
+            error!("systemctl enable --now failed: {err}");
+            eprintln!("unit written, but systemctl failed; try manually:");
+            if scope_user {
+                eprintln!("  systemctl --user daemon-reload");
+                eprintln!("  systemctl --user enable --now {service_file}");
+            } else {
+                eprintln!("  systemctl daemon-reload");
+                eprintln!("  systemctl enable --now {service_file}");
+            }
+        }
+    } else {
+        eprintln!("unit written; enable it with:");
+        if scope_user {
+            eprintln!("  systemctl --user daemon-reload");
+            eprintln!("  systemctl --user enable --now {service_file}");
+        } else {
+            eprintln!("  systemctl daemon-reload");
+            eprintln!("  systemctl enable --now {service_file}");
+        }
+    }
+
+    Ok(())
+}
+
+fn run_systemd_uninstall(args: SystemdUninstallArgs) -> anyhow::Result<()> {
+    let scope_user = if args.system {
+        false
+    } else if args.user {
+        true
+    } else {
+        true
+    };
+
+    if args.user && args.system {
+        anyhow::bail!("choose one: --user or --system");
+    }
+
+    let service_file = service_filename(&args.name);
+    let cfg_home = if scope_user {
+        Some(
+            xdg_config_home()
+                .ok_or_else(|| anyhow::anyhow!("cannot resolve config dir (HOME required)"))?,
+        )
+    } else {
+        None
+    };
+    let unit_path = if scope_user {
+        cfg_home
+            .as_ref()
+            .expect("cfg_home must exist for scope_user")
+            .join("systemd")
+            .join("user")
+            .join(&service_file)
+    } else {
+        PathBuf::from("/etc/systemd/system").join(&service_file)
+    };
+    let env_path = if scope_user {
+        cfg_home
+            .as_ref()
+            .expect("cfg_home must exist for scope_user")
+            .join("tunure")
+            .join(format!("{}.env", args.name))
+    } else {
+        PathBuf::from("/etc/tunure").join(format!("{}.env", args.name))
+    };
+
+    // Best-effort stop/disable.
+    let _ = systemctl(scope_user, &["disable", "--now", &service_file]);
+    let _ = systemctl(scope_user, &["daemon-reload"]);
+
+    if unit_path.exists() {
+        std::fs::remove_file(&unit_path)?;
+        info!("removed unit: {}", unit_path.display());
+    } else {
+        info!("unit not found: {}", unit_path.display());
+    }
+
+    if env_path.exists() {
+        let _ = std::fs::remove_file(&env_path);
+    }
+
+    Ok(())
 }
 
 async fn read_server_msg(
@@ -169,7 +530,7 @@ async fn handle_session(
     Ok(())
 }
 
-async fn run(ingress: SocketAddr, config: TunConfig) -> anyhow::Result<()> {
+async fn listen_once(ingress: SocketAddr, config: TunConfig) -> anyhow::Result<()> {
     let mut listener = tun::connect_agent(ingress).await?;
 
     let timestamp = std::time::SystemTime::now()
@@ -215,14 +576,45 @@ async fn run(ingress: SocketAddr, config: TunConfig) -> anyhow::Result<()> {
             match net::sock::backend_kind() {
                 net::sock::BackendKind::Tokio | net::sock::BackendKind::Epoll => {
                     tokio::task::spawn_local(async move {
-                        let _ = handle_session(ingress, config, session).await;
+                        if let Err(e) = handle_session(ingress, config, session).await {
+                            error!("tun handle_session failed: {e}");
+                        }
                     });
                 }
                 net::sock::BackendKind::Uring => {
                     net::sock::uring::spawn(async move {
-                        let _ = handle_session(ingress, config, session).await;
+                        if let Err(e) = handle_session(ingress, config, session).await {
+                            error!("tun handle_session failed: {e}");
+                        }
                     });
                 }
+            }
+        }
+    }
+}
+
+async fn run(ingress: SocketAddr, config: TunConfig) -> anyhow::Result<()> {
+    let mut delay = std::time::Duration::from_millis(250);
+    let max_delay = std::time::Duration::from_secs(10);
+
+    loop {
+        match listen_once(
+            ingress,
+            TunConfig {
+                key_id: config.key_id,
+                secret: config.secret,
+            },
+        )
+        .await
+        {
+            Ok(()) => {
+                // listen_once currently never returns Ok, but keep this behavior robust.
+                delay = std::time::Duration::from_millis(250);
+            }
+            Err(e) => {
+                error!("listener disconnected: {e}; reconnecting in {delay:?}");
+                tokio::time::sleep(delay).await;
+                delay = std::cmp::min(max_delay, delay.saturating_mul(2));
             }
         }
     }
@@ -279,6 +671,16 @@ fn main() {
 
     let cli = Cli::parse();
     match cli.command {
+        Command::Systemd(args) => {
+            let result = match args.command {
+                SystemdCommand::Install(install) => run_systemd_install(install),
+                SystemdCommand::Uninstall(uninstall) => run_systemd_uninstall(uninstall),
+            };
+            if let Err(err) = result {
+                error!("{err}");
+                std::process::exit(1);
+            }
+        }
         Command::Sign(args) => {
             if let Err(err) = run_sign(args) {
                 error!("{err}");

@@ -8,7 +8,7 @@ name = "tun"
 path = "src/lib.rs"
 
 [[bin]]
-name = "tun"
+name = "tunure"
 path = "src/bin/tun.rs"
 
 [dependencies]

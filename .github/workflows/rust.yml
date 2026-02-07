@@ -76,6 +76,9 @@ jobs:
       - name: Build (default)
         run: cargo +nightly build --release --target ${{ env.TARGET }} --verbose
 
+      - name: Build tun agent (default)
+        run: cargo +nightly build -p tun --bin tunure --release --target ${{ env.TARGET }} --verbose
+
       - name: Test
         run: cargo +nightly test --release --target ${{ env.TARGET }} --verbose
 
@@ -83,8 +86,10 @@ jobs:
         run: |
           mkdir -p release
           cp ${{ env.CARGO_TARGET_DIR }}/${{ env.TARGET }}/release/lure release/lure
-          chmod +x release/lure
+          cp ${{ env.CARGO_TARGET_DIR }}/${{ env.TARGET }}/release/tunure release/tunure
+          chmod +x release/lure release/tunure
           sha256sum release/lure | tee release/lure.sha256
+          sha256sum release/tunure | tee release/tunure.sha256
 
       - name: Upload default artifact
         uses: actions/upload-artifact@v4
@@ -93,6 +98,8 @@ jobs:
           path: |
             release/lure
             release/lure.sha256
+            release/tunure
+            release/tunure.sha256
           if-no-files-found: error
           overwrite: true
 
@@ -148,10 +155,14 @@ jobs:
       - name: Build [stable] variant
         run: |
           cargo +nightly build --release --target ${{ env.TARGET }} --verbose
+          cargo +nightly build -p tun --bin tunure --release --target ${{ env.TARGET }} --verbose
           mkdir -p release-stable
           cp ${{ env.CARGO_TARGET_DIR }}/${{ env.TARGET }}/release/lure release-stable/lure
           chmod +x release-stable/lure
           sha256sum release-stable/lure | tee release-stable/lure.sha256
+          cp ${{ env.CARGO_TARGET_DIR }}/${{ env.TARGET }}/release/tunure release-stable/tunure
+          chmod +x release-stable/tunure
+          sha256sum release-stable/tunure | tee release-stable/tunure.sha256
 
       - name: Upload [stable] artifact
         uses: actions/upload-artifact@v4
@@ -160,6 +171,8 @@ jobs:
           path: |
             release-stable/lure
             release-stable/lure.sha256
+            release-stable/tunure
+            release-stable/tunure.sha256
           if-no-files-found: error
           overwrite: true
           

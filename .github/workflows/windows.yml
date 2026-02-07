@@ -20,7 +20,28 @@ jobs:
           rustup toolchain install nightly --profile minimal
           rustup default nightly
 
-      # Build only the main binary; other `src/bin/*` tools are Linux-centric.
       - name: Build (release)
-        run: cargo +nightly build -p lure --bin lure --release --verbose
+        run: |
+          cargo +nightly build -p lure --bin lure --release --verbose
+          cargo +nightly build -p tun --bin tunure --release --verbose
 
+      - name: Prepare artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release-windows | Out-Null
+          Copy-Item -Force target/release/lure.exe release-windows/lure.exe
+          Copy-Item -Force target/release/tunure.exe release-windows/tunure.exe
+          (Get-FileHash -Algorithm SHA256 release-windows/lure.exe).Hash + "  lure.exe" | Out-File -Encoding ascii release-windows/lure.exe.sha256
+          (Get-FileHash -Algorithm SHA256 release-windows/tunure.exe).Hash + "  tunure.exe" | Out-File -Encoding ascii release-windows/tunure.exe.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: |
+            release-windows/lure.exe
+            release-windows/lure.exe.sha256
+            release-windows/tunure.exe
+            release-windows/tunure.exe.sha256
+          if-no-files-found: error
+          overwrite: true
