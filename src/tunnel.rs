@@ -19,6 +19,53 @@ use crate::{
 };
 
 #[derive(Debug)]
+pub enum TunnelInspectMsg {
+    Snapshot {
+        req: u64,
+        respond: oneshot::Sender<crate::telemetry::inspect::TunnelInspectSnapshot>,
+    },
+}
+
+pub struct TunnelInspectHook {
+    tx: UnboundedSender<TunnelInspectMsg>,
+}
+
+impl TunnelInspectHook {
+    pub fn new(tx: UnboundedSender<TunnelInspectMsg>) -> Self {
+        Self { tx }
+    }
+}
+
+#[async_trait]
+impl crate::telemetry::event::EventHook<EventEnvelope, EventEnvelope> for TunnelInspectHook {
+    async fn on_event(
+        &self,
+        service: &EventServiceInstance,
+        event: &'_ EventEnvelope,
+    ) -> anyhow::Result<()> {
+        if let EventEnvelope::ListTunnelRequest(req) = event {
+            let (tx, rx) = oneshot::channel();
+            let _ = self.tx.send(TunnelInspectMsg::Snapshot {
+                req: req.req,
+                respond: tx,
+            });
+
+            if let Ok(snapshot) = rx.await {
+                service
+                    .produce_event(EventEnvelope::ListTunnelResponse(
+                        crate::telemetry::inspect::ListTunnelResponse {
+                            req: req.req,
+                            snapshot,
+                        },
+                    ))
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
 pub enum TunnelControlMsg {
     Flush,
     Upsert(TokenEntry),
@@ -101,6 +148,8 @@ struct AgentRecord {
     id: u64,
     tx: mpsc::Sender<TunnelCommand>,
     task: tokio::task::JoinHandle<()>,
+    connected_at: Instant,
+    offers_sent: u64,
 }
 
 struct PendingSession {
@@ -315,6 +364,8 @@ impl TunnelRegistry {
                     id,
                     tx: tx.clone(),
                     task,
+                    connected_at: Instant::now(),
+                    offers_sent: 0,
                 },
             );
         }
@@ -370,6 +421,14 @@ impl TunnelRegistry {
         }
 
         LureLogger::tunnel_session_offered(&key_id_prefix(&key_id.0), &target);
+
+        // Best-effort stats: track offers sent per agent.
+        {
+            let mut agents = self.agents.write().await;
+            if let Some(agent) = agents.get_mut(&key_id) {
+                agent.offers_sent = agent.offers_sent.saturating_add(1);
+            }
+        }
 
         let agent_tx = { self.agents.read().await.get(&key_id).map(|a| a.tx.clone()) };
         let Some(agent_tx) = agent_tx else {
@@ -452,6 +511,89 @@ impl TunnelRegistry {
         }
 
         Ok(())
+    }
+
+    pub async fn inspect_snapshot(&self) -> crate::telemetry::inspect::TunnelInspectSnapshot {
+        use crate::telemetry::inspect::{
+            TunnelAgentInspect, TunnelInspectSnapshot, TunnelPendingInspect, TunnelTokenInspect,
+        };
+
+        let now = Instant::now();
+
+        let tokens = self.tokens.read().await;
+        let zones = self.zones.read().await;
+        let agents = self.agents.read().await;
+        let pending = self.pending.read().await;
+
+        let mut token_out: Vec<TunnelTokenInspect> = Vec::with_capacity(tokens.len());
+        for (key, info) in tokens.iter() {
+            let key_id = format!(
+                "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                key.0[0], key.0[1], key.0[2], key.0[3], key.0[4], key.0[5], key.0[6], key.0[7]
+            );
+            let zone = zones
+                .iter()
+                .find_map(|(z, kid)| if kid == key { Some(*z) } else { None });
+
+            let last_used = *info.last_used.read().await;
+            token_out.push(TunnelTokenInspect {
+                key_id,
+                zone,
+                name: info.name.clone(),
+                created_ms_ago: now.duration_since(info.created_at).as_millis() as u64,
+                last_used_ms_ago: now.duration_since(last_used).as_millis() as u64,
+                has_agent: agents.contains_key(key),
+            });
+        }
+        token_out.sort_by(|a, b| a.zone.cmp(&b.zone).then(a.key_id.cmp(&b.key_id)));
+
+        let mut agent_out: Vec<TunnelAgentInspect> = Vec::with_capacity(agents.len());
+        for (key, record) in agents.iter() {
+            let key_id = format!(
+                "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                key.0[0], key.0[1], key.0[2], key.0[3], key.0[4], key.0[5], key.0[6], key.0[7]
+            );
+            agent_out.push(TunnelAgentInspect {
+                key_id,
+                connected_ms_ago: now.duration_since(record.connected_at).as_millis() as u64,
+                offers_sent: record.offers_sent,
+            });
+        }
+        agent_out.sort_by(|a, b| a.key_id.cmp(&b.key_id));
+
+        let mut pending_out: Vec<TunnelPendingInspect> = Vec::new();
+        pending_out.reserve(pending.len().min(50));
+        for (_token, p) in pending.iter().take(50) {
+            let key_id = format!(
+                "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                p.key_id.0[0],
+                p.key_id.0[1],
+                p.key_id.0[2],
+                p.key_id.0[3],
+                p.key_id.0[4],
+                p.key_id.0[5],
+                p.key_id.0[6],
+                p.key_id.0[7]
+            );
+            pending_out.push(TunnelPendingInspect {
+                key_id,
+                target: p.target.to_string(),
+                age_ms: now.duration_since(p.created_at).as_millis() as u64,
+            });
+        }
+        pending_out.sort_by(|a, b| a.age_ms.cmp(&b.age_ms).reverse());
+
+        TunnelInspectSnapshot {
+            tokens_total: tokens.len() as u64,
+            agents_total: agents.len() as u64,
+            pending_total: pending.len() as u64,
+            expired_total: self
+                .expired_sessions
+                .load(std::sync::atomic::Ordering::Relaxed),
+            tokens: token_out,
+            agents: agent_out,
+            pending: pending_out,
+        }
     }
 
     pub(crate) async fn cleanup_expired_sessions(&self) {

@@ -99,11 +99,14 @@ pub mod uring {
     use tokio::net::{TcpListener, TcpStream};
 
     pub(crate) fn probe() -> io::Result<()> {
-        Err(io::Error::new(io::ErrorKind::Unsupported, if cfg!(target_os = "linux") {
-            "io_uring backend is disabled at compile time (enable net feature `uring`)"
-        } else {
-            "io_uring backend is only supported on linux"
-        }))
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            if cfg!(target_os = "linux") {
+                "io_uring backend is disabled at compile time (enable net feature `uring`)"
+            } else {
+                "io_uring backend is only supported on linux"
+            },
+        ))
     }
 
     pub fn spawn<F>(future: F) -> tokio::task::JoinHandle<F::Output>
@@ -184,7 +187,10 @@ pub mod uring {
             self.stream.set_nodelay(nodelay)
         }
 
-        pub(crate) async fn read_chunk(&mut self, mut buf: Vec<u8>) -> io::Result<(usize, Vec<u8>)> {
+        pub(crate) async fn read_chunk(
+            &mut self,
+            mut buf: Vec<u8>,
+        ) -> io::Result<(usize, Vec<u8>)> {
             use tokio::io::AsyncReadExt;
             let n = self.stream.read(&mut buf).await?;
             Ok((n, buf))

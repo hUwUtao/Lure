@@ -21,7 +21,10 @@ pub struct Endpoint {
 
 impl Endpoint {
     pub fn new(destination: Destination, tunnel: TunnelOpt) -> Self {
-        Self { destination, tunnel }
+        Self {
+            destination,
+            tunnel,
+        }
     }
 
     pub fn destination(&self) -> &Destination {

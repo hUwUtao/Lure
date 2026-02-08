@@ -13,7 +13,7 @@ use crate::{
     router::RouteReport,
     telemetry::{
         event::EventService,
-        inspect::{InspectRequest, ListSessionsResponse, ListStatsResponse},
+        inspect::{InspectRequest, ListSessionsResponse, ListStatsResponse, ListTunnelResponse},
     },
 };
 
@@ -57,6 +57,8 @@ pub(crate) enum EventEnvelope {
     ListSessionsResponse(ListSessionsResponse),
     ListStatsRequest(InspectRequest),
     ListStatsResponse(ListStatsResponse),
+    ListTunnelRequest(InspectRequest),
+    ListTunnelResponse(ListTunnelResponse),
     FlushRoute(Empty),
     HandshakeRoute(RouteReport),
     HandshakeIdent(EventIdent),

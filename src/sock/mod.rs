@@ -9,9 +9,7 @@ pub(crate) mod epoll {
         _server: &mut net::sock::epoll::Connection,
         _session: &Session,
     ) -> anyhow::Result<()> {
-        Err(anyhow::anyhow!(
-            "epoll backend is only supported on linux"
-        ))
+        Err(anyhow::anyhow!("epoll backend is only supported on linux"))
     }
 }
 pub(crate) mod tokio;

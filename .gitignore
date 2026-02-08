@@ -2,6 +2,7 @@
 /target-default
 /target-stable
 /target-*
+/release
 /settings.toml
 /*.png
 /flamegraph.svg

@@ -31,8 +31,7 @@ pub(crate) mod inspect;
 mod profile;
 pub use attr::RouteAttr;
 pub use dest::Destination;
-pub use endpoint::Endpoint;
-pub use endpoint::TunnelOpt;
+pub use endpoint::{Endpoint, TunnelOpt};
 pub use profile::Profile;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Copy)]

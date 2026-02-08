@@ -7,6 +7,51 @@ pub struct InspectRequest {
     pub req: u64,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TunnelTokenInspect {
+    pub key_id: String,
+    pub zone: Option<u64>,
+    pub name: Option<String>,
+    /// Age since token creation (best-effort, monotonic clock), in milliseconds.
+    pub created_ms_ago: u64,
+    /// Age since last successful use (best-effort, monotonic clock), in milliseconds.
+    pub last_used_ms_ago: u64,
+    /// Whether an agent is currently registered for this key_id.
+    pub has_agent: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TunnelAgentInspect {
+    pub key_id: String,
+    /// Age since this agent registered (best-effort, monotonic clock), in milliseconds.
+    pub connected_ms_ago: u64,
+    pub offers_sent: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TunnelPendingInspect {
+    pub key_id: String,
+    pub target: String,
+    pub age_ms: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TunnelInspectSnapshot {
+    pub tokens_total: u64,
+    pub agents_total: u64,
+    pub pending_total: u64,
+    pub expired_total: u64,
+    pub tokens: Vec<TunnelTokenInspect>,
+    pub agents: Vec<TunnelAgentInspect>,
+    pub pending: Vec<TunnelPendingInspect>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ListTunnelResponse {
+    pub req: u64,
+    pub snapshot: TunnelInspectSnapshot,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct TrafficCounters {
     pub c2s_bytes: u64,

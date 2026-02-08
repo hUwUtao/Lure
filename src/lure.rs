@@ -180,6 +180,22 @@ impl Lure {
             })
             .ok();
 
+            // Tunnel inspect snapshots are requested over RPC. The registry isn't Send, so answer
+            // requests via a local task.
+            let (tun_inspect_tx, mut tun_inspect_rx) = tokio::sync::mpsc::unbounded_channel();
+            let tunnels = Arc::clone(&self.tunnels);
+            spawn_named("tunnel-inspect", async move {
+                while let Some(msg) = tun_inspect_rx.recv().await {
+                    match msg {
+                        crate::tunnel::TunnelInspectMsg::Snapshot { req: _, respond } => {
+                            let snapshot = tunnels.inspect_snapshot().await;
+                            let _ = respond.send(snapshot);
+                        }
+                    }
+                }
+            })
+            .ok();
+
             let event = init_event(rpc_url);
             event.hook(EventIdent { id: inst }).await;
             event.hook(OwnedStatic::from(self.router)).await;
@@ -188,6 +204,9 @@ impl Lure {
                 .await;
             event
                 .hook(crate::tunnel::TunnelControlHook::new(tun_tx))
+                .await;
+            event
+                .hook(crate::tunnel::TunnelInspectHook::new(tun_inspect_tx))
                 .await;
             event.clone().start();
         }
@@ -288,6 +307,22 @@ impl Lure {
             })
             .ok();
 
+            // Tunnel inspect snapshots are requested over RPC. The registry isn't Send, so answer
+            // requests via a local task.
+            let (tun_inspect_tx, mut tun_inspect_rx) = tokio::sync::mpsc::unbounded_channel();
+            let tunnels = Arc::clone(&self.tunnels);
+            spawn_named("tunnel-inspect", async move {
+                while let Some(msg) = tun_inspect_rx.recv().await {
+                    match msg {
+                        crate::tunnel::TunnelInspectMsg::Snapshot { req: _, respond } => {
+                            let snapshot = tunnels.inspect_snapshot().await;
+                            let _ = respond.send(snapshot);
+                        }
+                    }
+                }
+            })
+            .ok();
+
             let event = init_event(rpc_url);
             event.hook(EventIdent { id: inst }).await;
             event.hook(OwnedStatic::from(self.router)).await;
@@ -296,6 +331,9 @@ impl Lure {
                 .await;
             event
                 .hook(crate::tunnel::TunnelControlHook::new(tun_tx))
+                .await;
+            event
+                .hook(crate::tunnel::TunnelInspectHook::new(tun_inspect_tx))
                 .await;
             event.clone().start();
         }
