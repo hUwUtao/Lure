@@ -70,10 +70,11 @@ export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$epoch}"
 pack_base="lure_${version}+${gitsha}"
 dist_dir="dist"
 stage_root="${dist_dir}/.stage/${pack_base}"
+flat_dir="${dist_dir}/gha/${pack_base}"
 target_dir="target-releasepack"
 
 rm -rf "${stage_root}"
-mkdir -p "${stage_root}" "${dist_dir}"
+mkdir -p "${stage_root}" "${dist_dir}" "${flat_dir}"
 
 build_one() {
     local label="$1"
@@ -116,6 +117,16 @@ build_one() {
     # Make archive mtimes deterministic.
     if [[ -n "${SOURCE_DATE_EPOCH:-}" ]]; then
         find "${out}" -exec touch -h -d "@${SOURCE_DATE_EPOCH}" {} +
+    fi
+
+    # Flat layout for CI artifacts: all bins next to each other with target prefix.
+    install -m 0755 "${target_dir}/${target}/release/lure${exe_suffix}" \
+        "${flat_dir}/lure_${label}${exe_suffix}"
+    install -m 0755 "${target_dir}/${target}/release/tunure${exe_suffix}" \
+        "${flat_dir}/tunure_${label}${exe_suffix}"
+    if [[ -n "${SOURCE_DATE_EPOCH:-}" ]]; then
+        touch -h -d "@${SOURCE_DATE_EPOCH}" "${flat_dir}/lure_${label}${exe_suffix}"
+        touch -h -d "@${SOURCE_DATE_EPOCH}" "${flat_dir}/tunure_${label}${exe_suffix}"
     fi
 }
 
@@ -169,4 +180,11 @@ make_zip "windows-amd64"
     sha256sum "${pack_base}"_* > SHA256SUMS
 )
 
+(
+    cd "${flat_dir}"
+    rm -f SHA256SUMS
+    sha256sum * > SHA256SUMS
+)
+
 echo "==> done: ${dist_dir}/${pack_base}_* and ${dist_dir}/SHA256SUMS" >&2
+echo "==> flat bins: ${flat_dir}/lure_* and ${flat_dir}/tunure_*" >&2
