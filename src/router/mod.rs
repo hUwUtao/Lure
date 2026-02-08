@@ -45,20 +45,15 @@ pub enum RouteFlags {
 }
 
 /// Authorization mode for tunnel routes
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum AuthMode {
     /// No authentication required - generates random identifier for tracking
     Public,
     /// Any valid registered token can access
+    #[default]
     Protected,
     /// Only specific tokens (by key_id) can access
     Restricted { allowed_tokens: Vec<[u8; 8]> },
-}
-
-impl Default for AuthMode {
-    fn default() -> Self {
-        AuthMode::Protected
-    }
 }
 
 /// Routing rule with matchers and endpoints, ordered by priority

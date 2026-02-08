@@ -343,10 +343,10 @@ impl TunnelRegistry {
                 }
             }
             let mut agents = registry.agents.write().await;
-            if let Some(active) = agents.get(&key_id) {
-                if active.id == id {
-                    agents.remove(&key_id);
-                }
+            if let Some(active) = agents.get(&key_id)
+                && active.id == id
+            {
+                agents.remove(&key_id);
             }
             LureLogger::tunnel_agent_disconnected(&key_id_prefix(&key_id.0));
         })

@@ -282,13 +282,7 @@ async fn run_suite(cfg: SuiteConfig) -> anyhow::Result<()> {
 }
 
 fn run_direct(cfg: &SuiteConfig, backend_addr: SocketAddr) -> anyhow::Result<RunResult> {
-    Ok(run_client_load(
-        cfg,
-        backend_addr,
-        ConnectPlan::Direct,
-        true,
-        cfg.duration,
-    )?)
+    run_client_load(cfg, backend_addr, ConnectPlan::Direct, true, cfg.duration)
 }
 
 #[derive(Clone)]
