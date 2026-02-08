@@ -11,6 +11,7 @@ pub struct HandshakeMetrics {
 }
 
 impl HandshakeMetrics {
+    #[must_use]
     pub fn new(meter: &Meter) -> Self {
         Self {
             open: meter.u64_counter("lure_socket_open_total").build(),
@@ -50,6 +51,7 @@ pub struct RouterMetrics {
 }
 
 impl RouterMetrics {
+    #[must_use]
     pub fn new(meter: &Meter) -> Self {
         Self {
             routes_active: meter.u64_gauge("lure_router_routes_active").build(),

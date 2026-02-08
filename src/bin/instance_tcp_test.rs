@@ -152,18 +152,20 @@ async fn run_suite(cfg: SuiteConfig) -> anyhow::Result<()> {
     }
 
     // Start a single in-process Lure instance and reconfigure between scenarios.
-    let mut plain_config = LureConfig::default();
-    plain_config.inst = "instance_tcp_test".to_string();
-    plain_config.bind = "127.0.0.1:0".to_string();
-    plain_config.route = vec![RouteConfig {
-        matcher: Some(cfg.host.clone()),
-        matchers: vec![],
-        endpoint: Some(echo.addr.to_string()),
-        endpoints: vec![],
-        priority: 0,
-        flags: None,
-        tunnel_token: None,
-    }];
+    let plain_config = LureConfig {
+        inst: "instance_tcp_test".to_string(),
+        bind: "127.0.0.1:0".to_string(),
+        route: vec![RouteConfig {
+            matcher: Some(cfg.host.clone()),
+            matchers: vec![],
+            endpoint: Some(echo.addr.to_string()),
+            endpoints: vec![],
+            priority: 0,
+            flags: None,
+            tunnel_token: None,
+        }],
+        ..Default::default()
+    };
 
     let lure = leak(Lure::new(plain_config.clone()));
     lure.sync_routes_from_config().await?;
@@ -303,7 +305,6 @@ fn run_client_load(
 
     for _ in 0..cfg.concurrency {
         let tx = tx.clone();
-        let addr = addr;
         let plan = plan.clone();
         let payload = cfg.payload;
         let pipeline = cfg.pipeline;
@@ -442,7 +443,7 @@ fn get_nanos() -> u64 {
         tv_nsec: 0,
     };
     unsafe {
-        libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
+        libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut ts);
     }
     (ts.tv_sec as u64) * 1_000_000_000 + (ts.tv_nsec as u64)
 }
@@ -494,9 +495,9 @@ fn report(r: &RunResult) {
 
     println!("  ops: {}", r.ops);
     println!("  bytes: {}", r.bytes);
-    println!("  duration: {:.3}s", secs);
-    println!("  ops/sec: {:.2}", ops_per_sec);
-    println!("  throughput: {:.2} MiB/s", mib_per_sec);
+    println!("  duration: {secs:.3}s");
+    println!("  ops/sec: {ops_per_sec:.2}");
+    println!("  throughput: {mib_per_sec:.2} MiB/s");
 
     if r.samples.is_empty() {
         println!("  latency: (none)");
@@ -610,15 +611,14 @@ fn framed_echo_loop(mut stream: TcpStream, frame_size: usize) {
             if pending.len() < 4 {
                 break;
             }
-            let pos = match find_magic(&pending) {
-                Some(p) => p,
-                None => {
-                    // Keep last 3 bytes in case magic splits across reads.
-                    if pending.len() > 3 {
-                        pending.drain(..pending.len() - 3);
-                    }
-                    break;
+            let pos = if let Some(p) = find_magic(&pending) {
+                p
+            } else {
+                // Keep last 3 bytes in case magic splits across reads.
+                if pending.len() > 3 {
+                    pending.drain(..pending.len() - 3);
                 }
+                break;
             };
             if pos > 0 {
                 pending.drain(..pos);
@@ -683,9 +683,6 @@ async fn run_tun_agent(
             }
         };
         if let tun::ServerMsg::SessionOffer(session) = msg {
-            let ingress = ingress;
-            let key_id = key_id;
-            let secret = secret;
             let mut stop_rx2 = stop_rx.clone();
             match net::sock::backend_kind() {
                 net::sock::BackendKind::Uring => {

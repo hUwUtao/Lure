@@ -7,7 +7,7 @@ use super::Destination;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TunnelOpt {
     None,
-    /// Explicit tunnel key_id in hex (8 bytes / 16 hex chars).
+    /// Explicit tunnel `key_id` in hex (8 bytes / 16 hex chars).
     KeyId([u8; 8]),
     /// Use the tenant's registered tunnel key for this route's zone.
     ZoneDefault,
@@ -20,18 +20,21 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    pub fn new(destination: Destination, tunnel: TunnelOpt) -> Self {
+    #[must_use]
+    pub const fn new(destination: Destination, tunnel: TunnelOpt) -> Self {
         Self {
             destination,
             tunnel,
         }
     }
 
-    pub fn destination(&self) -> &Destination {
+    #[must_use]
+    pub const fn destination(&self) -> &Destination {
         &self.destination
     }
 
-    pub fn tunnel(&self) -> TunnelOpt {
+    #[must_use]
+    pub const fn tunnel(&self) -> TunnelOpt {
         self.tunnel
     }
 
@@ -63,7 +66,7 @@ impl FromStr for Endpoint {
     type Err = ParseEndpointError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Endpoint::parse(s)
+        Self::parse(s)
     }
 }
 
@@ -82,7 +85,7 @@ impl<'de> Deserialize<'de> for Endpoint {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        Endpoint::parse(&s).map_err(|err| serde::de::Error::custom(err.to_string()))
+        Self::parse(&s).map_err(|err| serde::de::Error::custom(err.to_string()))
     }
 }
 
@@ -96,9 +99,9 @@ pub enum ParseEndpointError {
 impl fmt::Display for ParseEndpointError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ParseEndpointError::Empty => write!(f, "empty input"),
-            ParseEndpointError::Destination(e) => write!(f, "{e}"),
-            ParseEndpointError::InvalidTunnelId(e) => write!(f, "invalid tunnel-id: {e}"),
+            Self::Empty => write!(f, "empty input"),
+            Self::Destination(e) => write!(f, "{e}"),
+            Self::InvalidTunnelId(e) => write!(f, "invalid tunnel-id: {e}"),
         }
     }
 }

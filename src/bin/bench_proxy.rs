@@ -20,7 +20,7 @@ fn get_nanos() -> u64 {
         tv_nsec: 0,
     };
     unsafe {
-        libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
+        libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut ts);
     }
     (ts.tv_sec as u64) * 1_000_000_000 + (ts.tv_nsec as u64)
 }
@@ -169,7 +169,6 @@ fn run_client_load(
 
     for _ in 0..config.concurrency {
         let tx = tx.clone();
-        let proxy_addr = proxy_addr;
         let payload = config.payload;
         thread::spawn(move || {
             let result = client_worker(proxy_addr, payload, deadline, record_latencies);
@@ -234,8 +233,8 @@ fn client_worker(
     let mut pending_timestamps = Vec::new(); // vec of send_timestamp
 
     // Pre-fill write buffer with data
-    for i in 0..payload {
-        write_buf[i] = (i % 256) as u8;
+    for (i, b) in write_buf.iter_mut().enumerate() {
+        *b = (i % 256) as u8;
     }
 
     loop {
@@ -248,7 +247,7 @@ fn client_worker(
         while pending_timestamps.len() < PIPELINE_DEPTH && now < deadline {
             let send_start_ns = get_nanos();
             match stream.write_all(&write_buf) {
-                Ok(_) => {
+                Ok(()) => {
                     let send_end_ns = get_nanos();
                     pending_timestamps.push((send_start_ns, send_end_ns));
                 }
@@ -266,7 +265,7 @@ fn client_worker(
         while !pending_timestamps.is_empty() {
             let recv_start_ns = get_nanos();
             match stream.read_exact(&mut read_buf) {
-                Ok(_) => {
+                Ok(()) => {
                     let recv_end_ns = get_nanos();
                     let (send_start_ns, send_end_ns) = pending_timestamps.remove(0);
 
@@ -309,9 +308,9 @@ fn report(result: &BenchResult) {
     println!("results:");
     println!("  ops: {}", result.total_ops);
     println!("  bytes: {}", result.total_bytes);
-    println!("  duration: {:.3}s", duration_secs);
-    println!("  ops/sec: {:.2}", ops_per_sec);
-    println!("  throughput: {:.2} MiB/s", mib_per_sec);
+    println!("  duration: {duration_secs:.3}s");
+    println!("  ops/sec: {ops_per_sec:.2}");
+    println!("  throughput: {mib_per_sec:.2} MiB/s");
 
     if result.latencies.is_empty() {
         println!("  latency: (none)");
@@ -349,7 +348,7 @@ fn latency_stats(latencies: &[TimestampedLatency]) -> Option<LatencyStats> {
     let mut send_sum = 0f64;
     let mut recv_sum = 0f64;
 
-    for lat in latencies.iter() {
+    for lat in latencies {
         let total_ms = lat.total_ns as f64 / 1_000_000.0;
         let send_ms = lat.send_ns as f64 / 1_000_000.0;
         let recv_ms = lat.recv_ns as f64 / 1_000_000.0;
@@ -361,7 +360,7 @@ fn latency_stats(latencies: &[TimestampedLatency]) -> Option<LatencyStats> {
     }
 
     let mean_ms = total_sum / count as f64;
-    let variance = (total_sum_sq / count as f64) - (mean_ms * mean_ms);
+    let variance = mean_ms.mul_add(-mean_ms, total_sum_sq / count as f64);
     let stdev_ms = variance.max(0.0).sqrt();
     let send_mean_ms = send_sum / count as f64;
     let recv_mean_ms = recv_sum / count as f64;

@@ -84,7 +84,7 @@ pub(crate) struct InspectHook {
 }
 
 impl InspectHook {
-    pub(crate) fn new(router: &'static RouterInstance) -> Self {
+    pub(crate) const fn new(router: &'static RouterInstance) -> Self {
         Self { router }
     }
 

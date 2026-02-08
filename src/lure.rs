@@ -63,19 +63,22 @@ impl EventHook<EventEnvelope, EventEnvelope> for EventIdent {
     ) -> anyhow::Result<()> {
         #[cfg(debug_assertions)]
         {
-            debug!("RPC-S2C: {:?}", event);
+            debug!("RPC-S2C: {event:?}");
         }
         if let EventEnvelope::Hello(_) = event {
-            info!("RPC: Hello")
+            info!("RPC: Hello");
         }
         Ok(())
     }
 }
 
 impl Lure {
-    pub fn new(config: LureConfig) -> Lure {
+    #[must_use]
+    pub fn new(config: LureConfig) -> Self {
         let router = leak(RouterInstance::new());
         router.set_instance_name(config.inst.clone());
+        // Not Send/Sync (connection types), but used on a LocalSet. Arc is fine for shared ownership.
+        #[allow(clippy::arc_with_non_send_sync)]
         let tunnels = Arc::new(TunnelRegistry::default());
 
         // Load token registry from config
@@ -101,7 +104,7 @@ impl Lure {
         })
         .ok(); // Ignore spawn errors during initialization
 
-        Lure {
+        Self {
             config: RwLock::new(config),
             router,
             threat: leak(ThreatControlService::new()),
@@ -458,22 +461,21 @@ impl Lure {
         LureLogger::handshake_completed(elapsed_ms, state_attr);
         self.metrics.record_duration(elapsed_ms, state_attr);
 
-        let resolved = match timeout(
+        let resolved = if let Ok(resolved) = timeout(
             Duration::from_secs(1),
             self.router.resolve(&hs.get_stripped_hostname()),
         )
         .await
         {
-            Ok(resolved) => resolved,
-            Err(_) => {
-                LureLogger::deadline_missed(
-                    "router.resolve",
-                    Duration::from_secs(1),
-                    Some(&client_addr),
-                    Some(&hs.server_address),
-                );
-                None
-            }
+            resolved
+        } else {
+            LureLogger::deadline_missed(
+                "router.resolve",
+                Duration::from_secs(1),
+                Some(&client_addr),
+                Some(&hs.server_address),
+            );
+            None
         };
 
         match hs.next_state {
@@ -618,7 +620,7 @@ impl Lure {
         };
         server.send(&ping).await?;
         match server.recv::<StatusPongS2c>().await {
-            Ok(pong) => client.send(&pong).await?,
+            Ok(pong_packet) => client.send(&pong_packet).await?,
             Err(err) => {
                 LureLogger::parser_failure(&client_addr, "backend status pong", &err);
                 self.metrics.record_failure("status");
@@ -741,7 +743,7 @@ impl Lure {
 
             // Endpoint explicitly requested tunnel but there is no usable key.
             if !matches!(tunnel, crate::router::TunnelOpt::None) {
-                let _ = self
+                let () = self
                     .disconnect_login(&mut client, session.client_addr, |config| {
                         (
                             config.string_value("TUNNEL_TOKEN_MISSING"),
@@ -895,18 +897,17 @@ impl Lure {
         mut buf: Vec<u8>,
     ) -> anyhow::Result<tun::AgentHello> {
         loop {
-            match tun::decode_agent_hello(&buf)? {
-                Some((hello, _consumed)) => return Ok(hello),
-                None => {
-                    let mut read_buf = vec![0u8; 1024];
-                    let (n, next) = connection.read_chunk(read_buf).await?;
-                    read_buf = next;
-                    if n == 0 {
-                        anyhow::bail!("unexpected eof while reading tunnel hello");
-                    }
-                    buf.extend_from_slice(&read_buf[..n]);
-                }
+            if let Some((hello, _consumed)) = tun::decode_agent_hello(&buf)? {
+                return Ok(hello);
             }
+
+            let mut read_buf = vec![0u8; 1024];
+            let (n, next) = connection.read_chunk(read_buf).await?;
+            read_buf = next;
+            if n == 0 {
+                anyhow::bail!("unexpected eof while reading tunnel hello");
+            }
+            buf.extend_from_slice(&read_buf[..n]);
         }
     }
 
@@ -1080,7 +1081,7 @@ impl Lure {
     }
 }
 
-fn decode_handshake_frame<'a>(frame: &'a net::PacketFrame) -> anyhow::Result<HandshakeC2s<'a>> {
+fn decode_handshake_frame(frame: &net::PacketFrame) -> anyhow::Result<HandshakeC2s<'_>> {
     if frame.id != HandshakeC2s::ID {
         return Err(anyhow::anyhow!(
             "unexpected packet id {} (expected {})",

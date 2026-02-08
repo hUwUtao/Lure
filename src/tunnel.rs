@@ -2,6 +2,7 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
 
 use anyhow::Context;
 use async_trait::async_trait;
+use base64::{Engine, engine::general_purpose::STANDARD};
 use log::debug;
 use subtle::ConstantTimeEq;
 use tokio::{
@@ -31,7 +32,8 @@ pub struct TunnelInspectHook {
 }
 
 impl TunnelInspectHook {
-    pub fn new(tx: UnboundedSender<TunnelInspectMsg>) -> Self {
+    #[must_use]
+    pub const fn new(tx: UnboundedSender<TunnelInspectMsg>) -> Self {
         Self { tx }
     }
 }
@@ -76,7 +78,8 @@ pub struct TunnelControlHook {
 }
 
 impl TunnelControlHook {
-    pub fn new(tx: UnboundedSender<TunnelControlMsg>) -> Self {
+    #[must_use]
+    pub const fn new(tx: UnboundedSender<TunnelControlMsg>) -> Self {
         Self { tx }
     }
 }
@@ -130,11 +133,11 @@ pub struct TokenInfo {
 }
 
 pub struct TunnelRegistry {
-    /// Token registry by key_id
+    /// Token registry by `key_id`
     tokens: RwLock<HashMap<TokenKeyId, Arc<TokenInfo>>>,
-    /// Optional mapping from zone -> key_id (set when token entries include zone).
+    /// Optional mapping from zone -> `key_id` (set when token entries include zone).
     zones: RwLock<HashMap<u64, TokenKeyId>>,
-    /// Active agents by key_id
+    /// Active agents by `key_id`
     agents: RwLock<HashMap<TokenKeyId, AgentRecord>>,
     /// Monotonic id for per-key agent generations.
     agent_gen: std::sync::atomic::AtomicU64,
@@ -212,7 +215,7 @@ impl TunnelRegistry {
     ///
     /// Agents are not disconnected/cleared here: agents register directly with Lure,
     /// and a control-plane resync should not kick them out. If a token is removed,
-    /// offers will fail because the key_id is no longer present.
+    /// offers will fail because the `key_id` is no longer present.
     pub async fn clear_runtime(&self) {
         {
             let mut tokens = self.tokens.write().await;
@@ -441,17 +444,19 @@ impl TunnelRegistry {
             anyhow::bail!("no active tunnel agent registered for key_id");
         };
 
-        match agent_tx.send(TunnelCommand::OfferSession { session }).await {
-            Ok(()) => Ok(rx),
-            Err(_) => {
-                let mut pending = self.pending.write().await;
-                pending.remove(&session);
-                LureLogger::tunnel_agent_missing(
-                    &key_id_prefix(&key_id.0),
-                    &format!("{:02x}", session.0[0]),
-                );
-                anyhow::bail!("failed to notify tunnel agent")
-            }
+        if matches!(
+            agent_tx.send(TunnelCommand::OfferSession { session }).await,
+            Ok(())
+        ) {
+            Ok(rx)
+        } else {
+            let mut pending = self.pending.write().await;
+            pending.remove(&session);
+            LureLogger::tunnel_agent_missing(
+                &key_id_prefix(&key_id.0),
+                &format!("{:02x}", session.0[0]),
+            );
+            anyhow::bail!("failed to notify tunnel agent")
         }
     }
 
@@ -540,8 +545,10 @@ impl TunnelRegistry {
                 key_id,
                 zone,
                 name: info.name.clone(),
-                created_ms_ago: now.duration_since(info.created_at).as_millis() as u64,
-                last_used_ms_ago: now.duration_since(last_used).as_millis() as u64,
+                created_ms_ago: u64::try_from(now.duration_since(info.created_at).as_millis())
+                    .unwrap_or(u64::MAX),
+                last_used_ms_ago: u64::try_from(now.duration_since(last_used).as_millis())
+                    .unwrap_or(u64::MAX),
                 has_agent: agents.contains_key(key),
             });
         }
@@ -555,14 +562,16 @@ impl TunnelRegistry {
             );
             agent_out.push(TunnelAgentInspect {
                 key_id,
-                connected_ms_ago: now.duration_since(record.connected_at).as_millis() as u64,
+                connected_ms_ago: u64::try_from(
+                    now.duration_since(record.connected_at).as_millis(),
+                )
+                .unwrap_or(u64::MAX),
                 offers_sent: record.offers_sent,
             });
         }
         agent_out.sort_by(|a, b| a.key_id.cmp(&b.key_id));
 
-        let mut pending_out: Vec<TunnelPendingInspect> = Vec::new();
-        pending_out.reserve(pending.len().min(50));
+        let mut pending_out: Vec<TunnelPendingInspect> = Vec::with_capacity(pending.len().min(50));
         for (_token, p) in pending.iter().take(50) {
             let key_id = format!(
                 "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
@@ -578,7 +587,8 @@ impl TunnelRegistry {
             pending_out.push(TunnelPendingInspect {
                 key_id,
                 target: p.target.to_string(),
-                age_ms: now.duration_since(p.created_at).as_millis() as u64,
+                age_ms: u64::try_from(now.duration_since(p.created_at).as_millis())
+                    .unwrap_or(u64::MAX),
             });
         }
         pending_out.sort_by(|a, b| a.age_ms.cmp(&b.age_ms).reverse());
@@ -599,14 +609,17 @@ impl TunnelRegistry {
     pub(crate) async fn cleanup_expired_sessions(&self) {
         const SESSION_TIMEOUT: Duration = Duration::from_secs(30);
 
-        let mut pending = self.pending.write().await;
         let now = Instant::now();
-        let expired: Vec<_> = pending
-            .iter()
-            .filter(|(_, session)| now.duration_since(session.created_at) > SESSION_TIMEOUT)
-            .map(|(token, _)| *token)
-            .collect();
+        let expired: Vec<_> = {
+            let pending = self.pending.read().await;
+            pending
+                .iter()
+                .filter(|(_, session)| now.duration_since(session.created_at) > SESSION_TIMEOUT)
+                .map(|(token, _)| *token)
+                .collect()
+        };
 
+        let mut pending = self.pending.write().await;
         for token in expired {
             pending.remove(&token);
             self.expired_sessions
@@ -644,7 +657,6 @@ fn parse_secret(secret_str: &str) -> anyhow::Result<[u8; 32]> {
         return Ok(out);
     }
     // Try base64
-    use base64::{Engine, engine::general_purpose::STANDARD};
     let decoded = STANDARD.decode(trimmed)?;
     if decoded.len() != 32 {
         anyhow::bail!(

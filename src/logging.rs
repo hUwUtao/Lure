@@ -11,7 +11,7 @@ pub struct LureLogger;
 
 impl LureLogger {
     pub fn preparing_socket(address: &str) {
-        info!("Preparing socket {}", address);
+        info!("Preparing socket {address}");
     }
 
     pub fn rate_limited(ip: &IpAddr) {
@@ -23,14 +23,11 @@ impl LureLogger {
     }
 
     pub fn new_connection(address: &SocketAddr) {
-        info!("New connection {}", address);
+        info!("New connection {address}");
     }
 
     pub fn handshake_completed(elapsed_ms: u64, next_state: &str) {
-        debug!(
-            "Handshake completed in {}ms, next state: {}",
-            elapsed_ms, next_state
-        );
+        debug!("Handshake completed in {elapsed_ms}ms, next state: {next_state}");
     }
 
     pub fn connection_closed(addr: &SocketAddr, err: &Error) {
@@ -42,7 +39,7 @@ impl LureLogger {
             return;
         }
         let server_str = server.map(|s| format!(" -> {s}")).unwrap_or_default();
-        error!("connection error@{client}{server_str}: {}", err);
+        error!("connection error@{client}{server_str}: {err}");
     }
 
     pub fn disconnect_warning(addr: &SocketAddr, reason: &str) {
@@ -90,10 +87,7 @@ impl LureLogger {
         if let Some(t) = target {
             context.push_str(&format!(" target={t}"));
         }
-        warn!(
-            "Deadline exceeded while {stage} (limit {:?}){}",
-            duration, context
-        );
+        warn!("Deadline exceeded while {stage} (limit {duration:?}){context}");
     }
 
     // ============================================================================
@@ -101,46 +95,36 @@ impl LureLogger {
     // ============================================================================
 
     pub fn tunnel_agent_registered(token_prefix: &str) {
-        info!("Tunnel agent registered: token={}", token_prefix);
+        info!("Tunnel agent registered: token={token_prefix}");
     }
 
     pub fn tunnel_agent_disconnected(token_prefix: &str) {
-        debug!("Tunnel agent disconnected: token={}", token_prefix);
+        debug!("Tunnel agent disconnected: token={token_prefix}");
     }
 
     pub fn tunnel_session_offered(token_prefix: &str, target: &SocketAddr) {
-        debug!(
-            "Tunnel session offered: token={} target={}",
-            token_prefix, target
-        );
+        debug!("Tunnel session offered: token={token_prefix} target={target}");
     }
 
     pub fn tunnel_session_accepted(token_prefix: &str, target: &SocketAddr) {
-        debug!(
-            "Tunnel session accepted: token={} target={}",
-            token_prefix, target
-        );
+        debug!("Tunnel session accepted: token={token_prefix} target={target}");
     }
 
     pub fn tunnel_session_timeout(session_prefix: &str) {
-        debug!("Tunnel session expired: session={}", session_prefix);
+        debug!("Tunnel session expired: session={session_prefix}");
     }
 
     pub fn tunnel_session_missing(session_prefix: &str) {
-        warn!("Tunnel session not found: session={}", session_prefix);
+        warn!("Tunnel session not found: session={session_prefix}");
     }
 
     pub fn tunnel_agent_missing(token_prefix: &str, session_prefix: &str) {
-        warn!(
-            "Tunnel agent not found: token={} session={}",
-            token_prefix, session_prefix
-        );
+        warn!("Tunnel agent not found: token={token_prefix} session={session_prefix}");
     }
 
     pub fn tunnel_token_mismatch(agent_token_prefix: &str, session_token_prefix: &str) {
         warn!(
-            "Tunnel token mismatch (unauthorized accept attempt): agent={} session={}",
-            agent_token_prefix, session_token_prefix
+            "Tunnel token mismatch (unauthorized accept attempt): agent={agent_token_prefix} session={session_token_prefix}"
         );
     }
 

@@ -245,6 +245,7 @@ pub struct BackendSelection {
 
 static BACKEND_SELECTION: OnceLock<BackendSelection> = OnceLock::new();
 
+#[must_use]
 pub fn backend_kind() -> BackendKind {
     backend_selection().kind
 }
@@ -350,7 +351,7 @@ impl Connection {
         }
     }
 
-    pub fn backend_kind(&self) -> BackendKind {
+    pub const fn backend_kind(&self) -> BackendKind {
         match self {
             Self::Tokio(_) => BackendKind::Tokio,
             Self::Epoll(_) => BackendKind::Epoll,
@@ -430,21 +431,21 @@ impl Connection {
         }
     }
 
-    pub fn as_tokio_mut(&mut self) -> Option<&mut tokio::Connection> {
+    pub const fn as_tokio_mut(&mut self) -> Option<&mut tokio::Connection> {
         match self {
             Self::Tokio(conn) => Some(conn),
             _ => None,
         }
     }
 
-    pub fn as_epoll_mut(&mut self) -> Option<&mut epoll::Connection> {
+    pub const fn as_epoll_mut(&mut self) -> Option<&mut epoll::Connection> {
         match self {
             Self::Epoll(conn) => Some(conn),
             _ => None,
         }
     }
 
-    pub fn as_uring_mut(&mut self) -> Option<&mut uring::Connection> {
+    pub const fn as_uring_mut(&mut self) -> Option<&mut uring::Connection> {
         match self {
             Self::Uring(conn) => Some(conn),
             _ => None,
@@ -457,8 +458,7 @@ pub async fn passthrough_basic(a: &mut Connection, b: &mut Connection) -> io::Re
         (Connection::Tokio(a), Connection::Tokio(b)) => tokio::passthrough_basic(a, b).await,
         (Connection::Epoll(a), Connection::Epoll(b)) => epoll::passthrough_basic(a, b).await,
         (Connection::Uring(a), Connection::Uring(b)) => uring::passthrough_basic(a, b).await,
-        _ => Err(io::Error::new(
-            io::ErrorKind::Other,
+        _ => Err(io::Error::other(
             "mismatched connection backends for passthrough",
         )),
     }
@@ -521,27 +521,27 @@ impl Listener {
 
 impl SockConnection for Connection {
     fn backend_kind(&self) -> BackendKind {
-        Connection::backend_kind(self)
+        Self::backend_kind(self)
     }
 
     fn addr(&self) -> &SocketAddr {
-        Connection::addr(self)
+        Self::addr(self)
     }
 
     fn peer_addr(&self) -> io::Result<SocketAddr> {
-        Connection::peer_addr(self)
+        Self::peer_addr(self)
     }
 
     fn local_addr(&self) -> io::Result<SocketAddr> {
-        Connection::local_addr(self)
+        Self::local_addr(self)
     }
 
     fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
-        Connection::set_nodelay(self, nodelay)
+        Self::set_nodelay(self, nodelay)
     }
 
     fn try_read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        Connection::try_read(self, buf)
+        Self::try_read(self, buf)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -556,28 +556,28 @@ impl SockConnection for Connection {
         &'a mut self,
         buf: Vec<u8>,
     ) -> Pin<Box<dyn Future<Output = io::Result<(usize, Vec<u8>)>> + 'a>> {
-        Box::pin(async move { Connection::read_chunk(self, buf).await })
+        Box::pin(async move { Self::read_chunk(self, buf).await })
     }
 
     fn write_all<'a>(
         &'a mut self,
         buf: Vec<u8>,
     ) -> Pin<Box<dyn Future<Output = io::Result<Vec<u8>>> + 'a>> {
-        Box::pin(async move { Connection::write_all(self, buf).await })
+        Box::pin(async move { Self::write_all(self, buf).await })
     }
 
     fn flush<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + 'a>> {
-        Box::pin(async move { Connection::flush(self).await })
+        Box::pin(async move { Self::flush(self).await })
     }
 
     fn shutdown<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + 'a>> {
-        Box::pin(async move { Connection::shutdown(self).await })
+        Box::pin(async move { Self::shutdown(self).await })
     }
 }
 
 impl SockListener for Listener {
     fn local_addr(&self) -> io::Result<SocketAddr> {
-        Listener::local_addr(self)
+        Self::local_addr(self)
     }
 
     fn accept<'a>(
@@ -620,10 +620,12 @@ impl LureConnection {
         Ok(Self(connect_boxed(addr).await?))
     }
 
+    #[must_use]
     pub fn backend_kind(&self) -> BackendKind {
         self.0.backend_kind()
     }
 
+    #[must_use]
     pub fn addr(&self) -> &SocketAddr {
         self.0.addr()
     }
@@ -644,6 +646,7 @@ impl LureConnection {
         self.0.try_read(buf)
     }
 
+    #[must_use]
     pub fn as_connection(&self) -> Option<&Connection> {
         self.0.as_any().downcast_ref::<Connection>()
     }

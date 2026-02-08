@@ -46,7 +46,7 @@ where
     Ok(())
 }
 
-pub(crate) async fn passthrough_now(
+pub async fn passthrough_now(
     client: &mut Connection,
     server: &mut Connection,
     session: &Session,

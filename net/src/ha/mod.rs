@@ -1,11 +1,11 @@
-//! # HAProxy PROXY Protocol v2 Library
+//! # `HAProxy` PROXY Protocol v2 Library
 //!
-//! This crate provides a lightweight, dependency-free implementation of the HAProxy PROXY protocol version 2 (PPv2),
+//! This crate provides a lightweight, dependency-free implementation of the `HAProxy` PROXY protocol version 2 (`PPv2`),
 //! including full support for address families, protocols, and standard Type-Length-Value (TLV) extensions.
 //!
 //! ## Overview
-//! PPv2 is a binary protocol used to convey client connection metadata through proxies. This library allows parsing
-//! PPv2 headers from byte slices and serializing them to byte vectors, adhering strictly to the specification.
+//! `PPv2` is a binary protocol used to convey client connection metadata through proxies. This library allows parsing
+//! `PPv2` headers from byte slices and serializing them to byte vectors, adhering strictly to the specification.
 //!
 //! Key features:
 //! - Zero-copy parsing where possible.
@@ -31,24 +31,33 @@
 //! ```
 //!
 //! ### Serializing a Header
-//! ```rs
-//! use net::ha::{Header, Command, Family, Protocol, AddressInfo, Tlv};
+//! ```rs,no_run
+//! use std::net::{Ipv4Addr, SocketAddrV4};
 //!
+//! use net::ha::{AddressInfo, Command, Family, Header, Protocol, Tlv};
+//!
+//! # fn main() -> Result<(), net::ha::Error> {
 //! let header = Header {
 //!     command: Command::Proxy,
 //!     family: Family::Inet,
 //!     protocol: Protocol::Stream,
-//!     address: AddressInfo::Ipv4(/* ... */),
+//!     address: AddressInfo::Ipv4(
+//!         SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1234),
+//!         SocketAddrV4::new(Ipv4Addr::LOCALHOST, 25565),
+//!     ),
 //!     tlvs: vec![Tlv::Authority("example.com".into())],
 //! };
-//! let bytes = header.serialize();
+//! let bytes = header.serialize()?;
+//! let _ = bytes;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Specification Summary
-//! The PPv2 header consists of:
+//! The `PPv2` header consists of:
 //! - Fixed 12-byte signature: `\r\n\r\n\0\r\nQUIT\n` (0x0D0A0D0A000D0A515549540A).
 //! - Version/Command byte: 0x20 for v2; low nibble 0x0 (LOCAL) or 0x1 (PROXY).
-//! - Family/Protocol byte: High nibble for family (0x0 UNSPEC, 0x1 AF_INET, 0x2 AF_INET6, 0x3 AF_UNIX); low nibble for protocol (0x0 UNSPEC, 0x1 STREAM, 0x2 DGRAM).
+//! - Family/Protocol byte: High nibble for family (0x0 UNSPEC, 0x1 `AF_INET`, 0x2 `AF_INET6`, 0x3 `AF_UNIX`); low nibble for protocol (0x0 UNSPEC, 0x1 STREAM, 0x2 DGRAM).
 //! - 16-bit length of address + TLVs (big-endian).
 //! - Variable address block (0-216 bytes depending on family/protocol).
 //! - Optional TLVs: 1-byte type, 2-byte length, variable value.
@@ -64,7 +73,7 @@
 //! - 0x02 AUTHORITY: UTF-8 hostname.
 //! - 0x03 CRC32C: 4-byte checksum (not enforced in this lib).
 //! - 0x04 NOOP: Empty.
-//! - 0x05 UNIQUE_ID: Bytes.
+//! - 0x05 `UNIQUE_ID`: Bytes.
 //! - 0x20 SSL: Structured (client flags, optional verify, sub-TLVs for version/CN/cipher/etc.).
 //! - 0x30 NETNS: UTF-8 namespace.
 //! - Unknown types are stored as raw bytes.
@@ -78,11 +87,12 @@
 //! For full spec details, refer to [HAProxy PROXY Protocol](https://www.haproxy.org/download/3.4/doc/proxy-protocol.txt).
 
 use std::{
+    fmt,
     net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6},
     str::from_utf8,
 };
 
-/// Fixed signature for PPv2 headers.
+/// Fixed signature for `PPv2` headers.
 const SIGNATURE: [u8; 12] = [
     0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
 ];
@@ -144,7 +154,7 @@ pub enum Tlv {
     },
 }
 
-/// Complete PPv2 header.
+/// Complete `PPv2` header.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Header {
     pub command: Command,
@@ -167,9 +177,28 @@ pub enum Error {
     Utf8Error,
 }
 
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Keep messages stable-ish; detailed context is usually in logs/call sites.
+        match self {
+            Self::IncompleteData => write!(f, "incomplete PPv2 header"),
+            Self::InvalidSignature => write!(f, "invalid PPv2 signature"),
+            Self::InvalidVersion => write!(f, "invalid PPv2 version"),
+            Self::UnsupportedCommand => write!(f, "unsupported PPv2 command"),
+            Self::UnsupportedFamilyProtocol => write!(f, "unsupported PPv2 family/protocol"),
+            Self::InvalidLength => write!(f, "invalid PPv2 length"),
+            Self::ParseFailed(msg) => write!(f, "PPv2 parse failed: {msg}"),
+            Self::Utf8Error => write!(f, "PPv2 utf-8 error"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
 impl Header {
     /// Serializes the header to a byte vector.
-    pub fn serialize(&self) -> Vec<u8> {
+    #[must_use]
+    pub fn serialize(&self) -> Result<Vec<u8>, Error> {
         let var_len = self.estimated_size();
         let mut buf = Vec::with_capacity(16 + var_len);
 
@@ -194,14 +223,15 @@ impl Header {
         });
         buf.push(fam_prot);
 
-        buf.extend_from_slice(&(var_len as u16).to_be_bytes());
+        let var_len_u16 = u16::try_from(var_len).map_err(|_| Error::InvalidLength)?;
+        buf.extend_from_slice(&var_len_u16.to_be_bytes());
         self.append_address(&mut buf);
 
         for tlv in &self.tlvs {
-            Self::append_tlv(&mut buf, tlv);
+            Self::append_tlv(&mut buf, tlv)?;
         }
 
-        buf
+        Ok(buf)
     }
 
     fn estimated_size(&self) -> usize {
@@ -237,17 +267,19 @@ impl Header {
         }
     }
 
-    fn append_raw_tlv(buf: &mut Vec<u8>, type_code: u8, value: &[u8]) {
+    fn append_raw_tlv(buf: &mut Vec<u8>, type_code: u8, value: &[u8]) -> Result<(), Error> {
         buf.push(type_code);
-        buf.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        let len_u16 = u16::try_from(value.len()).map_err(|_| Error::InvalidLength)?;
+        buf.extend_from_slice(&len_u16.to_be_bytes());
         buf.extend_from_slice(value);
+        Ok(())
     }
 
-    fn append_str_tlv(buf: &mut Vec<u8>, type_code: u8, value: &str) {
-        Self::append_raw_tlv(buf, type_code, value.as_bytes());
+    fn append_str_tlv(buf: &mut Vec<u8>, type_code: u8, value: &str) -> Result<(), Error> {
+        Self::append_raw_tlv(buf, type_code, value.as_bytes())
     }
 
-    fn append_tlv(buf: &mut Vec<u8>, tlv: &Tlv) {
+    fn append_tlv(buf: &mut Vec<u8>, tlv: &Tlv) -> Result<(), Error> {
         match tlv {
             Tlv::Alpn(s) => Self::append_str_tlv(buf, 0x01, s),
             Tlv::Authority(s) => Self::append_str_tlv(buf, 0x02, s),
@@ -264,26 +296,28 @@ impl Header {
                 key_alg,
             } => {
                 buf.push(0x20);
-                buf.extend_from_slice(&(tlv.value_size() as u16).to_be_bytes());
+                let len_u16 = u16::try_from(tlv.value_size()).map_err(|_| Error::InvalidLength)?;
+                buf.extend_from_slice(&len_u16.to_be_bytes());
                 buf.push(*client);
                 if let Some(v) = verify {
                     buf.extend_from_slice(&v.to_be_bytes());
                 }
                 if let Some(s) = version.as_deref() {
-                    Self::append_str_tlv(buf, 0x21, s);
+                    Self::append_str_tlv(buf, 0x21, s)?;
                 }
                 if let Some(s) = cn.as_deref() {
-                    Self::append_str_tlv(buf, 0x22, s);
+                    Self::append_str_tlv(buf, 0x22, s)?;
                 }
                 if let Some(s) = cipher.as_deref() {
-                    Self::append_str_tlv(buf, 0x23, s);
+                    Self::append_str_tlv(buf, 0x23, s)?;
                 }
                 if let Some(s) = sig_alg.as_deref() {
-                    Self::append_str_tlv(buf, 0x24, s);
+                    Self::append_str_tlv(buf, 0x24, s)?;
                 }
                 if let Some(s) = key_alg.as_deref() {
-                    Self::append_str_tlv(buf, 0x25, s);
+                    Self::append_str_tlv(buf, 0x25, s)?;
                 }
+                Ok(())
             }
             Tlv::Netns(s) => Self::append_str_tlv(buf, 0x30, s),
             Tlv::Unknown { type_code, value } => Self::append_raw_tlv(buf, *type_code, value),
@@ -294,11 +328,11 @@ impl Header {
 impl Tlv {
     fn value_size(&self) -> usize {
         match self {
-            Tlv::Alpn(s) | Tlv::Authority(s) | Tlv::Netns(s) => s.len(),
-            Tlv::Crc32c(_) => 4,
-            Tlv::Noop => 0,
-            Tlv::UniqueId(v) | Tlv::Unknown { value: v, .. } => v.len(),
-            Tlv::Ssl {
+            Self::Alpn(s) | Self::Authority(s) | Self::Netns(s) => s.len(),
+            Self::Crc32c(_) => 4,
+            Self::Noop => 0,
+            Self::UniqueId(v) | Self::Unknown { value: v, .. } => v.len(),
+            Self::Ssl {
                 verify,
                 version,
                 cn,
@@ -318,7 +352,7 @@ impl Tlv {
     }
 }
 
-/// Parses a PPv2 header from a byte slice.
+/// Parses a `PPv2` header from a byte slice.
 pub fn parse(data: &[u8]) -> Result<Header, Error> {
     if data.len() < 16 {
         return Err(Error::IncompleteData);
@@ -579,7 +613,7 @@ mod tests {
             ),
             tlvs: vec![Tlv::Alpn("http/1.1".into())],
         };
-        let bytes = original.serialize();
+        let bytes = original.serialize().unwrap();
         let parsed = parse(&bytes).unwrap();
         assert_eq!(original, parsed);
     }

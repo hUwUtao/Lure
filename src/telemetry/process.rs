@@ -89,6 +89,7 @@ impl Default for ProcessMetricsService {
 }
 
 impl ProcessMetricsService {
+    #[must_use]
     pub fn new() -> Self {
         let meter = get_meter();
         let handle = tokio::runtime::Handle::current();

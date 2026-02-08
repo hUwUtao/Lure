@@ -29,7 +29,7 @@ pub enum Intent {
 }
 
 impl Intent {
-    fn from_u8(value: u8) -> Result<Self, TunnelError> {
+    const fn from_u8(value: u8) -> Result<Self, TunnelError> {
         match value {
             1 => Ok(Self::Listen),
             2 => Ok(Self::Connect),
@@ -233,6 +233,7 @@ pub fn decode_server_msg(buf: &[u8]) -> Result<Option<(ServerMsg, usize)>, Tunne
 }
 
 /// Compute HMAC-SHA256 for agent authentication
+#[must_use]
 pub fn compute_agent_hmac(
     secret: &[u8; 32],
     key_id: &[u8; 8],

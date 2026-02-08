@@ -10,7 +10,8 @@ type RouteAttrBitframe = u64;
 pub struct RouteAttr(RouteAttrBitframe);
 
 impl RouteAttr {
-    pub fn from_u64(value: RouteAttrBitframe) -> Self {
+    #[must_use]
+    pub const fn from_u64(value: RouteAttrBitframe) -> Self {
         Self(value)
     }
     // #[inline]
@@ -18,26 +19,28 @@ impl RouteAttr {
     //     self.0 ^= 1 << flag as u64;
     // }
     #[inline]
-    pub fn set_flag(&mut self, flag: RouteFlags) {
+    pub const fn set_flag(&mut self, flag: RouteFlags) {
         self.0 |= 1 << flag as RouteAttrBitframe;
     }
     #[inline]
+    #[must_use]
     pub fn from_flags(flags: &[RouteFlags]) -> Self {
-        let mut ra = RouteAttr::default();
+        let mut ra = Self::default();
         for flag in flags {
             ra.set_flag(*flag);
         }
         ra
     }
     #[inline]
-    pub fn contains(&self, flag: RouteFlags) -> bool {
+    #[must_use]
+    pub const fn contains(&self, flag: RouteFlags) -> bool {
         self.0 & (1 << flag as RouteAttrBitframe) != 0
     }
 }
 
 impl From<RouteFlags> for RouteAttr {
     fn from(flag: RouteFlags) -> Self {
-        RouteAttr::from_flags(std::slice::from_ref(&flag))
+        Self::from_flags(std::slice::from_ref(&flag))
     }
 }
 
@@ -60,8 +63,8 @@ impl<'de> Deserialize<'de> for RouteAttr {
         }
 
         match In::deserialize(de)? {
-            In::U64(n) => Ok(RouteAttr::from_u64(n)),
-            In::Seq(v) => Ok(RouteAttr::from_flags(&v)),
+            In::U64(n) => Ok(Self::from_u64(n)),
+            In::Seq(v) => Ok(Self::from_flags(&v)),
         }
     }
 }

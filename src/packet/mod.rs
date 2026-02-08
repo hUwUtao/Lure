@@ -32,22 +32,24 @@ pub struct OwnedLoginSigData {
 
 impl OwnedHandshake {
     /// According to various spec including Forge
+    #[must_use]
     pub fn get_stripped_hostname(&self) -> Arc<str> {
         const FALLBACK: &str = "unknown-host";
         let ptr = self
             .server_address
             .find('\0')
-            .map(|nul| &self.server_address[..nul])
-            .unwrap_or(self.server_address.as_ref());
+            .map_or(self.server_address.as_ref(), |nul| {
+                &self.server_address[..nul]
+            });
         let sanitized: String = ptr
             .chars()
             .filter(|c| c.is_ascii() && !c.is_ascii_control())
             .take(255)
             .collect();
-        if !sanitized.is_empty() {
-            Arc::from(sanitized)
-        } else {
+        if sanitized.is_empty() {
             Arc::from(FALLBACK)
+        } else {
+            Arc::from(sanitized)
         }
     }
 }

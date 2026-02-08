@@ -12,8 +12,9 @@ use opentelemetry_sdk::{
 };
 
 /// Creates an OpenTelemetry Resource from environment variables following semantic conventions,
-/// including OTEL_RESOURCE_ATTRIBUTES for additional key-value pairs.
+/// including `OTEL_RESOURCE_ATTRIBUTES` for additional key-value pairs.
 /// Fallbacks are provided for required attributes like service.name.
+#[must_use]
 pub fn create_resource_from_env() -> Resource {
     let mut attributes = Vec::new();
 
@@ -44,7 +45,6 @@ pub fn create_resource_from_env() -> Resource {
 
     // Parse OTEL_RESOURCE_ATTRIBUTES (comma-separated key=value pairs)
     if let Ok(resource_attributes) = env::var("OTEL_RESOURCE_ATTRIBUTES") {
-        let resource_attributes = resource_attributes.clone();
         for kv in resource_attributes.split(',') {
             if let Some((key, value)) = kv.split_once('=') {
                 let key = key.trim().to_string();
@@ -52,7 +52,7 @@ pub fn create_resource_from_env() -> Resource {
                 if !key.is_empty() && !value.is_empty() {
                     // Skip attributes already set explicitly to avoid duplicates
                     if !attributes.iter().any(|kv| kv.key.as_str() == key) {
-                        attributes.push(KeyValue::new(key, value.to_string()));
+                        attributes.push(KeyValue::new(key, value.clone()));
                     }
                 }
             }
@@ -65,13 +65,9 @@ fn parse_headers() -> HashMap<String, String> {
     let mut map: HashMap<String, String> = HashMap::new();
     if let Ok(header_str) = dotenvy::var("OTEL_EXPORTER_OTLP_HEADERS") {
         // Expect "key1=val1,key2=val2"
-        let header_str = header_str.clone();
         for pair in header_str.split(',') {
             if let Some((k, v)) = pair.split_once('=') {
-                map.insert(
-                    k.trim().into(),
-                    v.trim().parse().expect("Invalid header value"),
-                );
+                map.insert(k.trim().to_string(), v.trim().to_string());
             }
         }
     }
@@ -88,8 +84,7 @@ fn build_span_exporter() -> opentelemetry_otlp::SpanExporter {
     let timeout = dotenvy::var("OTEL_EXPORTER_OTLP_TIMEOUT")
         .ok()
         .and_then(|s| s.parse().ok())
-        .map(Duration::from_secs)
-        .unwrap_or_else(|| Duration::from_secs(3));
+        .map_or_else(|| Duration::from_secs(3), Duration::from_secs);
 
     let headers = parse_headers();
 
@@ -113,7 +108,7 @@ fn build_span_exporter() -> opentelemetry_otlp::SpanExporter {
             .with_endpoint(endpoint)
             .with_timeout(timeout)
             .with_headers(headers),
-        other => panic!("Unsupported OTLP_PROTOCOL: {}", other),
+        other => panic!("Unsupported OTLP_PROTOCOL: {other}"),
     };
 
     builder.build().expect("failed to build OTLP SpanExporter")
@@ -126,13 +121,12 @@ fn build_metric_exporter() -> opentelemetry_otlp::MetricExporter {
         .unwrap_or_else(|_| "grpc".into())
         .to_lowercase();
 
-    info!("Sending metric to {}", endpoint);
+    info!("Sending metric to {endpoint}");
 
     let timeout = dotenvy::var("OTEL_EXPORTER_OTLP_TIMEOUT")
         .ok()
         .and_then(|s| s.parse().ok())
-        .map(Duration::from_secs)
-        .unwrap_or_else(|| Duration::from_secs(3));
+        .map_or_else(|| Duration::from_secs(3), Duration::from_secs);
 
     let headers = parse_headers();
 
@@ -156,7 +150,7 @@ fn build_metric_exporter() -> opentelemetry_otlp::MetricExporter {
             .with_endpoint(endpoint)
             .with_timeout(timeout)
             .with_headers(headers),
-        other => panic!("Unsupported OTLP_PROTOCOL: {}", other),
+        other => panic!("Unsupported OTLP_PROTOCOL: {other}"),
     };
 
     builder
@@ -164,6 +158,7 @@ fn build_metric_exporter() -> opentelemetry_otlp::MetricExporter {
         .expect("failed to build OTLP MetricExporter")
 }
 
+#[must_use]
 pub fn init_tracer() -> SdkTracerProvider {
     // Common resource, includes service.name and anything else
     let resource = create_resource_from_env();
@@ -194,6 +189,7 @@ pub fn init_tracer() -> SdkTracerProvider {
     tracer_provider
 }
 
+#[must_use]
 pub fn init_meter() -> SdkMeterProvider {
     let metric_exporter = build_metric_exporter();
     let resource = create_resource_from_env();
@@ -203,10 +199,8 @@ pub fn init_meter() -> SdkMeterProvider {
         .with_resource(resource);
 
     #[cfg(feature = "verbose")]
-    {
-        meter_provider = meter_provider
-            .with_periodic_exporter(opentelemetry_stdout::MetricExporter::builder().build());
-    }
+    let meter_provider = meter_provider
+        .with_periodic_exporter(opentelemetry_stdout::MetricExporter::builder().build());
 
     let meter_provider = meter_provider.build();
     global::set_meter_provider(meter_provider.clone());

@@ -14,7 +14,7 @@ const SIGNATURE_VERSION: u8 = 1;
 const SIGNATURE_ALGO_ED25519: u8 = 1;
 const SIGNATURE_CONTEXT: &[u8] = b"LUREPROXY";
 
-pub(crate) fn create_proxy_protocol_header(
+pub fn create_proxy_protocol_header(
     socket: SocketAddr,
     config: &LureConfig,
 ) -> anyhow::Result<BytesMut> {
@@ -36,7 +36,8 @@ pub(crate) fn create_proxy_protocol_header(
         address,
         tlvs: create_header(config, socket),
     };
-    Ok(BytesMut::from(proxy_header.serialize().as_slice()))
+    let bytes = proxy_header.serialize()?;
+    Ok(BytesMut::from(bytes.as_slice()))
 }
 
 fn create_header(cfg: &LureConfig, client_addr: SocketAddr) -> Vec<Tlv> {
@@ -47,7 +48,7 @@ fn create_header(cfg: &LureConfig, client_addr: SocketAddr) -> Vec<Tlv> {
     let Some(key) = cfg
         .proxy_signing_key
         .as_ref()
-        .map(|key| key.as_bytes())
+        .map(crate::config::ProxySigningKey::as_bytes)
         .filter(|value| !value.is_empty())
     else {
         return headers;

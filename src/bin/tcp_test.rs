@@ -21,7 +21,7 @@ fn get_nanos() -> u64 {
         tv_nsec: 0,
     };
     unsafe {
-        libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
+        libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut ts);
     }
     (ts.tv_sec as u64) * 1_000_000_000 + (ts.tv_nsec as u64)
 }
@@ -259,7 +259,6 @@ fn run_load(cfg: &TestConfig, addr: SocketAddr, record_samples: bool) -> anyhow:
 
     for _ in 0..cfg.concurrency {
         let tx = tx.clone();
-        let addr = addr;
         let payload = cfg.payload;
         let pipeline = cfg.pipeline;
         thread::spawn(move || {
@@ -447,7 +446,7 @@ fn fnv64(data: &[u8]) -> u64 {
     const FNV_PRIME: u64 = 0x100000001b3;
     let mut h = FNV_OFFSET;
     for &b in data {
-        h ^= b as u64;
+        h ^= u64::from(b);
         h = h.wrapping_mul(FNV_PRIME);
     }
     h
@@ -467,9 +466,9 @@ fn report(r: &RunResult) {
 
     println!("  ops: {}", r.ops);
     println!("  bytes: {}", r.bytes);
-    println!("  duration: {:.3}s", secs);
-    println!("  ops/sec: {:.2}", ops_per_sec);
-    println!("  throughput: {:.2} MiB/s", mib_per_sec);
+    println!("  duration: {secs:.3}s");
+    println!("  ops/sec: {ops_per_sec:.2}");
+    println!("  throughput: {mib_per_sec:.2} MiB/s");
 
     if r.samples.is_empty() {
         println!("  latency: (none)");
@@ -522,7 +521,7 @@ fn latency_stats(samples: &[OpSample]) -> LatencyStats {
         recv_sum += recv_ms;
     }
     let mean_ms = sum / count as f64;
-    let variance = (sum_sq / count as f64) - (mean_ms * mean_ms);
+    let variance = mean_ms.mul_add(-mean_ms, sum_sq / count as f64);
     let stdev_ms = variance.max(0.0).sqrt();
 
     LatencyStats {

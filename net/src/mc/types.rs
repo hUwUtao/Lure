@@ -13,10 +13,12 @@ pub const MAX_PACKET_SIZE: usize = 2_097_152;
 pub struct Uuid([u8; 16]);
 
 impl Uuid {
-    pub fn from_bytes(bytes: [u8; 16]) -> Self {
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self {
         Self(bytes)
     }
 
+    #[must_use]
     pub fn from_u64s(msb: u64, lsb: u64) -> Self {
         let mut bytes = [0u8; 16];
         bytes[..8].copy_from_slice(&msb.to_be_bytes());
@@ -24,10 +26,12 @@ impl Uuid {
         Self(bytes)
     }
 
-    pub fn as_bytes(&self) -> &[u8; 16] {
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 16] {
         &self.0
     }
 
+    #[must_use]
     pub fn as_u64s(&self) -> (u64, u64) {
         let msb = u64::from_be_bytes(self.0[..8].try_into().unwrap());
         let lsb = u64::from_be_bytes(self.0[8..].try_into().unwrap());
@@ -45,12 +49,11 @@ impl Display for Uuid {
 
         let mut last_bytes = [0u8; 8];
         last_bytes[2..].copy_from_slice(&b[10..16]);
-        let part5 = u64::from_be_bytes(last_bytes) & 0xFFFFFFFFFFFFu64;
+        let part5 = u64::from_be_bytes(last_bytes) & 0xFFFF_FFFF_FFFF_u64;
 
         write!(
             f,
-            "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
-            part1, part2, part3, part4, part5
+            "{part1:08x}-{part2:04x}-{part3:04x}-{part4:04x}-{part5:012x}"
         )
     }
 }
@@ -95,13 +98,15 @@ impl Default for PacketDecoder {
 }
 
 impl PacketDecoder {
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self {
             buf: Vec::new(),
             pos: 0,
         }
     }
 
+    #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             buf: Vec::with_capacity(capacity),
@@ -199,13 +204,15 @@ impl Default for PacketEncoder {
 }
 
 impl PacketEncoder {
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self {
             buf: Vec::new(),
             scratch: Vec::new(),
         }
     }
 
+    #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             buf: Vec::with_capacity(capacity),

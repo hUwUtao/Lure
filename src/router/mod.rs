@@ -34,7 +34,7 @@ pub use dest::Destination;
 pub use endpoint::{Endpoint, TunnelOpt};
 pub use profile::Profile;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Copy)]
 pub enum RouteFlags {
     Disabled,
     CacheQuery,
@@ -52,7 +52,7 @@ pub enum AuthMode {
     /// Any valid registered token can access
     #[default]
     Protected,
-    /// Only specific tokens (by key_id) can access
+    /// Only specific tokens (by `key_id`) can access
     Restricted { allowed_tokens: Vec<[u8; 8]> },
 }
 
@@ -79,26 +79,30 @@ pub struct Route {
 
 impl Route {
     #[inline]
-    fn read_flag(&self, flag: RouteFlags) -> bool {
+    const fn read_flag(&self, flag: RouteFlags) -> bool {
         self.flags.contains(flag)
     }
 
     #[inline]
+    #[must_use]
     pub fn disabled(&self) -> bool {
         self.read_flag(RouteFlags::Disabled)
     }
 
     #[inline]
+    #[must_use]
     pub fn proxied(&self) -> bool {
         self.read_flag(RouteFlags::ProxyProtocol)
     }
 
     #[inline]
+    #[must_use]
     pub fn preserve_host(&self) -> bool {
         self.read_flag(RouteFlags::PreserveHost)
     }
 
     #[inline]
+    #[must_use]
     pub fn tunnel(&self) -> bool {
         self.read_flag(RouteFlags::Tunnel)
     }
@@ -155,7 +159,7 @@ pub struct SessionHandle {
 }
 
 impl SessionHandle {
-    pub fn new(router: &'static RouterInstance, session: Arc<Session>) -> Self {
+    pub const fn new(router: &'static RouterInstance, session: Arc<Session>) -> Self {
         Self {
             router,
             inner: session,
@@ -223,6 +227,7 @@ impl Default for RouterInstance {
 }
 
 impl RouterInstance {
+    #[must_use]
     pub fn new() -> Self {
         let metrics = Arc::new(RouterMetrics::new(&get_meter()));
         let (metrics_tx, metrics_rx) = mpsc::unbounded_channel();
@@ -232,7 +237,7 @@ impl RouterInstance {
         )
         .expect("Cannot spawn task");
 
-        RouterInstance {
+        Self {
             active_routes: RwLock::new(HashMap::new()),
             active_sessions: RwLock::new(HashMap::new()),
             domain_index: RwLock::new(HashMap::new()),
@@ -322,14 +327,14 @@ impl RouterInstance {
             .await;
     }
 
-    /// Internal helper to sort routes by priority (requires domain_index write lock)
+    /// Internal helper to sort routes by priority (requires `domain_index` write lock)
     async fn sort_routes_by_priority_internal(&self, domain_index: &mut HashMap<String, Vec<u64>>) {
         let routes = self.active_routes.read().await;
 
         for route_ids in domain_index.values_mut() {
             route_ids.sort_by(|&a, &b| {
-                let priority_a = routes.get(&a).map(|r| r.priority).unwrap_or(0);
-                let priority_b = routes.get(&b).map(|r| r.priority).unwrap_or(0);
+                let priority_a = routes.get(&a).map_or(0, |r| r.priority);
+                let priority_b = routes.get(&b).map_or(0, |r| r.priority);
                 priority_b.cmp(&priority_a) // Descending order
             });
         }
@@ -374,7 +379,7 @@ impl RouterInstance {
     pub async fn clear_routes(&self) {
         let keys = {
             let routes = self.active_routes.read().await;
-            routes.keys().cloned().collect::<Vec<_>>()
+            routes.keys().copied().collect::<Vec<_>>()
         };
         let mut routes = self.active_routes.write().await;
         for key in keys {
@@ -674,8 +679,7 @@ impl RouterInstance {
                         let routes = latest_routes.unwrap_or(0);
                         let sessions = latest_sessions.unwrap_or(0);
                         debug!(
-                            "router metrics snapshot: routes_active={}, sessions_active={}",
-                            routes, sessions
+                            "router metrics snapshot: routes_active={routes}, sessions_active={sessions}"
                         );
                         dirty = false;
                     }
@@ -687,8 +691,7 @@ impl RouterInstance {
             let routes = latest_routes.unwrap_or(0);
             let sessions = latest_sessions.unwrap_or(0);
             debug!(
-                "router metrics snapshot (final): routes_active={}, sessions_active={}",
-                routes, sessions
+                "router metrics snapshot (final): routes_active={routes}, sessions_active={sessions}"
             );
         }
     }
@@ -726,14 +729,14 @@ impl crate::telemetry::event::EventHook<EventEnvelope, EventEnvelope> for Router
     ) -> anyhow::Result<()> {
         match event {
             EventEnvelope::SetRoute(route) => {
-                debug!("Setting route: {:?}", route);
+                debug!("Setting route: {route:?}");
                 let route = route.to_owned();
-                self.apply_route(route.to_owned()).await;
+                self.apply_route(route.clone()).await;
             }
             EventEnvelope::FlushRoute(_) => {
                 let keys = {
                     let routes = self.active_routes.read().await;
-                    routes.keys().cloned().collect::<Vec<_>>()
+                    routes.keys().copied().collect::<Vec<_>>()
                 };
                 let mut routes = self.active_routes.write().await;
                 for k in keys {

@@ -21,10 +21,10 @@ pub enum ProtoError {
 
 pub type Result<T> = std::result::Result<T, ProtoError>;
 
-pub(crate) fn debug_log_error(context: &str, error: &ProtoError) {
+pub fn debug_log_error(context: &str, error: &ProtoError) {
     #[cfg(debug_assertions)]
     {
-        log::error!("{}: {:?}", context, error);
+        log::error!("{context}: {error:?}");
     }
     let _ = context;
     let _ = error;
@@ -32,7 +32,7 @@ pub(crate) fn debug_log_error(context: &str, error: &ProtoError) {
 
 impl fmt::Display for ProtoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "{self:?}")
     }
 }
 

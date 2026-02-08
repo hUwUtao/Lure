@@ -78,7 +78,8 @@ impl Connection {
         }
     }
 
-    pub fn addr(&self) -> &SocketAddr {
+    #[must_use]
+    pub const fn addr(&self) -> &SocketAddr {
         &self.addr
     }
 
@@ -94,6 +95,7 @@ impl Connection {
         self.stream.set_nodelay(nodelay)
     }
 
+    #[must_use]
     pub fn stream_handle(&self) -> StreamHandle {
         Rc::clone(&self.stream)
     }
@@ -102,10 +104,7 @@ impl Connection {
         match self.stream.read(Buffer::from(buf)).await {
             Ok((n, buf)) => match buf.try_into::<Vec<u8>>() {
                 Ok(out) => Ok((n, out)),
-                Err(_) => Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "failed to convert io_uring buffer",
-                )),
+                Err(_) => Err(io::Error::other("failed to convert io_uring buffer")),
             },
             Err(err) => {
                 let _ = err.1;
@@ -138,10 +137,7 @@ pub async fn read_into_handle(stream: &StreamHandle, buf: Vec<u8>) -> io::Result
     match stream.read(Buffer::from(buf)).await {
         Ok((n, buf)) => match buf.try_into::<Vec<u8>>() {
             Ok(out) => Ok((n, out)),
-            Err(_) => Err(io::Error::new(
-                io::ErrorKind::Other,
-                "failed to convert io_uring buffer",
-            )),
+            Err(_) => Err(io::Error::other("failed to convert io_uring buffer")),
         },
         Err(err) => {
             let _ = err.1;
@@ -202,10 +198,7 @@ async fn write_all_stream_handle(stream: &TcpStream, buf: Vec<u8>) -> io::Result
         let out = match buffer.try_into::<Vec<u8>>() {
             Ok(out) => out,
             Err(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "failed to convert io_uring buffer",
-                ));
+                return Err(io::Error::other("failed to convert io_uring buffer"));
             }
         };
         if written >= out.len() {

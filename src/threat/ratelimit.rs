@@ -22,10 +22,11 @@ impl<K> RateLimiterController<K>
 where
     K: Hash + Eq + Clone + Send + Sync + std::fmt::Debug,
 {
+    #[must_use]
     pub fn new(requests_per_second: u32, retry_time: Duration) -> Self {
         let quota = Quota::per_second(NonZeroU32::new(requests_per_second).unwrap());
         let limiter = RateLimiter::keyed(quota);
-        RateLimiterController {
+        Self {
             limiter,
             retry_time,
         }
@@ -33,11 +34,11 @@ where
 
     pub fn check(&self, key: &K) -> RateLimitResult {
         match self.limiter.check_key(key) {
-            Ok(_) => RateLimitResult::Allowed,
+            Ok(()) => RateLimitResult::Allowed,
             Err(negative) => {
                 let calculated_retry = negative.wait_time_from(DefaultClock::default().now());
                 let retry_after = calculated_retry.max(self.retry_time);
-                warn!("Rate limit exceeded for key: {:?}", key);
+                warn!("Rate limit exceeded for key: {key:?}");
                 RateLimitResult::Disallowed { retry_after }
             }
         }

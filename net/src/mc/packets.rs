@@ -74,11 +74,11 @@ pub enum ServerboundPacket<'a> {
 }
 
 impl PacketFrame {
-    pub fn decode_serverbound<'a>(
-        &'a self,
+    pub fn decode_serverbound(
+        &self,
         state: PacketState,
         protocol_version: i32,
-    ) -> Result<ServerboundPacket<'a>> {
+    ) -> Result<ServerboundPacket<'_>> {
         ServerboundPacket::decode(state, protocol_version, self)
     }
 }
@@ -173,7 +173,7 @@ impl<'a> PacketDecode<'a> for HandshakeC2s<'a> {
     }
 }
 
-impl<'a> PacketEncode for HandshakeC2s<'a> {
+impl PacketEncode for HandshakeC2s<'_> {
     const ID: i32 = HandshakeC2s::ID;
 
     fn encode_body(&self, out: &mut Vec<u8>) -> Result<()> {
@@ -192,21 +192,21 @@ impl<'a> PacketEncode for HandshakeC2s<'a> {
 impl StatusRequestC2s {
     pub const ID: i32 = 0x00;
 
-    pub fn decode_body(_input: &mut &[u8]) -> Result<Self> {
+    pub const fn decode_body(_input: &mut &[u8]) -> Result<Self> {
         Ok(Self)
     }
 }
 
 impl<'a> PacketDecode<'a> for StatusRequestC2s {
-    const ID: i32 = StatusRequestC2s::ID;
+    const ID: i32 = Self::ID;
 
     fn decode_body(input: &mut &'a [u8]) -> Result<Self> {
-        StatusRequestC2s::decode_body(input)
+        Self::decode_body(input)
     }
 }
 
 impl PacketEncode for StatusRequestC2s {
-    const ID: i32 = StatusRequestC2s::ID;
+    const ID: i32 = Self::ID;
 
     fn encode_body(&self, _out: &mut Vec<u8>) -> Result<()> {
         Ok(())
@@ -224,15 +224,15 @@ impl StatusPingC2s {
 }
 
 impl<'a> PacketDecode<'a> for StatusPingC2s {
-    const ID: i32 = StatusPingC2s::ID;
+    const ID: i32 = Self::ID;
 
     fn decode_body(input: &mut &'a [u8]) -> Result<Self> {
-        StatusPingC2s::decode_body(input)
+        Self::decode_body(input)
     }
 }
 
 impl PacketEncode for StatusPingC2s {
-    const ID: i32 = StatusPingC2s::ID;
+    const ID: i32 = Self::ID;
 
     fn encode_body(&self, out: &mut Vec<u8>) -> Result<()> {
         write_i64_be(out, self.payload);
@@ -258,7 +258,7 @@ impl<'a> PacketDecode<'a> for StatusResponseS2c<'a> {
     }
 }
 
-impl<'a> PacketEncode for StatusResponseS2c<'a> {
+impl PacketEncode for StatusResponseS2c<'_> {
     const ID: i32 = StatusResponseS2c::ID;
 
     fn encode_body(&self, out: &mut Vec<u8>) -> Result<()> {
@@ -277,15 +277,15 @@ impl StatusPongS2c {
 }
 
 impl<'a> PacketDecode<'a> for StatusPongS2c {
-    const ID: i32 = StatusPongS2c::ID;
+    const ID: i32 = Self::ID;
 
     fn decode_body(input: &mut &'a [u8]) -> Result<Self> {
-        StatusPongS2c::decode_body(input)
+        Self::decode_body(input)
     }
 }
 
 impl PacketEncode for StatusPongS2c {
-    const ID: i32 = StatusPongS2c::ID;
+    const ID: i32 = Self::ID;
 
     fn encode_body(&self, out: &mut Vec<u8>) -> Result<()> {
         write_i64_be(out, self.payload);
@@ -311,7 +311,7 @@ impl<'a> PacketDecode<'a> for LoginDisconnectS2c<'a> {
     }
 }
 
-impl<'a> PacketEncode for LoginDisconnectS2c<'a> {
+impl PacketEncode for LoginDisconnectS2c<'_> {
     const ID: i32 = LoginDisconnectS2c::ID;
 
     fn encode_body(&self, out: &mut Vec<u8>) -> Result<()> {
@@ -358,12 +358,16 @@ impl<'a> LoginStartC2s<'a> {
                 if public_key_len < 0 {
                     return Err(ProtoError::NegativeLength(public_key_len));
                 }
-                let public_key = take(input, public_key_len as usize)?;
+                let public_key_len_usize = usize::try_from(public_key_len)
+                    .map_err(|_| ProtoError::NegativeLength(public_key_len))?;
+                let public_key = take(input, public_key_len_usize)?;
                 let signature_len = read_varint(input)?;
                 if signature_len < 0 {
                     return Err(ProtoError::NegativeLength(signature_len));
                 }
-                let signature = take(input, signature_len as usize)?;
+                let signature_len_usize = usize::try_from(signature_len)
+                    .map_err(|_| ProtoError::NegativeLength(signature_len))?;
+                let signature = take(input, signature_len_usize)?;
                 sig_data = Some(LoginStartSigData {
                     timestamp,
                     public_key,
@@ -395,9 +399,22 @@ impl<'a> LoginStartC2s<'a> {
             write_bool(out, has_sig_data);
             if let Some(sig_data) = self.sig_data {
                 write_i64_be(out, sig_data.timestamp);
-                write_varint(out, sig_data.public_key.len() as i32);
+                let public_key_len_i32 =
+                    i32::try_from(sig_data.public_key.len()).map_err(|_| {
+                        ProtoError::LengthTooLarge {
+                            max: i32::MAX as usize,
+                            actual: sig_data.public_key.len(),
+                        }
+                    })?;
+                write_varint(out, public_key_len_i32);
                 out.extend_from_slice(sig_data.public_key);
-                write_varint(out, sig_data.signature.len() as i32);
+                let signature_len_i32 = i32::try_from(sig_data.signature.len()).map_err(|_| {
+                    ProtoError::LengthTooLarge {
+                        max: i32::MAX as usize,
+                        actual: sig_data.signature.len(),
+                    }
+                })?;
+                write_varint(out, signature_len_i32);
                 out.extend_from_slice(sig_data.signature);
             }
         }
@@ -413,7 +430,7 @@ impl<'a> PacketDecode<'a> for LoginStartC2s<'a> {
     }
 }
 
-impl<'a> PacketEncode for LoginStartC2s<'a> {
+impl PacketEncode for LoginStartC2s<'_> {
     const ID: i32 = LoginStartC2s::ID;
 
     fn encode_body(&self, _out: &mut Vec<u8>) -> Result<()> {

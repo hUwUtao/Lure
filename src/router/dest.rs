@@ -19,8 +19,9 @@ pub enum Address {
 pub struct Destination(Address, u16);
 
 impl Destination {
-    pub fn new(address: Address, port: u16) -> Self {
-        Destination(address, port)
+    #[must_use]
+    pub const fn new(address: Address, port: u16) -> Self {
+        Self(address, port)
     }
 
     /// Parse a destination from a string that MUST contain a port.
@@ -48,11 +49,13 @@ impl Destination {
         parse_with_default_port(s, default_port)
     }
 
-    pub fn address(&self) -> &Address {
+    #[must_use]
+    pub const fn address(&self) -> &Address {
         &self.0
     }
 
-    pub fn port(&self) -> u16 {
+    #[must_use]
+    pub const fn port(&self) -> u16 {
         self.1
     }
 
@@ -91,7 +94,7 @@ impl fmt::Display for Destination {
 
 impl Default for Destination {
     fn default() -> Self {
-        Destination(Address::Ipv4(Ipv4Addr::UNSPECIFIED), 0)
+        Self(Address::Ipv4(Ipv4Addr::UNSPECIFIED), 0)
     }
 }
 
@@ -109,19 +112,22 @@ pub enum ParseDestinationError {
 
 impl fmt::Display for ParseDestinationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use ParseDestinationError::*;
+        use ParseDestinationError::{
+            Empty, InvalidIpv4, InvalidIpv6, InvalidPort, Ipv6RequiresBrackets,
+            MissingClosingBracket, MissingPort, ResolveError,
+        };
         match self {
             Empty => write!(f, "empty input"),
             MissingPort => write!(f, "missing port"),
-            InvalidPort(e) => write!(f, "invalid port: {}", e),
-            InvalidIpv4(e) => write!(f, "invalid IPv4 address: {}", e),
-            InvalidIpv6(e) => write!(f, "invalid IPv6 address: {}", e),
+            InvalidPort(e) => write!(f, "invalid port: {e}"),
+            InvalidIpv4(e) => write!(f, "invalid IPv4 address: {e}"),
+            InvalidIpv6(e) => write!(f, "invalid IPv6 address: {e}"),
             MissingClosingBracket => write!(f, "missing closing ']' for IPv6 literal"),
             Ipv6RequiresBrackets => write!(
                 f,
                 "IPv6 address with port must be bracketed, e.g. [::1]:8080"
             ),
-            ResolveError(e) => write!(f, "failed to resolve hostname: {}", e),
+            ResolveError(e) => write!(f, "failed to resolve hostname: {e}"),
         }
     }
 }
@@ -129,9 +135,9 @@ impl fmt::Display for ParseDestinationError {
 impl StdError for ParseDestinationError {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
-            ParseDestinationError::InvalidPort(e) => Some(e),
-            ParseDestinationError::InvalidIpv4(e) => Some(e),
-            ParseDestinationError::InvalidIpv6(e) => Some(e),
+            Self::InvalidPort(e) => Some(e),
+            Self::InvalidIpv4(e) => Some(e),
+            Self::InvalidIpv6(e) => Some(e),
             _ => None,
         }
     }
@@ -263,9 +269,9 @@ fn parse_host_as_address(host: &str) -> Result<Address, ParseDestinationError> {
 impl FromStr for Destination {
     type Err = ParseDestinationError;
 
-    /// FromStr expects the input to include a port.
+    /// `FromStr` expects the input to include a port.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Destination::parse(s)
+        Self::parse(s)
     }
 }
 
@@ -284,7 +290,7 @@ impl<'de> Deserialize<'de> for Destination {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        Destination::parse(&s).map_err(|err| serde::de::Error::custom(err.to_string()))
+        Self::parse(&s).map_err(|err| serde::de::Error::custom(err.to_string()))
     }
 }
 

@@ -50,8 +50,8 @@ impl ErrorResponder {
         let context = context.into();
         self.disconnect_with_log(client, addr, || {
             let err_msg = err.to_string();
-            let public_reason = format!("Gateway error:\n\n{}", err_msg);
-            let log_reason = format!("{}: {}", context, err_msg);
+            let public_reason = format!("Gateway error:\n\n{err_msg}");
+            let log_reason = format!("{context}: {err_msg}");
             (public_reason, log_reason)
         })
         .await

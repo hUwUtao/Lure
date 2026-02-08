@@ -21,7 +21,7 @@ impl<'de> Deserialize<'de> for Profile {
         D: serde::Deserializer<'de>,
     {
         let state = ProfileWire::deserialize(deserializer)?;
-        Ok(Profile {
+        Ok(Self {
             name: Arc::from(state.name),
             uuid: match state.uuid {
                 Some(value) => Some(parse_uuid(&value).map_err(serde::de::Error::custom)?),

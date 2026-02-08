@@ -17,8 +17,8 @@ fn get_epoll_backend() -> anyhow::Result<Arc<EpollBackend>> {
         match EpollBackend::new(workers, 1024, 8192) {
             Ok(backend) => Ok(Arc::new(backend)),
             Err(e) => {
-                let err_msg = format!("Failed to initialize EpollBackend: {}", e);
-                log::error!("{}", err_msg);
+                let err_msg = format!("Failed to initialize EpollBackend: {e}");
+                log::error!("{err_msg}");
                 Err(err_msg)
             }
         }
@@ -26,11 +26,11 @@ fn get_epoll_backend() -> anyhow::Result<Arc<EpollBackend>> {
 
     result
         .as_ref()
-        .map(|b| b.clone())
-        .map_err(|e| anyhow::anyhow!("{}", e))
+        .map(std::clone::Clone::clone)
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-pub(crate) async fn passthrough_now(
+pub async fn passthrough_now(
     client: &mut net::sock::epoll::Connection,
     server: &mut net::sock::epoll::Connection,
     session: &Session,
@@ -55,12 +55,12 @@ pub(crate) async fn passthrough_now(
     // Dispatch to worker pool (non-blocking async)
     let rx = backend.spawn_pair(client_fd, server_fd)?;
     let done = rx.await.map_err(|e| {
-        ReportableError::from(anyhow::anyhow!("passthrough done channel closed: {}", e))
+        ReportableError::from(anyhow::anyhow!("passthrough done channel closed: {e}"))
     })?;
 
     if done.result < 0 {
         let err = std::io::Error::from_raw_os_error(-done.result);
-        return Err(anyhow::anyhow!("epoll passthrough failed: {}", err));
+        return Err(anyhow::anyhow!("epoll passthrough failed: {err}"));
     }
 
     session.inspect.record_c2s(done.stats.c2s_bytes);

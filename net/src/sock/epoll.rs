@@ -91,19 +91,19 @@ impl Connection {
         Ok(Self { stream, addr })
     }
 
-    pub(crate) fn new(stream: TcpStream, addr: SocketAddr) -> Self {
+    pub(crate) const fn new(stream: TcpStream, addr: SocketAddr) -> Self {
         Self { stream, addr }
     }
 
-    pub fn as_ref(&self) -> &TcpStream {
+    pub const fn as_ref(&self) -> &TcpStream {
         &self.stream
     }
 
-    pub fn as_mut(&mut self) -> &mut TcpStream {
+    pub const fn as_mut(&mut self) -> &mut TcpStream {
         &mut self.stream
     }
 
-    pub fn addr(&self) -> &SocketAddr {
+    pub const fn addr(&self) -> &SocketAddr {
         &self.addr
     }
 
@@ -235,7 +235,7 @@ impl EpollBackend {
 
         let cmd_bytes = unsafe {
             std::slice::from_raw_parts(
-                &cmd as *const EpollCmd as *const u8,
+                (&raw const cmd).cast::<u8>(),
                 std::mem::size_of::<EpollCmd>(),
             )
         };
@@ -246,7 +246,7 @@ impl EpollBackend {
             let rc = unsafe {
                 write(
                     self.workers[idx].cmd_fd,
-                    cmd_bytes[bytes_written..].as_ptr() as *const c_void,
+                    cmd_bytes[bytes_written..].as_ptr().cast::<c_void>(),
                     cmd_bytes.len() - bytes_written,
                 )
             };
@@ -284,7 +284,7 @@ impl EpollBackend {
         };
         let cmd_bytes = unsafe {
             std::slice::from_raw_parts(
-                &cmd as *const EpollCmd as *const u8,
+                (&raw const cmd).cast::<u8>(),
                 std::mem::size_of::<EpollCmd>(),
             )
         };
@@ -296,7 +296,7 @@ impl EpollBackend {
                 let rc = unsafe {
                     write(
                         worker.cmd_fd,
-                        cmd_bytes[bytes_written..].as_ptr() as *const c_void,
+                        cmd_bytes[bytes_written..].as_ptr().cast::<c_void>(),
                         cmd_bytes.len() - bytes_written,
                     )
                 };
@@ -336,10 +336,10 @@ impl Drop for EpollBackend {
             let _ = worker.done_join.join();
         }
         // Join the main done_forward handler thread
-        if let Some(handle) = self.done_forward_handle.take() {
-            if let Err(e) = handle.join() {
-                log::warn!("done_forward_handle join failed: {:?}", e);
-            }
+        if let Some(handle) = self.done_forward_handle.take()
+            && let Err(e) = handle.join()
+        {
+            log::warn!("done_forward_handle join failed: {e:?}");
         }
     }
 }
@@ -350,7 +350,11 @@ fn pin_to_core(core_id: usize) -> io::Result<()> {
         let mut cpu_set: libc::cpu_set_t = std::mem::zeroed();
         libc::CPU_ZERO(&mut cpu_set);
         libc::CPU_SET(core_id, &mut cpu_set);
-        let result = libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &cpu_set);
+        let result = libc::sched_setaffinity(
+            0,
+            std::mem::size_of::<libc::cpu_set_t>(),
+            &raw const cpu_set,
+        );
         if result != 0 {
             return Err(io::Error::last_os_error());
         }
@@ -370,9 +374,9 @@ fn run_c_thread(
     // Pin to specific core if requested
     if let Some(core) = core_id {
         if let Err(e) = pin_to_core(core) {
-            log::warn!("Failed to pin epoll thread to core {}: {}", core, e);
+            log::warn!("Failed to pin epoll thread to core {core}: {e}");
         } else {
-            log::debug!("Pinned epoll thread to core {}", core);
+            log::debug!("Pinned epoll thread to core {core}");
         }
     }
 
@@ -410,7 +414,7 @@ fn forward_done(fd: RawFd, done_tx: Sender<EpollDone>) {
         events: (libc::EPOLLIN | libc::EPOLLERR | libc::EPOLLHUP) as u32,
         u64: 0,
     };
-    if unsafe { libc::epoll_ctl(epoll_fd, libc::EPOLL_CTL_ADD, fd, &mut ev) } < 0 {
+    if unsafe { libc::epoll_ctl(epoll_fd, libc::EPOLL_CTL_ADD, fd, &raw mut ev) } < 0 {
         unsafe {
             libc::close(epoll_fd);
             libc::close(fd);
@@ -444,7 +448,7 @@ fn forward_done(fd: RawFd, done_tx: Sender<EpollDone>) {
             while frame_buf.len() < frame_size {
                 let remaining = frame_size - frame_buf.len();
                 let mut read_buf = vec![0u8; remaining];
-                let bytes = unsafe { read(fd, read_buf.as_mut_ptr() as *mut c_void, remaining) };
+                let bytes = unsafe { read(fd, read_buf.as_mut_ptr().cast::<c_void>(), remaining) };
 
                 if bytes == 0 {
                     // EOF
@@ -468,9 +472,8 @@ fn forward_done(fd: RawFd, done_tx: Sender<EpollDone>) {
                         libc::close(fd);
                     }
                     return;
-                } else {
-                    frame_buf.extend_from_slice(&read_buf[..bytes as usize]);
                 }
+                frame_buf.extend_from_slice(&read_buf[..bytes as usize]);
             }
 
             // If we have a complete frame, decode and send it
@@ -478,7 +481,7 @@ fn forward_done(fd: RawFd, done_tx: Sender<EpollDone>) {
                 let mut frame_data = [0u8; std::mem::size_of::<EpollDone>()];
                 frame_data.copy_from_slice(&frame_buf);
                 let done =
-                    unsafe { std::ptr::read_unaligned(frame_data.as_ptr() as *const EpollDone) };
+                    unsafe { std::ptr::read_unaligned(frame_data.as_ptr().cast::<EpollDone>()) };
                 let _ = done_tx.send(done);
                 frame_buf.clear();
             } else {
@@ -519,15 +522,12 @@ fn set_passthrough_priority() {
 pub fn passthrough(fd_a: RawFd, fd_b: RawFd) -> io::Result<EpollStats> {
     set_passthrough_priority();
     let mut stats = EpollStats::default();
-    let rc = unsafe { lure_epoll_passthrough(fd_a, fd_b, &mut stats as *mut EpollStats) };
+    let rc = unsafe { lure_epoll_passthrough(fd_a, fd_b, &raw mut stats) };
     if rc < 0 {
         return Err(io::Error::from_raw_os_error(-rc));
     }
     if rc > 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "epoll passthrough failed",
-        ));
+        return Err(io::Error::other("epoll passthrough failed"));
     }
     Ok(stats)
 }
@@ -562,6 +562,6 @@ pub async fn passthrough_basic(a: &mut Connection, b: &mut Connection) -> io::Re
         res
     })
     .await
-    .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))??;
+    .map_err(|err| io::Error::other(err.to_string()))??;
     Ok(())
 }

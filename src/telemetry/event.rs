@@ -44,6 +44,7 @@ where
     In: DeserializeOwned + Send + Sync + 'static,
     Out: Serialize + Send + Sync + 'static,
 {
+    #[must_use]
     pub fn new(endpoint: String, retry_interval: Duration) -> Self {
         Self {
             endpoint,
@@ -64,11 +65,11 @@ where
     }
 
     pub fn start(self: Arc<Self>) {
-        let this = self.clone();
+        let this = self;
         tokio::spawn(async move {
             loop {
                 if let Err(e) = this.clone().consume_events().await {
-                    error!("Error consuming events: {}", e);
+                    error!("Error consuming events: {e}");
                 } else {
                     error!("Event stream stopped. Retrying...");
                 }
@@ -100,7 +101,7 @@ where
                 start = line_end + 1;
 
                 let text = std::str::from_utf8(line)
-                    .map_err(|e| anyhow::anyhow!("Received non-UTF8 data: {}", e))?;
+                    .map_err(|e| anyhow::anyhow!("Received non-UTF8 data: {e}"))?;
 
                 let trimmed_text = text.trim(); // This also handles empty lines from just `\n`
                 if trimmed_text.is_empty() || trimmed_text.len() <= 3 {
@@ -108,11 +109,7 @@ where
                 }
 
                 let event: In = serde_json::from_str(trimmed_text).map_err(|e| {
-                    anyhow::anyhow!(
-                        "Failed to deserialize event: `{}`. Error: {}",
-                        trimmed_text,
-                        e
-                    )
+                    anyhow::anyhow!("Failed to deserialize event: `{trimmed_text}`. Error: {e}")
                 })?;
 
                 for consumer in consumers.iter() {
@@ -140,7 +137,7 @@ where
 mod test {
     use serde::Deserialize;
 
-    use super::*;
+    use super::{Arc, Duration, EventHook, EventService, Serialize, async_trait};
     // Example consumer implementation
     struct MyHook;
 
@@ -158,7 +155,7 @@ mod test {
             _: &Arc<EventService<MyEvent, MyEvent>>,
             event: &MyEvent,
         ) -> anyhow::Result<()> {
-            println!("Consumed event: {:?}", event);
+            println!("Consumed event: {event:?}");
             Ok(())
         }
     }
@@ -185,7 +182,7 @@ mod test {
             })
             .await
         {
-            eprintln!("Failed to produce event: {}", e);
+            eprintln!("Failed to produce event: {e}");
         }
         Ok(())
     }

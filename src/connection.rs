@@ -32,6 +32,7 @@ pub struct LoginStartFrame<'a> {
     pub raw: Vec<u8>,
 }
 
+#[derive(Clone, Copy, Debug)]
 pub enum SocketIntent {
     GreetToProxy,
     GreetToBackend,
@@ -69,7 +70,7 @@ struct VersionedLoginStart<'a, 'b> {
     protocol_version: i32,
 }
 
-impl<'a, 'b> PacketEncode for VersionedLoginStart<'a, 'b> {
+impl PacketEncode for VersionedLoginStart<'_, '_> {
     const ID: i32 = LoginStartC2s::ID;
 
     fn encode_body(&self, out: &mut Vec<u8>) -> net::mc::Result<()> {
@@ -248,11 +249,11 @@ impl<'a> EncodedConnection<'a> {
         Ok(())
     }
 
-    pub fn as_inner_mut(&mut self) -> &mut LureConnection {
+    pub const fn as_inner_mut(&mut self) -> &mut LureConnection {
         self.stream
     }
 
-    pub fn as_inner(&self) -> &LureConnection {
+    pub const fn as_inner(&self) -> &LureConnection {
         self.stream
     }
 

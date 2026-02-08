@@ -46,19 +46,19 @@ impl Connection {
         Ok(Self { stream, addr })
     }
 
-    pub(crate) fn new(stream: TcpStream, addr: SocketAddr) -> Self {
+    pub(crate) const fn new(stream: TcpStream, addr: SocketAddr) -> Self {
         Self { stream, addr }
     }
 
-    pub fn as_ref(&self) -> &TcpStream {
+    pub const fn as_ref(&self) -> &TcpStream {
         &self.stream
     }
 
-    pub fn as_mut(&mut self) -> &mut TcpStream {
+    pub const fn as_mut(&mut self) -> &mut TcpStream {
         &mut self.stream
     }
 
-    pub fn addr(&self) -> &SocketAddr {
+    pub const fn addr(&self) -> &SocketAddr {
         &self.addr
     }
 

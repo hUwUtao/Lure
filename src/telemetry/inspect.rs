@@ -16,7 +16,7 @@ pub struct TunnelTokenInspect {
     pub created_ms_ago: u64,
     /// Age since last successful use (best-effort, monotonic clock), in milliseconds.
     pub last_used_ms_ago: u64,
-    /// Whether an agent is currently registered for this key_id.
+    /// Whether an agent is currently registered for this `key_id`.
     pub has_agent: bool,
 }
 

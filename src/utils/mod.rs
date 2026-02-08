@@ -16,7 +16,7 @@ pub struct OwnedStatic<T: 'static>(&'static T);
 
 impl<T> From<&'static T> for OwnedStatic<T> {
     fn from(value: &'static T) -> Self {
-        OwnedStatic(value)
+        Self(value)
     }
 }
 

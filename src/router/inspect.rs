@@ -56,7 +56,8 @@ impl TrafficCountersAtomic {
         let now_ms = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or(std::time::Duration::ZERO)
-            .as_millis() as u64;
+            .as_millis();
+        let now_ms = u64::try_from(now_ms).unwrap_or(u64::MAX);
         let c2s_bytes = self.c2s_bytes.load();
         let s2c_bytes = self.s2c_bytes.load();
 
@@ -101,7 +102,7 @@ pub struct TrafficCountersShared {
 }
 
 impl TrafficCountersShared {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             c2s_bytes: AtomicU64::new(0),
             s2c_bytes: AtomicU64::new(0),
@@ -127,7 +128,8 @@ impl TrafficCountersShared {
         let now_ms = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or(std::time::Duration::ZERO)
-            .as_millis() as u64;
+            .as_millis();
+        let now_ms = u64::try_from(now_ms).unwrap_or(u64::MAX);
         let c2s_bytes = self.c2s_bytes.load(Ordering::Relaxed);
         let s2c_bytes = self.s2c_bytes.load(Ordering::Relaxed);
 
@@ -169,7 +171,7 @@ pub struct RouteStatsAtomic {
 }
 
 impl RouteStatsAtomic {
-    fn new(id: u64, zone: u64) -> Self {
+    const fn new(id: u64, zone: u64) -> Self {
         Self {
             id,
             zone: AtomicU64::new(zone),
@@ -216,7 +218,7 @@ pub struct TenantStatsAtomic {
 }
 
 impl TenantStatsAtomic {
-    fn new(zone: u64) -> Self {
+    const fn new(zone: u64) -> Self {
         Self {
             zone,
             active_sessions: AtomicU64::new(0),
@@ -291,8 +293,8 @@ impl InstanceStatsAtomic {
 
     pub fn snapshot(&self) -> InstanceStats {
         InstanceStats {
-            inst: self.inst.get().cloned().unwrap_or_else(|| "".to_string()),
-            uptime_ms: self.started_at.elapsed().as_millis() as u64,
+            inst: self.inst.get().cloned().unwrap_or_else(String::new),
+            uptime_ms: u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
             routes_active: self.routes_active.load(Ordering::Relaxed),
             sessions_active: self.sessions_active.load(Ordering::Relaxed),
             traffic: self.traffic.snapshot(),
@@ -365,7 +367,7 @@ impl SessionInspectState {
         tenant: Arc<TenantStatsAtomic>,
         instance: Arc<InstanceStatsAtomic>,
     ) -> Self {
-        let now_ms = instance.started_at.elapsed().as_millis() as u64;
+        let now_ms = u64::try_from(instance.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         let state = Self {
             id,
             zone,
@@ -385,14 +387,16 @@ impl SessionInspectState {
 
     pub fn record_c2s(&self, bytes: u64) {
         self.traffic.record_c2s(bytes);
-        self.last_activity_ms
-            .store(self.instance.started_at.elapsed().as_millis() as u64);
+        self.last_activity_ms.store(
+            u64::try_from(self.instance.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+        );
     }
 
     pub fn record_s2c(&self, bytes: u64) {
         self.traffic.record_s2c(bytes);
-        self.last_activity_ms
-            .store(self.instance.started_at.elapsed().as_millis() as u64);
+        self.last_activity_ms.store(
+            u64::try_from(self.instance.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+        );
     }
 
     pub fn session_stats_snapshot(&self) -> SessionStats {

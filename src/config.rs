@@ -18,11 +18,13 @@ const DEFAULT_ROUTE_ID_BASE: u64 = u64::MAX - u32::MAX as u64;
 pub struct ProxySigningKey(Vec<u8>);
 
 impl ProxySigningKey {
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
 
-    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+    #[must_use]
+    pub const fn from_bytes(bytes: Vec<u8>) -> Self {
         Self(bytes)
     }
 
@@ -54,7 +56,7 @@ impl<'de> Deserialize<'de> for ProxySigningKey {
 
         let repr = ProxySigningKeyRepr::deserialize(deserializer)?;
         let bytes = match repr {
-            ProxySigningKeyRepr::Base64(value) => match ProxySigningKey::from_base64(&value) {
+            ProxySigningKeyRepr::Base64(value) => match Self::from_base64(&value) {
                 Ok(key) => return Ok(key),
                 Err(err) => {
                     warn!("proxy_signing_key is not valid base64: {err}");
@@ -63,7 +65,7 @@ impl<'de> Deserialize<'de> for ProxySigningKey {
             },
             ProxySigningKeyRepr::Raw(bytes) => bytes,
         };
-        Ok(ProxySigningKey(bytes))
+        Ok(Self(bytes))
     }
 }
 
@@ -140,7 +142,7 @@ pub struct RouteFlagsConfig {
     pub tunnel: bool,
     /// Authentication mode: "public", "protected", "restricted"
     pub auth_mode: String,
-    /// For auth_mode = "restricted", list of allowed token key_ids
+    /// For `auth_mode` = "restricted", list of allowed token `key_ids`
     pub allowed_tokens: Vec<String>,
 }
 
@@ -174,7 +176,7 @@ fn default_bind() -> String {
     "0.0.0.0:25577".to_string()
 }
 
-fn default_max_conn() -> u32 {
+const fn default_max_conn() -> u32 {
     65535
 }
 
@@ -229,11 +231,12 @@ impl LureConfig {
             .collect()
     }
 
+    #[must_use]
     pub fn string_value(&self, key: &str) -> Arc<str> {
         self.strings
             .get(key)
             .cloned()
-            .unwrap_or(Arc::from(format!("{key}-is-not-written")))
+            .unwrap_or_else(|| Arc::from(format!("{key}-is-not-written")))
     }
 }
 
@@ -349,8 +352,7 @@ impl RouteFlagsConfig {
                 })
             }
             other => anyhow::bail!(
-                "route entry {route_offset} has invalid auth_mode \"{}\", must be \"public\", \"protected\", or \"restricted\"",
-                other
+                "route entry {route_offset} has invalid auth_mode \"{other}\", must be \"public\", \"protected\", or \"restricted\""
             ),
         }
     }

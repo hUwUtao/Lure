@@ -40,7 +40,8 @@ impl Default for ThreatControlService {
 }
 
 impl ThreatControlService {
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self {}
     }
     /// A `timeout` wrapper with actual determination clause of failure. To control, report and handle

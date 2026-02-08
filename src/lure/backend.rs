@@ -14,14 +14,14 @@ use crate::{
 mod headers;
 use headers::create_proxy_protocol_header;
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum BackendConnectError {
+pub enum BackendConnectError {
     #[error("backend connect failed")]
     Connect(#[source] anyhow::Error),
     #[error("backend handshake failed")]
     Handshake(#[source] anyhow::Error),
 }
 
-pub(crate) async fn connect(
+pub async fn connect(
     address: SocketAddr,
     handshake: &OwnedHandshake,
     endpoint_host: Option<&str>,
@@ -110,7 +110,7 @@ async fn init_handshake(
 
 async fn open_backend_connection(address: SocketAddr) -> anyhow::Result<LureConnection> {
     let stream = timeout(Duration::from_secs(3), LureConnection::connect(address)).await??;
-    debug!("Connected to backend: {}", address);
+    debug!("Connected to backend: {address}");
 
     if dotenvy::var("NO_NODELAY").is_err()
         && let Err(e) = stream.set_nodelay(true)

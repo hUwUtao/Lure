@@ -2,7 +2,7 @@ use serde_json::json;
 
 use crate::{config::LureConfig, connection::EncodedConnection};
 
-pub(crate) fn placeholder_status_response(brand: &str, message: &str) -> String {
+pub fn placeholder_status_response(brand: &str, message: &str) -> String {
     json!({
         "version": {
             "name": brand,
@@ -15,13 +15,13 @@ pub(crate) fn placeholder_status_response(brand: &str, message: &str) -> String 
     .to_string()
 }
 
-pub(crate) fn placeholder_status_json(config: &LureConfig, label: &str) -> String {
+pub fn placeholder_status_json(config: &LureConfig, label: &str) -> String {
     let brand = config.string_value("SERVER_LIST_BRAND");
     let target_label = config.string_value(label);
     placeholder_status_response(brand.as_ref(), target_label.as_ref())
 }
 
-pub(crate) async fn send_status_failure(
+pub async fn send_status_failure(
     client: &mut EncodedConnection<'_>,
     config: &LureConfig,
     label: &str,

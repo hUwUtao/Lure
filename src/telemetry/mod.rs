@@ -17,9 +17,11 @@ use crate::{
     },
 };
 
+#[must_use]
 pub fn get_meter() -> Meter {
     global::meter_provider().meter("alure")
 }
+#[must_use]
 pub fn get_tracer() -> BoxedTracer {
     global::tracer_provider().tracer("alure")
 }
@@ -38,7 +40,7 @@ pub(crate) struct NonObj<T> {
 }
 
 impl<T> NonObj<T> {
-    pub fn new(v: T) -> Self {
+    pub const fn new(v: T) -> Self {
         Self { _v: v }
     }
 }
@@ -64,7 +66,7 @@ pub(crate) enum EventEnvelope {
     HandshakeIdent(EventIdent),
 }
 
-pub type EventServiceInstance = Arc<EventService<EventEnvelope, EventEnvelope>>;
+pub(crate) type EventServiceInstance = Arc<EventService<EventEnvelope, EventEnvelope>>;
 
 pub(crate) fn init_event(url: String) -> Arc<EventService<EventEnvelope, EventEnvelope>> {
     let service: EventService<EventEnvelope, EventEnvelope> =
