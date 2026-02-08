@@ -1,0 +1,67 @@
+name: Release Pack
+
+on:
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  pack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install OS deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zip
+          sudo rm -rf /var/lib/apt/lists/*
+
+      - name: Setup zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      - name: Setup Rust (pinned)
+        run: |
+          rustup toolchain install nightly-2026-02-06 --profile minimal --component clippy rustfmt
+          rustup default nightly-2026-02-06
+
+      - name: Cache cargo + build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            Lure/target-releasepack/
+          key: ${{ runner.os }}-releasepack-${{ hashFiles('Lure/Cargo.lock', 'Lure/Cargo.toml', 'Lure/net/Cargo.toml', 'Lure/tun/Cargo.toml', 'Lure/scripts/release_pack.sh', 'Lure/rust-toolchain.toml') }}
+
+      - name: Build packs
+        run: |
+          cd Lure
+          ./scripts/release_pack.sh
+
+      - name: Upload flat bins (for GHA)
+        uses: actions/upload-artifact@v4
+        with:
+          name: gha-bins
+          path: Lure/dist/gha/**
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Upload archives
+        uses: actions/upload-artifact@v4
+        with:
+          name: archives
+          path: |
+            Lure/dist/*.tar.gz
+            Lure/dist/*.zip
+            Lure/dist/SHA256SUMS
+          if-no-files-found: error
+          overwrite: true
+

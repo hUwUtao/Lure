@@ -1,0 +1,5 @@
+[toolchain]
+# Pinned for reproducible CI builds (release packs use cargo-zigbuild + zig).
+channel = "nightly-2026-02-06"
+profile = "minimal"
+components = ["clippy", "rustfmt"]
