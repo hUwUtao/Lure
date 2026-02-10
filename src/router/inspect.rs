@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Instant, SystemTime},
 };
@@ -314,6 +314,7 @@ pub struct SessionInspectState {
     pub zone: u64,
     pub route_id: u64,
     pub hostname: String,
+    pub tunnel: AtomicBool,
     pub created_at_ms: u64,
     pub last_activity_ms: UnsafeCounterU64,
     pub traffic: TrafficCountersAtomic,
@@ -329,6 +330,7 @@ struct SessionInspectReportFormat {
     zone: u64,
     route_id: u64,
     hostname: String,
+    tunnel: bool,
     created_at_ms: u64,
     last_activity_ms: u64,
     traffic: TrafficCounters,
@@ -341,6 +343,7 @@ impl From<&SessionInspectState> for SessionInspectReportFormat {
             zone: state.zone,
             route_id: state.route_id,
             hostname: state.hostname.clone(),
+            tunnel: state.tunnel.load(Ordering::Relaxed),
             created_at_ms: state.created_at_ms,
             last_activity_ms: state.last_activity_ms.load(),
             traffic: state.traffic.snapshot(),
@@ -373,6 +376,7 @@ impl SessionInspectState {
             zone,
             route_id,
             hostname,
+            tunnel: AtomicBool::new(false),
             created_at_ms: now_ms,
             last_activity_ms: UnsafeCounterU64::default(),
             traffic: TrafficCountersAtomic::new(),
@@ -383,6 +387,10 @@ impl SessionInspectState {
         };
         state.last_activity_ms.store(now_ms);
         state
+    }
+
+    pub fn set_tunnel(&self, enabled: bool) {
+        self.tunnel.store(enabled, Ordering::Relaxed);
     }
 
     pub fn record_c2s(&self, bytes: u64) {
@@ -495,6 +503,7 @@ pub fn inspect_session_to_view(
         destination_addr,
         hostname: state.hostname.clone(),
         endpoint_host,
+        tunnel: state.tunnel.load(Ordering::Relaxed),
         created_at_ms: state.created_at_ms,
         last_activity_ms: state.last_activity_ms.load(),
         traffic: state.traffic.snapshot(),

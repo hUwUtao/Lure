@@ -723,6 +723,7 @@ impl Lure {
 
         if requested_tunnel {
             if let Some(key_id) = resolved_key_id {
+                session.inspect.set_tunnel(true);
                 let _ = self
                     .handle_tunnel_session(
                         client,
@@ -757,6 +758,7 @@ impl Lure {
 
         // Either tunnel wasn't requested, or it was best-effort and no key exists: use normal proxy.
         {
+            session.inspect.set_tunnel(false);
             let _ = self
                 .handle_proxy_session(client, handshake, route.as_ref(), &session, &login_raw)
                 .await

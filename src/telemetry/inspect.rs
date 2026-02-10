@@ -74,6 +74,8 @@ pub struct SessionInspect {
     pub destination_addr: String,
     pub hostname: String,
     pub endpoint_host: String,
+    #[serde(default)]
+    pub tunnel: bool,
     pub created_at_ms: u64,
     pub last_activity_ms: u64,
     pub traffic: TrafficCounters,
