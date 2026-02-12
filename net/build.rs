@@ -7,6 +7,8 @@ fn main() {
         return;
     }
 
+    println!("cargo:rustc-link-lib=pthread");
+
     cc::Build::new()
         .file("src/sock/epoll.c")
         .include("src/sock")

@@ -2,19 +2,25 @@ use std::{
     io,
     net::SocketAddr,
     os::fd::{AsRawFd, RawFd},
+    ptr,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering},
     },
     thread,
 };
 
-use crossbeam_channel::Sender;
-use dashmap::DashMap;
-use libc::{
-    O_CLOEXEC, O_NONBLOCK, PRIO_PROCESS, c_int, c_void, close, dup, pipe2, read, setpriority, write,
-};
+use libc::{c_int, c_void, close, dup};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::time::{Duration, sleep};
+
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EpollDone {
+    pub id: u64,
+    pub stats: EpollStats,
+    pub result: c_int,
+}
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
@@ -26,36 +32,179 @@ pub struct EpollStats {
 }
 
 #[repr(C)]
-#[derive(Debug, Default, Clone, Copy)]
-struct EpollCmd {
+#[derive(Debug, Clone, Copy)]
+struct LureEpollShared {
     fd_a: c_int,
     fd_b: c_int,
-    id: u64,
+    c2s_bytes: u64,
+    s2c_bytes: u64,
+    c2s_chunks: u64,
+    s2c_chunks: u64,
+    result: c_int,
+    state_flags: u32,
+    abort_flag: u32,
+}
+
+impl LureEpollShared {
+    const fn new(fd_a: c_int, fd_b: c_int) -> Self {
+        Self {
+            fd_a,
+            fd_b,
+            c2s_bytes: 0,
+            s2c_bytes: 0,
+            c2s_chunks: 0,
+            s2c_chunks: 0,
+            result: 0,
+            state_flags: 0,
+            abort_flag: 0,
+        }
+    }
+
+    unsafe fn stats_volatile(&self) -> EpollStats {
+        EpollStats {
+            c2s_bytes: unsafe { ptr::read_volatile(&raw const self.c2s_bytes) },
+            s2c_bytes: unsafe { ptr::read_volatile(&raw const self.s2c_bytes) },
+            c2s_chunks: unsafe { ptr::read_volatile(&raw const self.c2s_chunks) },
+            s2c_chunks: unsafe { ptr::read_volatile(&raw const self.s2c_chunks) },
+        }
+    }
+
+    unsafe fn state_flags_volatile(&self) -> u32 {
+        unsafe { ptr::read_volatile(&raw const self.state_flags) }
+    }
+
+    unsafe fn result_volatile(&self) -> c_int {
+        unsafe { ptr::read_volatile(&raw const self.result) }
+    }
+
+    unsafe fn set_abort_once(&mut self) {
+        if unsafe { ptr::read_volatile(&raw const self.abort_flag) } == 0 {
+            unsafe { ptr::write_volatile(&raw mut self.abort_flag, 1) };
+        }
+    }
 }
 
 #[repr(C)]
-#[derive(Debug, Default, Clone, Copy)]
-pub struct EpollDone {
-    pub id: u64,
-    pub stats: EpollStats,
-    pub result: c_int,
-}
-
-#[repr(C)]
-struct LureEpollThread {
+struct LureEpollConnection {
     _private: [u8; 0],
 }
 
+const LURE_EPOLL_DONE: u32 = 1u32 << 1;
+
+#[derive(Default)]
+struct StartupFailSignal {
+    failed: AtomicBool,
+    err: AtomicI32,
+}
+
 unsafe extern "C" {
-    fn lure_epoll_thread_new(
-        cmd_fd: c_int,
-        done_fd: c_int,
-        max_conns: usize,
-        buf_cap: usize,
-    ) -> *mut LureEpollThread;
-    fn lure_epoll_thread_run(thread: *mut LureEpollThread) -> c_int;
-    fn lure_epoll_thread_free(thread: *mut LureEpollThread);
-    fn lure_epoll_passthrough(fd_a: c_int, fd_b: c_int, stats: *mut EpollStats) -> c_int;
+    fn lure_epoll_connection_main(
+        shared: *mut LureEpollShared,
+        on_startup_fail: unsafe extern "C" fn(*mut c_void, c_int),
+        user_data: *mut c_void,
+        out_conn: *mut *mut LureEpollConnection,
+    ) -> c_int;
+    fn lure_epoll_connection_join(conn: *mut LureEpollConnection) -> c_int;
+    fn lure_epoll_connection_free(conn: *mut LureEpollConnection);
+}
+
+pub struct EpollBackend {
+    next_id: AtomicU64,
+    shutdown: AtomicBool,
+}
+
+#[derive(Default)]
+pub struct EpollProgress {
+    c2s_bytes: AtomicU64,
+    s2c_bytes: AtomicU64,
+    c2s_chunks: AtomicU64,
+    s2c_chunks: AtomicU64,
+}
+
+impl EpollProgress {
+    fn store_stats(&self, stats: EpollStats) {
+        self.c2s_bytes.store(stats.c2s_bytes, Ordering::Relaxed);
+        self.s2c_bytes.store(stats.s2c_bytes, Ordering::Relaxed);
+        self.c2s_chunks.store(stats.c2s_chunks, Ordering::Relaxed);
+        self.s2c_chunks.store(stats.s2c_chunks, Ordering::Relaxed);
+    }
+
+    pub fn snapshot(&self) -> EpollStats {
+        EpollStats {
+            c2s_bytes: self.c2s_bytes.load(Ordering::Relaxed),
+            s2c_bytes: self.s2c_bytes.load(Ordering::Relaxed),
+            c2s_chunks: self.c2s_chunks.load(Ordering::Relaxed),
+            s2c_chunks: self.s2c_chunks.load(Ordering::Relaxed),
+        }
+    }
+}
+
+impl EpollBackend {
+    pub fn new(_worker_threads: usize, _max_conns: usize, _buf_cap: usize) -> io::Result<Self> {
+        Ok(Self {
+            next_id: AtomicU64::new(1),
+            shutdown: AtomicBool::new(false),
+        })
+    }
+
+    pub fn spawn_pair(
+        &self,
+        fd_a: RawFd,
+        fd_b: RawFd,
+    ) -> io::Result<tokio::sync::oneshot::Receiver<EpollDone>> {
+        let (rx, _) = self.spawn_pair_observed(fd_a, fd_b)?;
+        Ok(rx)
+    }
+
+    pub fn spawn_pair_observed(
+        &self,
+        fd_a: RawFd,
+        fd_b: RawFd,
+    ) -> io::Result<(tokio::sync::oneshot::Receiver<EpollDone>, Arc<EpollProgress>)> {
+        if self.shutdown.load(Ordering::Relaxed) {
+            close_fd(fd_a);
+            close_fd(fd_b);
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "epoll backend is shutting down",
+            ));
+        }
+
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let progress = Arc::new(EpollProgress::default());
+        let rt = tokio::runtime::Handle::current();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let progress_bg = Arc::clone(&progress);
+        thread::Builder::new()
+            .name(format!("lure-epoll-conn-{id}"))
+            .spawn(move || {
+                let done = run_pair_blocking(fd_a, fd_b, id, Some(progress_bg), rt);
+                let _ = tx.send(done);
+            })
+            .map_err(io::Error::other)?;
+        Ok((rx, progress))
+    }
+
+    pub fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Drop for EpollBackend {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+unsafe extern "C" fn startup_fail_cb(user_data: *mut c_void, err: c_int) {
+    if user_data.is_null() {
+        return;
+    }
+
+    // Callback can run on C threads. We only publish startup failure bits.
+    let signal = unsafe { &*(user_data.cast::<StartupFailSignal>()) };
+    signal.err.store(err, Ordering::Relaxed);
+    signal.failed.store(true, Ordering::Release);
 }
 
 #[derive(Debug)]
@@ -146,392 +295,6 @@ impl Connection {
     }
 }
 
-struct WorkerHandle {
-    cmd_fd: RawFd,
-    join: thread::JoinHandle<()>,
-    done_join: thread::JoinHandle<()>,
-}
-
-pub struct EpollBackend {
-    workers: Vec<WorkerHandle>,
-    rr: AtomicUsize,
-    next_id: AtomicU64,
-    pending: Arc<DashMap<u64, tokio::sync::oneshot::Sender<EpollDone>>>,
-    shutdown: AtomicBool,
-    done_forward_handle: Option<thread::JoinHandle<()>>,
-}
-
-impl EpollBackend {
-    pub fn new(worker_threads: usize, max_conns: usize, buf_cap: usize) -> io::Result<Self> {
-        let (done_tx, done_rx) = crossbeam_channel::unbounded::<EpollDone>();
-        let pending: Arc<DashMap<u64, tokio::sync::oneshot::Sender<EpollDone>>> =
-            Arc::new(DashMap::new());
-        let pending_forward = Arc::clone(&pending);
-
-        let done_forward_handle = thread::Builder::new()
-            .name("lure-epoll-done".to_string())
-            .spawn(move || {
-                while let Ok(done) = done_rx.recv() {
-                    if let Some((_, tx)) = pending_forward.remove(&done.id) {
-                        let _ = tx.send(done);
-                    }
-                }
-            })?;
-
-        let mut workers = Vec::with_capacity(worker_threads.max(1));
-        for index in 0..worker_threads.max(1) {
-            let (cmd_read, cmd_write) = make_pipe()?;
-            let (done_read, done_write) = make_pipe()?;
-
-            let done_tx = done_tx.clone();
-            let done_join = thread::Builder::new()
-                .name(format!("lure-epoll-done-{index}"))
-                .spawn(move || forward_done(done_read, done_tx))?;
-
-            let join = thread::Builder::new()
-                .name(format!("lure-epoll-{index}"))
-                .spawn(move || {
-                    // Pin to core only if we have enough cores
-                    let core_id = if worker_threads <= num_cpus::get() {
-                        Some(index)
-                    } else {
-                        None
-                    };
-                    run_c_thread(cmd_read, done_write, max_conns, buf_cap, core_id);
-                })?;
-
-            workers.push(WorkerHandle {
-                cmd_fd: cmd_write,
-                join,
-                done_join,
-            });
-        }
-
-        Ok(Self {
-            workers,
-            rr: AtomicUsize::new(0),
-            next_id: AtomicU64::new(1),
-            pending,
-            shutdown: AtomicBool::new(false),
-            done_forward_handle: Some(done_forward_handle),
-        })
-    }
-
-    pub fn spawn_pair(
-        &self,
-        fd_a: RawFd,
-        fd_b: RawFd,
-    ) -> io::Result<tokio::sync::oneshot::Receiver<EpollDone>> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.pending.insert(id, tx);
-
-        let idx = self.rr.fetch_add(1, Ordering::Relaxed) % self.workers.len();
-        let cmd = EpollCmd {
-            fd_a: fd_a as c_int,
-            fd_b: fd_b as c_int,
-            id,
-        };
-
-        let cmd_bytes = unsafe {
-            std::slice::from_raw_parts(
-                (&raw const cmd).cast::<u8>(),
-                std::mem::size_of::<EpollCmd>(),
-            )
-        };
-        let mut bytes_written = 0;
-        let mut backoff_ms = 1u64;
-
-        loop {
-            let rc = unsafe {
-                write(
-                    self.workers[idx].cmd_fd,
-                    cmd_bytes[bytes_written..].as_ptr().cast::<c_void>(),
-                    cmd_bytes.len() - bytes_written,
-                )
-            };
-
-            if rc < 0 {
-                let err = std::io::Error::last_os_error();
-                if err.kind() == std::io::ErrorKind::WouldBlock {
-                    // Exponential backoff: retry indefinitely with growing sleep duration
-                    thread::sleep(std::time::Duration::from_millis(backoff_ms));
-                    backoff_ms = (backoff_ms * 2).min(10); // Cap at 10ms instead of 100ms
-                    continue;
-                }
-                let _ = unsafe { close(fd_a) };
-                let _ = unsafe { close(fd_b) };
-                let _ = self.pending.remove(&id);
-                return Err(err);
-            }
-
-            bytes_written += rc as usize;
-            if bytes_written >= cmd_bytes.len() {
-                break;
-            }
-            backoff_ms = 1; // Reset backoff on successful partial write
-        }
-
-        Ok(rx)
-    }
-
-    pub fn shutdown(&self) {
-        self.shutdown.store(true, Ordering::Relaxed);
-        let cmd = EpollCmd {
-            fd_a: -1,
-            fd_b: -1,
-            id: 0,
-        };
-        let cmd_bytes = unsafe {
-            std::slice::from_raw_parts(
-                (&raw const cmd).cast::<u8>(),
-                std::mem::size_of::<EpollCmd>(),
-            )
-        };
-        for worker in &self.workers {
-            let mut bytes_written = 0;
-            let mut backoff_ms = 1u64;
-
-            loop {
-                let rc = unsafe {
-                    write(
-                        worker.cmd_fd,
-                        cmd_bytes[bytes_written..].as_ptr().cast::<c_void>(),
-                        cmd_bytes.len() - bytes_written,
-                    )
-                };
-
-                if rc < 0 {
-                    let err = std::io::Error::last_os_error();
-                    if err.kind() == std::io::ErrorKind::WouldBlock {
-                        // Exponential backoff: retry indefinitely with growing sleep duration
-                        thread::sleep(std::time::Duration::from_millis(backoff_ms));
-                        backoff_ms = (backoff_ms * 2).min(10); // Cap at 10ms instead of 100ms
-                        continue;
-                    }
-                    break;
-                }
-
-                bytes_written += rc as usize;
-                if bytes_written >= cmd_bytes.len() {
-                    break;
-                }
-                backoff_ms = 1; // Reset backoff on successful partial write
-            }
-        }
-    }
-}
-
-impl Drop for EpollBackend {
-    fn drop(&mut self) {
-        self.shutdown();
-        for worker in &self.workers {
-            unsafe {
-                let _ = close(worker.cmd_fd);
-            }
-        }
-        // Give threads time to exit gracefully (1 second timeout per thread)
-        for worker in self.workers.drain(..) {
-            let _ = worker.join.join();
-            let _ = worker.done_join.join();
-        }
-        // Join the main done_forward handler thread
-        if let Some(handle) = self.done_forward_handle.take()
-            && let Err(e) = handle.join()
-        {
-            log::warn!("done_forward_handle join failed: {e:?}");
-        }
-    }
-}
-
-fn pin_to_core(core_id: usize) -> io::Result<()> {
-    #[cfg(target_os = "linux")]
-    unsafe {
-        let mut cpu_set: libc::cpu_set_t = std::mem::zeroed();
-        libc::CPU_ZERO(&mut cpu_set);
-        libc::CPU_SET(core_id, &mut cpu_set);
-        let result = libc::sched_setaffinity(
-            0,
-            std::mem::size_of::<libc::cpu_set_t>(),
-            &raw const cpu_set,
-        );
-        if result != 0 {
-            return Err(io::Error::last_os_error());
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    let _ = core_id;
-    Ok(())
-}
-
-fn run_c_thread(
-    cmd_fd: RawFd,
-    done_fd: RawFd,
-    max_conns: usize,
-    buf_cap: usize,
-    core_id: Option<usize>,
-) {
-    // Pin to specific core if requested
-    if let Some(core) = core_id {
-        if let Err(e) = pin_to_core(core) {
-            log::warn!("Failed to pin epoll thread to core {core}: {e}");
-        } else {
-            log::debug!("Pinned epoll thread to core {core}");
-        }
-    }
-
-    set_worker_priority();
-
-    let thread =
-        unsafe { lure_epoll_thread_new(cmd_fd as c_int, done_fd as c_int, max_conns, buf_cap) };
-    if thread.is_null() {
-        unsafe {
-            let _ = close(cmd_fd);
-            let _ = close(done_fd);
-        }
-        return;
-    }
-
-    let _ = unsafe { lure_epoll_thread_run(thread) };
-
-    unsafe {
-        lure_epoll_thread_free(thread);
-        let _ = close(cmd_fd);
-        let _ = close(done_fd);
-    }
-}
-
-fn forward_done(fd: RawFd, done_tx: Sender<EpollDone>) {
-    // Create dedicated epoll instance for done pipe to avoid polling
-    let epoll_fd = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
-    if epoll_fd < 0 {
-        unsafe { libc::close(fd) };
-        return;
-    }
-
-    // Register done_read fd for EPOLLIN events
-    let mut ev = libc::epoll_event {
-        events: (libc::EPOLLIN | libc::EPOLLERR | libc::EPOLLHUP) as u32,
-        u64: 0,
-    };
-    if unsafe { libc::epoll_ctl(epoll_fd, libc::EPOLL_CTL_ADD, fd, &raw mut ev) } < 0 {
-        unsafe {
-            libc::close(epoll_fd);
-            libc::close(fd);
-        }
-        return;
-    }
-
-    let mut events = [libc::epoll_event { events: 0, u64: 0 }; 1];
-    let frame_size = std::mem::size_of::<EpollDone>();
-    let mut frame_buf: Vec<u8> = Vec::with_capacity(frame_size);
-
-    loop {
-        // Wait for events with 100ms timeout for clean shutdown
-        let n = unsafe { libc::epoll_wait(epoll_fd, events.as_mut_ptr(), 1, 100) };
-
-        if n < 0 {
-            if unsafe { *libc::__errno_location() } == libc::EINTR {
-                continue;
-            }
-            break;
-        }
-
-        if n == 0 {
-            // Timeout - loop back to check for more events
-            continue;
-        }
-
-        // Data available - read frame-aligned notifications
-        loop {
-            // Read frame-sized chunks to minimize syscalls
-            while frame_buf.len() < frame_size {
-                let remaining = frame_size - frame_buf.len();
-                let mut read_buf = vec![0u8; remaining];
-                let bytes = unsafe { read(fd, read_buf.as_mut_ptr().cast::<c_void>(), remaining) };
-
-                if bytes == 0 {
-                    // EOF
-                    unsafe {
-                        libc::close(epoll_fd);
-                        libc::close(fd);
-                    }
-                    return;
-                } else if bytes < 0 {
-                    let errno = unsafe { *libc::__errno_location() };
-                    if errno == libc::EINTR {
-                        continue; // Retry on EINTR
-                    }
-                    if errno == libc::EAGAIN || errno == libc::EWOULDBLOCK {
-                        // No more data available
-                        break;
-                    }
-                    // Fatal error
-                    unsafe {
-                        libc::close(epoll_fd);
-                        libc::close(fd);
-                    }
-                    return;
-                }
-                frame_buf.extend_from_slice(&read_buf[..bytes as usize]);
-            }
-
-            // If we have a complete frame, decode and send it
-            if frame_buf.len() == frame_size {
-                let mut frame_data = [0u8; std::mem::size_of::<EpollDone>()];
-                frame_data.copy_from_slice(&frame_buf);
-                let done =
-                    unsafe { std::ptr::read_unaligned(frame_data.as_ptr().cast::<EpollDone>()) };
-                let _ = done_tx.send(done);
-                frame_buf.clear();
-            } else {
-                // Need more data from epoll_wait
-                break;
-            }
-        }
-    }
-
-    unsafe {
-        libc::close(epoll_fd);
-        libc::close(fd);
-    }
-}
-
-fn make_pipe() -> io::Result<(RawFd, RawFd)> {
-    let mut fds = [0; 2];
-    let rc = unsafe { pipe2(fds.as_mut_ptr(), O_NONBLOCK | O_CLOEXEC) };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok((fds[0], fds[1]))
-}
-
-fn set_worker_priority() {
-    unsafe {
-        // Use SCHED_OTHER (normal scheduling) with high nice priority for low-latency
-        // This allows the kernel to idle the core when epoll_wait blocks, avoiding
-        // CPU saturation while maintaining responsive wakeups
-        let _ = setpriority(PRIO_PROCESS, 0, -15);
-    }
-}
-
-fn set_passthrough_priority() {
-    set_worker_priority();
-}
-
-pub fn passthrough(fd_a: RawFd, fd_b: RawFd) -> io::Result<EpollStats> {
-    set_passthrough_priority();
-    let mut stats = EpollStats::default();
-    let rc = unsafe { lure_epoll_passthrough(fd_a, fd_b, &raw mut stats) };
-    if rc < 0 {
-        return Err(io::Error::from_raw_os_error(-rc));
-    }
-    if rc > 0 {
-        return Err(io::Error::other("epoll passthrough failed"));
-    }
-    Ok(stats)
-}
-
 pub fn duplicate_fd(fd: RawFd) -> io::Result<RawFd> {
     let rc = unsafe { dup(fd) };
     if rc < 0 {
@@ -551,17 +314,182 @@ pub(crate) fn probe() -> io::Result<()> {
     }
 }
 
+async fn observe_and_trip(shared_addr: usize, progress: Option<Arc<EpollProgress>>) {
+    let mut wd_last_chunks: Option<u64> = None;
+    let mut wd_tick_100ms = 0u32;
+    let mut wd_stall_polls = 0u32;
+
+    loop {
+        let shared = unsafe { &mut *(shared_addr as *mut LureEpollShared) };
+        let stats = unsafe { shared.stats_volatile() };
+        if let Some(progress) = &progress {
+            progress.store_stats(stats);
+        }
+        let state = unsafe { shared.state_flags_volatile() };
+        let chunks = stats.c2s_chunks.saturating_add(stats.s2c_chunks);
+
+        // Fast observer loop for stats (100ms), with independent watchdog cadence (5s).
+        wd_tick_100ms = wd_tick_100ms.saturating_add(1);
+        if wd_tick_100ms >= 50 {
+            wd_tick_100ms = 0;
+            if let Some(prev) = wd_last_chunks {
+                if prev == chunks {
+                    wd_stall_polls = wd_stall_polls.saturating_add(1);
+                    // 12 x 5s windows ~= 60s with no packet progress.
+                    if wd_stall_polls >= 12 {
+                        unsafe { shared.set_abort_once() };
+                    }
+                } else {
+                    wd_stall_polls = 0;
+                }
+            }
+            wd_last_chunks = Some(chunks);
+        }
+
+        if (state & LURE_EPOLL_DONE) != 0 {
+            if let Some(progress) = &progress {
+                progress.store_stats(stats);
+            }
+            break;
+        }
+
+        sleep(Duration::from_millis(100)).await;
+    }
+}
+
+fn run_pair_blocking(
+    fd_a: RawFd,
+    fd_b: RawFd,
+    id: u64,
+    progress: Option<Arc<EpollProgress>>,
+    rt: tokio::runtime::Handle,
+) -> EpollDone {
+    let mut shared = Box::new(LureEpollShared::new(fd_a as c_int, fd_b as c_int));
+    let fail_signal = Box::new(StartupFailSignal::default());
+
+    let mut conn: *mut LureEpollConnection = std::ptr::null_mut();
+    let rc = unsafe {
+        lure_epoll_connection_main(
+            shared.as_mut(),
+            startup_fail_cb,
+            (&*fail_signal as *const StartupFailSignal).cast_mut().cast::<c_void>(),
+            &raw mut conn,
+        )
+    };
+
+    if rc < 0 {
+        let err = if fail_signal.failed.load(Ordering::Acquire) {
+            -fail_signal.err.load(Ordering::Relaxed)
+        } else {
+            rc
+        };
+        return EpollDone {
+            id,
+            stats: EpollStats::default(),
+            result: err,
+        };
+    }
+
+    if conn.is_null() {
+        return EpollDone {
+            id,
+            stats: EpollStats::default(),
+            result: -libc::EIO,
+        };
+    }
+
+    let observe_addr = (&mut *shared as *mut LureEpollShared) as usize;
+    let observer = rt.spawn(async move {
+        observe_and_trip(observe_addr, progress).await;
+    });
+
+    let join_rc = unsafe { lure_epoll_connection_join(conn) };
+    unsafe {
+        lure_epoll_connection_free(conn);
+    }
+    let _ = rt.block_on(observer);
+
+    let result = if join_rc < 0 {
+        join_rc
+    } else {
+        unsafe { shared.result_volatile() }
+    };
+
+    let stats = unsafe { shared.stats_volatile() };
+    EpollDone {
+        id,
+        stats,
+        result,
+    }
+}
+
 pub async fn passthrough_basic(a: &mut Connection, b: &mut Connection) -> io::Result<()> {
     let fd_a = duplicate_fd(a.as_ref().as_raw_fd())?;
     let fd_b = duplicate_fd(b.as_ref().as_raw_fd())?;
-    tokio::task::spawn_blocking(move || {
-        let res = passthrough(fd_a, fd_b);
-        // Close the duplicated FDs after passthrough completes
-        let _ = unsafe { close(fd_a) };
-        let _ = unsafe { close(fd_b) };
-        res
-    })
-    .await
-    .map_err(|err| io::Error::other(err.to_string()))??;
+
+    let mut shared = Box::new(LureEpollShared::new(fd_a as c_int, fd_b as c_int));
+    let fail_signal = Box::new(StartupFailSignal::default());
+
+    let mut conn: *mut LureEpollConnection = std::ptr::null_mut();
+    let rc = unsafe {
+        lure_epoll_connection_main(
+            shared.as_mut(),
+            startup_fail_cb,
+            (&*fail_signal as *const StartupFailSignal).cast_mut().cast::<c_void>(),
+            &raw mut conn,
+        )
+    };
+
+    if rc < 0 {
+        let err = if fail_signal.failed.load(Ordering::Acquire) {
+            fail_signal.err.load(Ordering::Relaxed)
+        } else {
+            -rc
+        };
+        return Err(io::Error::from_raw_os_error(err));
+    }
+
+    if conn.is_null() {
+        return Err(io::Error::other("epoll startup returned null connection handle"));
+    }
+
+    let observe_addr = (&mut *shared as *mut LureEpollShared) as usize;
+    let observer = tokio::spawn(async move {
+        observe_and_trip(observe_addr, None).await;
+    });
+
+    let conn_addr = conn as usize;
+    let join_task = tokio::task::spawn_blocking(move || {
+        let conn = conn_addr as *mut LureEpollConnection;
+        let rc = unsafe { lure_epoll_connection_join(conn) };
+        unsafe {
+            lure_epoll_connection_free(conn);
+        }
+        rc
+    });
+
+    let (_observer_res, join_res) = tokio::join!(observer, join_task);
+    let join_rc = join_res.map_err(|err| io::Error::other(err.to_string()))?;
+
+    if join_rc < 0 {
+        return Err(io::Error::from_raw_os_error(-join_rc));
+    }
+
+    let result = unsafe { shared.result_volatile() };
+    if result < 0 {
+        return Err(io::Error::from_raw_os_error(-result));
+    }
+
     Ok(())
+}
+
+pub fn passthrough(_fd_a: RawFd, _fd_b: RawFd) -> io::Result<EpollStats> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "use passthrough_basic with epoll connection main",
+    ))
+}
+
+pub fn close_fd(fd: RawFd) {
+    let _ = unsafe { close(fd) };
 }

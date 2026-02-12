@@ -1610,12 +1610,9 @@ version = "0.1.0"
 dependencies = [
  "cc",
  "criterion",
- "crossbeam-channel",
- "dashmap",
  "io-uring 0.7.11",
  "libc",
  "log",
- "num_cpus",
  "tokio",
  "tokio-uring",
 ]
