@@ -1,6 +1,8 @@
 use std::{os::fd::AsRawFd, sync::Arc};
 
 use net::sock::epoll::{EpollBackend, EpollProgress, EpollStats, duplicate_fd};
+use tokio::io::AsyncWriteExt;
+use tokio::time::{Duration, Instant, sleep};
 
 use crate::{error::ReportableError, inspect::drive_transport_metrics, router::Session};
 
@@ -67,6 +69,79 @@ fn record_epoll_delta(
     }
 }
 
+async fn drain_pending(
+    from: &mut net::sock::epoll::Connection,
+    to: &mut net::sock::epoll::Connection,
+    inspect: &crate::router::inspect::SessionInspectState,
+    s2c: bool,
+) -> anyhow::Result<()> {
+    let mut buf = vec![0u8; 16 * 1024];
+    loop {
+        match from.as_ref().try_read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                to.as_mut().write_all(&buf[..n]).await?;
+                if s2c {
+                    inspect.record_s2c(n as u64);
+                } else {
+                    inspect.record_c2s(n as u64);
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(())
+}
+
+async fn pre_offload_pump(
+    client: &mut net::sock::epoll::Connection,
+    server: &mut net::sock::epoll::Connection,
+    inspect: &crate::router::inspect::SessionInspectState,
+) -> anyhow::Result<()> {
+    let deadline = Instant::now() + Duration::from_millis(40);
+    loop {
+        let mut moved = false;
+        {
+            let mut buf = vec![0u8; 16 * 1024];
+            loop {
+                match server.as_ref().try_read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        client.as_mut().write_all(&buf[..n]).await?;
+                        inspect.record_s2c(n as u64);
+                        moved = true;
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(err) => return Err(err.into()),
+                }
+            }
+        }
+        {
+            let mut buf = vec![0u8; 16 * 1024];
+            loop {
+                match client.as_ref().try_read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        server.as_mut().write_all(&buf[..n]).await?;
+                        inspect.record_c2s(n as u64);
+                        moved = true;
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(err) => return Err(err.into()),
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        if !moved {
+            sleep(Duration::from_millis(1)).await;
+        }
+    }
+    Ok(())
+}
+
 pub async fn passthrough_now(
     client: &mut net::sock::epoll::Connection,
     server: &mut net::sock::epoll::Connection,
@@ -75,6 +150,9 @@ pub async fn passthrough_now(
     #[cfg(all(feature = "ebpf", target_os = "linux"))]
     {
         if net::sock::ebpf::ebpf_enabled() {
+            pre_offload_pump(client, server, &session.inspect).await?;
+            drain_pending(server, client, &session.inspect, true).await?;
+            drain_pending(client, server, &session.inspect, false).await?;
             return crate::sock::ebpf::passthrough_now(
                 client.as_ref().as_raw_fd(),
                 server.as_ref().as_raw_fd(),

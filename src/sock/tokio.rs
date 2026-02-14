@@ -6,6 +6,7 @@ use net::sock::tokio::Connection;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::broadcast,
+    time::{Duration, Instant, sleep},
 };
 
 use crate::{
@@ -49,6 +50,80 @@ where
     Ok(())
 }
 
+async fn drain_pending(
+    from: &mut Connection,
+    to: &mut Connection,
+    inspect: &crate::router::inspect::SessionInspectState,
+    s2c: bool,
+) -> anyhow::Result<()> {
+    let mut buf = vec![0u8; 16 * 1024];
+    loop {
+        match from.as_ref().try_read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                to.as_mut().write_all(&buf[..n]).await?;
+                if s2c {
+                    inspect.record_s2c(n as u64);
+                } else {
+                    inspect.record_c2s(n as u64);
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(())
+}
+
+async fn pre_offload_pump(
+    client: &mut Connection,
+    server: &mut Connection,
+    inspect: &crate::router::inspect::SessionInspectState,
+) -> anyhow::Result<()> {
+    let deadline = Instant::now() + Duration::from_millis(40);
+    loop {
+        let mut moved = false;
+        {
+            let mut buf = vec![0u8; 16 * 1024];
+            loop {
+                match server.as_ref().try_read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        client.as_mut().write_all(&buf[..n]).await?;
+                        inspect.record_s2c(n as u64);
+                        moved = true;
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(err) => return Err(err.into()),
+                }
+            }
+        }
+        {
+            let mut buf = vec![0u8; 16 * 1024];
+            loop {
+                match client.as_ref().try_read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        server.as_mut().write_all(&buf[..n]).await?;
+                        inspect.record_c2s(n as u64);
+                        moved = true;
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(err) => return Err(err.into()),
+                }
+            }
+        }
+
+        if Instant::now() >= deadline {
+            break;
+        }
+        if !moved {
+            sleep(Duration::from_millis(1)).await;
+        }
+    }
+    Ok(())
+}
+
 pub async fn passthrough_now(
     client: &mut Connection,
     server: &mut Connection,
@@ -57,6 +132,9 @@ pub async fn passthrough_now(
     #[cfg(all(feature = "ebpf", target_os = "linux"))]
     {
         if net::sock::ebpf::ebpf_enabled() {
+            pre_offload_pump(client, server, &session.inspect).await?;
+            drain_pending(server, client, &session.inspect, true).await?;
+            drain_pending(client, server, &session.inspect, false).await?;
             return crate::sock::ebpf::passthrough_now(
                 client.as_ref().as_raw_fd(),
                 server.as_ref().as_raw_fd(),
