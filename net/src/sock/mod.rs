@@ -1,4 +1,14 @@
+#[cfg(all(target_os = "linux", feature = "ebpf"))]
+pub mod ebpf;
 pub mod tokio;
+#[cfg(not(all(target_os = "linux", feature = "ebpf")))]
+pub mod ebpf {
+    use std::{io, os::fd::RawFd};
+
+    pub fn offload_pair_and_wait(_fd_a: RawFd, _fd_b: RawFd) -> io::Result<bool> {
+        Ok(false)
+    }
+}
 // Linux-only backends.
 //
 // On non-Linux platforms we provide small compatibility shims so the crate

@@ -11,8 +11,10 @@ use std::{
 };
 
 use libc::{c_int, c_void, close, dup};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::time::{Duration, sleep};
+use tokio::{
+    net::{TcpListener, TcpStream},
+    time::{Duration, sleep},
+};
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
@@ -160,7 +162,10 @@ impl EpollBackend {
         &self,
         fd_a: RawFd,
         fd_b: RawFd,
-    ) -> io::Result<(tokio::sync::oneshot::Receiver<EpollDone>, Arc<EpollProgress>)> {
+    ) -> io::Result<(
+        tokio::sync::oneshot::Receiver<EpollDone>,
+        Arc<EpollProgress>,
+    )> {
         if self.shutdown.load(Ordering::Relaxed) {
             close_fd(fd_a);
             close_fd(fd_b);
@@ -372,7 +377,9 @@ fn run_pair_blocking(
         lure_epoll_connection_main(
             shared.as_mut(),
             startup_fail_cb,
-            (&*fail_signal as *const StartupFailSignal).cast_mut().cast::<c_void>(),
+            (&*fail_signal as *const StartupFailSignal)
+                .cast_mut()
+                .cast::<c_void>(),
             &raw mut conn,
         )
     };
@@ -416,11 +423,7 @@ fn run_pair_blocking(
     };
 
     let stats = unsafe { shared.stats_volatile() };
-    EpollDone {
-        id,
-        stats,
-        result,
-    }
+    EpollDone { id, stats, result }
 }
 
 pub async fn passthrough_basic(a: &mut Connection, b: &mut Connection) -> io::Result<()> {
@@ -435,7 +438,9 @@ pub async fn passthrough_basic(a: &mut Connection, b: &mut Connection) -> io::Re
         lure_epoll_connection_main(
             shared.as_mut(),
             startup_fail_cb,
-            (&*fail_signal as *const StartupFailSignal).cast_mut().cast::<c_void>(),
+            (&*fail_signal as *const StartupFailSignal)
+                .cast_mut()
+                .cast::<c_void>(),
             &raw mut conn,
         )
     };
@@ -450,7 +455,9 @@ pub async fn passthrough_basic(a: &mut Connection, b: &mut Connection) -> io::Re
     }
 
     if conn.is_null() {
-        return Err(io::Error::other("epoll startup returned null connection handle"));
+        return Err(io::Error::other(
+            "epoll startup returned null connection handle",
+        ));
     }
 
     let observe_addr = (&mut *shared as *mut LureEpollShared) as usize;

@@ -21,6 +21,7 @@ criterion = "0.8"
 [features]
 packet-debug = []
 uring = ["dep:tokio-uring", "dep:io-uring"]
+ebpf = []
 
 [[bench]]
 name = "mc"

@@ -62,6 +62,7 @@ tokio_unstable = []
 verbose = []
 packet-debug = ["net/packet-debug"]
 uring = ["net/uring"]
+ebpf = ["net/ebpf"]
 
 [profile.release]
 incremental = true

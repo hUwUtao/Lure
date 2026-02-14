@@ -1,3 +1,6 @@
+#[cfg(all(feature = "ebpf", target_os = "linux"))]
+use std::os::fd::AsRawFd;
+
 use futures::FutureExt;
 use net::sock::tokio::Connection;
 use tokio::{
@@ -51,6 +54,28 @@ pub async fn passthrough_now(
     server: &mut Connection,
     session: &Session,
 ) -> anyhow::Result<()> {
+    #[cfg(all(feature = "ebpf", target_os = "linux"))]
+    {
+        let client_fd = client.as_ref().as_raw_fd();
+        let server_fd = server.as_ref().as_raw_fd();
+        let offload_result = tokio::task::spawn_blocking(move || {
+            net::sock::ebpf::offload_pair_and_wait(client_fd, server_fd)
+        })
+        .await
+        .map_err(anyhow::Error::from)?;
+
+        match offload_result {
+            Ok(true) => {
+                let _ = session;
+                return Ok(());
+            }
+            Ok(false) => {}
+            Err(err) => {
+                log::warn!("eBPF offload unavailable for tokio passthrough, falling back: {err}");
+            }
+        }
+    }
+
     let cad = *client.addr();
     let rad = *server.addr();
     let (mut client_read, mut client_write) = client.as_mut().split();
