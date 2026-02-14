@@ -74,23 +74,13 @@ pub async fn passthrough_now(
 ) -> anyhow::Result<()> {
     #[cfg(all(feature = "ebpf", target_os = "linux"))]
     {
-        let client_fd = client.as_ref().as_raw_fd();
-        let server_fd = server.as_ref().as_raw_fd();
-        let offload_result = tokio::task::spawn_blocking(move || {
-            net::sock::ebpf::offload_pair_and_wait(client_fd, server_fd)
-        })
-        .await
-        .map_err(anyhow::Error::from)?;
-
-        match offload_result {
-            Ok(true) => {
-                let _ = session;
-                return Ok(());
-            }
-            Ok(false) => {}
-            Err(err) => {
-                log::warn!("eBPF offload unavailable for epoll passthrough, falling back: {err}");
-            }
+        if net::sock::ebpf::ebpf_enabled() {
+            return crate::sock::ebpf::passthrough_now(
+                client.as_ref().as_raw_fd(),
+                server.as_ref().as_raw_fd(),
+                session,
+            )
+            .await;
         }
     }
 

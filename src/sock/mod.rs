@@ -1,3 +1,5 @@
+#[cfg(all(feature = "ebpf", target_os = "linux"))]
+pub(crate) mod ebpf;
 #[cfg(target_os = "linux")]
 pub(crate) mod epoll;
 #[cfg(not(target_os = "linux"))]

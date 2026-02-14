@@ -3,10 +3,49 @@ pub mod ebpf;
 pub mod tokio;
 #[cfg(not(all(target_os = "linux", feature = "ebpf")))]
 pub mod ebpf {
-    use std::{io, os::fd::RawFd};
+    use std::{io, os::fd::RawFd, sync::Arc};
 
-    pub fn offload_pair_and_wait(_fd_a: RawFd, _fd_b: RawFd) -> io::Result<bool> {
-        Ok(false)
+    #[derive(Debug, Default, Clone, Copy)]
+    pub struct EbpfStats {
+        pub loop_polls: u64,
+        pub disconnect_events: u64,
+    }
+
+    #[derive(Default)]
+    pub struct EbpfProgress;
+
+    impl EbpfProgress {
+        pub fn snapshot(&self) -> EbpfStats {
+            EbpfStats::default()
+        }
+    }
+
+    #[derive(Debug, Default, Clone, Copy)]
+    pub struct EbpfDone {
+        pub result: i32,
+        pub stats: EbpfStats,
+    }
+
+    #[must_use]
+    pub fn ebpf_enabled() -> bool {
+        false
+    }
+
+    pub fn offload_pair_and_wait(_fd_a: RawFd, _fd_b: RawFd) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "eBPF offload is unsupported on this build target",
+        ))
+    }
+
+    pub fn spawn_pair_observed(
+        _fd_a: RawFd,
+        _fd_b: RawFd,
+    ) -> io::Result<(tokio::sync::oneshot::Receiver<EbpfDone>, Arc<EbpfProgress>)> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "eBPF offload is unsupported on this build target",
+        ))
     }
 }
 // Linux-only backends.
