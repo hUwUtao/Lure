@@ -1,7 +1,9 @@
 use std::{
     ffi::CString,
-    io, mem,
+    fs, io, mem,
     os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+    path::{Path, PathBuf},
+    process::Command,
     sync::{
         Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
@@ -15,6 +17,11 @@ const BPF_OBJ_GET: libc::c_uint = 7;
 const BPF_ANY: u64 = 0;
 const SO_COOKIE: libc::c_int = 57;
 const LOOP_POLL_TIMEOUT_MS: libc::c_int = 100;
+const DEFAULT_PIN_DIR: &str = "/sys/fs/bpf/lure";
+const DEFAULT_MAP_NAME: &str = "lure_sockhash";
+const DEFAULT_PROG_NAME: &str = "lure_msg_verdict";
+const LEGACY_MAP_NAME: &str = "sockhash";
+const KERNEL_OBJ: &[u8] = include_bytes!(env!("LURE_EBPF_OBJ"));
 
 #[repr(C)]
 struct BpfAttrObj {
@@ -38,11 +45,22 @@ struct Endpoint {
 
 impl Endpoint {
     fn from_env() -> io::Result<Self> {
-        let path = std::env::var("LURE_EBPF_SOCKHASH")
+        if let Some(path) = std::env::var("LURE_EBPF_SOCKHASH")
             .ok()
             .or_else(|| std::env::var("NET_EBPF_SOCKHASH").ok())
-            .unwrap_or_else(|| "/sys/fs/bpf/lure/sockhash".to_string());
-        let map_fd = open_pinned_map(&path)?;
+        {
+            let map_fd = open_or_bootstrap_map(Path::new(&path))?;
+            return Ok(Self { map_fd });
+        }
+
+        // Default to the new pinned map name, then fall back to legacy name.
+        let preferred = Path::new(DEFAULT_PIN_DIR).join(DEFAULT_MAP_NAME);
+        if let Ok(map_fd) = open_or_bootstrap_map(&preferred) {
+            return Ok(Self { map_fd });
+        }
+
+        let legacy = Path::new(DEFAULT_PIN_DIR).join(LEGACY_MAP_NAME);
+        let map_fd = open_pinned_map(&legacy)?;
         Ok(Self { map_fd })
     }
 
@@ -55,7 +73,7 @@ impl Endpoint {
         let key_a = socket_cookie(fd_a)?;
         let key_b = socket_cookie(fd_b)?;
         let _guard = PairGuard::new(self.map_fd.as_raw_fd(), key_a, key_b, fd_a, fd_b)?;
-        wait_for_disconnect_bpf_loop(fd_a, fd_b, progress)
+        EbpfLoopContext::new(fd_a, fd_b).run_loop(progress)
     }
 }
 
@@ -92,18 +110,36 @@ static ENDPOINT: OnceLock<Result<Endpoint, String>> = OnceLock::new();
 #[derive(Debug, Default, Clone, Copy)]
 pub struct EbpfStats {
     pub loop_polls: u64,
+    pub poll_wakeups: u64,
+    pub poll_timeouts: u64,
+    pub poll_errors: u64,
     pub disconnect_events: u64,
 }
 
 #[derive(Default)]
 pub struct EbpfProgress {
     loop_polls: AtomicU64,
+    poll_wakeups: AtomicU64,
+    poll_timeouts: AtomicU64,
+    poll_errors: AtomicU64,
     disconnect_events: AtomicU64,
 }
 
 impl EbpfProgress {
     fn inc_loop_poll(&self) {
         self.loop_polls.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn inc_poll_wakeup(&self) {
+        self.poll_wakeups.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn inc_poll_timeout(&self) {
+        self.poll_timeouts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn inc_poll_error(&self) {
+        self.poll_errors.fetch_add(1, Ordering::Relaxed);
     }
 
     fn inc_disconnect_event(&self) {
@@ -113,6 +149,9 @@ impl EbpfProgress {
     pub fn snapshot(&self) -> EbpfStats {
         EbpfStats {
             loop_polls: self.loop_polls.load(Ordering::Relaxed),
+            poll_wakeups: self.poll_wakeups.load(Ordering::Relaxed),
+            poll_timeouts: self.poll_timeouts.load(Ordering::Relaxed),
+            poll_errors: self.poll_errors.load(Ordering::Relaxed),
             disconnect_events: self.disconnect_events.load(Ordering::Relaxed),
         }
     }
@@ -175,7 +214,14 @@ pub fn spawn_pair_observed(
     Ok((rx, progress))
 }
 
-fn open_pinned_map(path: &str) -> io::Result<OwnedFd> {
+fn open_pinned_map(path: &Path) -> io::Result<OwnedFd> {
+    let text = path
+        .to_str()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "non-utf8 map path"))?;
+    open_pinned_map_str(text)
+}
+
+fn open_pinned_map_str(path: &str) -> io::Result<OwnedFd> {
     let path = CString::new(path).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -201,6 +247,95 @@ fn open_pinned_map(path: &str) -> io::Result<OwnedFd> {
     }
     let fd = unsafe { OwnedFd::from_raw_fd(rc as RawFd) };
     Ok(fd)
+}
+
+fn open_or_bootstrap_map(path: &Path) -> io::Result<OwnedFd> {
+    match open_pinned_map(path) {
+        Ok(fd) => Ok(fd),
+        Err(first_err) => {
+            if !ebpf_enabled() {
+                return Err(first_err);
+            }
+            bootstrap_kernel_program(path)?;
+            open_pinned_map(path)
+        }
+    }
+}
+
+fn bootstrap_kernel_program(map_path: &Path) -> io::Result<()> {
+    let pin_dir = map_path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "map path has no parent"))?;
+    fs::create_dir_all(pin_dir)?;
+
+    let obj_path = PathBuf::from("/tmp/lure_sockhash_kern.o");
+    fs::write(&obj_path, KERNEL_OBJ)?;
+
+    let prog_path = pin_dir.join(DEFAULT_PROG_NAME);
+    let default_map_path = pin_dir.join(DEFAULT_MAP_NAME);
+    let load_status = run_bpftool([
+        "prog",
+        "load",
+        obj_path.to_str().unwrap_or("/tmp/lure_sockhash_kern.o"),
+        prog_path
+            .to_str()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "non-utf8 prog path"))?,
+        "type",
+        "sk_msg",
+        "pinmaps",
+        pin_dir
+            .to_str()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "non-utf8 pin dir"))?,
+    ])?;
+    if !load_status.success() {
+        return Err(io::Error::other("bpftool prog load failed"));
+    }
+
+    if map_path != default_map_path.as_path() {
+        let pin_map_status = run_bpftool([
+            "map",
+            "pin",
+            "pinned",
+            default_map_path.to_str().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "non-utf8 default map path")
+            })?,
+            map_path
+                .to_str()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "non-utf8 map path"))?,
+        ])?;
+        if !pin_map_status.success() {
+            return Err(io::Error::other("bpftool map pin failed"));
+        }
+    }
+
+    let attach_status = run_bpftool([
+        "prog",
+        "attach",
+        "pinned",
+        prog_path
+            .to_str()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "non-utf8 prog path"))?,
+        "sk_msg_verdict",
+        "pinned",
+        map_path
+            .to_str()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "non-utf8 map path"))?,
+    ])?;
+    if !attach_status.success() {
+        return Err(io::Error::other("bpftool prog attach failed"));
+    }
+    Ok(())
+}
+
+fn run_bpftool<const N: usize>(args: [&str; N]) -> io::Result<std::process::ExitStatus> {
+    let direct = Command::new("bpftool").args(args).status();
+    match direct {
+        Ok(status) => Ok(status),
+        Err(_) => Command::new("sudo")
+            .args(["-n", "bpftool"])
+            .args(args)
+            .status(),
+    }
 }
 
 fn map_update_sockfd(map_fd: RawFd, key: &u64, sock_fd: RawFd) -> io::Result<()> {
@@ -260,7 +395,8 @@ fn socket_cookie(fd: RawFd) -> io::Result<u64> {
 }
 
 fn run_pair_blocking(map_fd: RawFd, fd_a: RawFd, fd_b: RawFd, progress: &EbpfProgress) -> i32 {
-    match offload_pair_and_wait_with_map(map_fd, fd_a, fd_b, Some(progress)) {
+    let loop_ctx = EbpfLoopContext::new(fd_a, fd_b);
+    match offload_pair_and_wait_with_map(map_fd, fd_a, fd_b, Some(progress), &loop_ctx) {
         Ok(()) => 0,
         Err(err) => -errno_from_io_error(&err),
     }
@@ -271,58 +407,75 @@ fn offload_pair_and_wait_with_map(
     fd_a: RawFd,
     fd_b: RawFd,
     progress: Option<&EbpfProgress>,
+    loop_ctx: &EbpfLoopContext,
 ) -> io::Result<()> {
     let key_a = socket_cookie(fd_a)?;
     let key_b = socket_cookie(fd_b)?;
     let _guard = PairGuard::new(map_fd, key_a, key_b, fd_a, fd_b)?;
-    wait_for_disconnect_bpf_loop(fd_a, fd_b, progress)
+    loop_ctx.run_loop(progress)
 }
 
-fn wait_for_disconnect_bpf_loop(
-    fd_a: RawFd,
-    fd_b: RawFd,
-    progress: Option<&EbpfProgress>,
-) -> io::Result<()> {
-    let mut poll_fds = [
-        libc::pollfd {
-            fd: fd_a,
-            events: libc::POLLERR | libc::POLLHUP | libc::POLLRDHUP,
-            revents: 0,
-        },
-        libc::pollfd {
-            fd: fd_b,
-            events: libc::POLLERR | libc::POLLHUP | libc::POLLRDHUP,
-            revents: 0,
-        },
-    ];
+struct EbpfLoopContext {
+    poll_fds: [libc::pollfd; 2],
+}
 
-    loop {
-        let rc = unsafe {
-            libc::poll(
-                poll_fds.as_mut_ptr(),
-                poll_fds.len() as libc::nfds_t,
-                LOOP_POLL_TIMEOUT_MS,
-            )
-        };
-        if rc < 0 {
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::Interrupted {
+impl EbpfLoopContext {
+    fn new(fd_a: RawFd, fd_b: RawFd) -> Self {
+        Self {
+            poll_fds: [
+                libc::pollfd {
+                    fd: fd_a,
+                    events: libc::POLLERR | libc::POLLHUP | libc::POLLRDHUP,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: fd_b,
+                    events: libc::POLLERR | libc::POLLHUP | libc::POLLRDHUP,
+                    revents: 0,
+                },
+            ],
+        }
+    }
+
+    fn run_loop(&self, progress: Option<&EbpfProgress>) -> io::Result<()> {
+        let mut poll_fds = self.poll_fds;
+        loop {
+            let rc = unsafe {
+                libc::poll(
+                    poll_fds.as_mut_ptr(),
+                    poll_fds.len() as libc::nfds_t,
+                    LOOP_POLL_TIMEOUT_MS,
+                )
+            };
+            if rc < 0 {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                if let Some(progress) = progress {
+                    progress.inc_poll_error();
+                }
+                return Err(err);
+            }
+            if let Some(progress) = progress {
+                progress.inc_loop_poll();
+            }
+            if rc == 0 {
+                if let Some(progress) = progress {
+                    progress.inc_poll_timeout();
+                }
                 continue;
             }
-            return Err(err);
-        }
-        if let Some(progress) = progress {
-            progress.inc_loop_poll();
-        }
-        if rc == 0 {
-            continue;
-        }
-        for fd in &poll_fds {
-            if (fd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLRDHUP)) != 0 {
-                if let Some(progress) = progress {
-                    progress.inc_disconnect_event();
+            if let Some(progress) = progress {
+                progress.inc_poll_wakeup();
+            }
+            for fd in &poll_fds {
+                if (fd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLRDHUP)) != 0 {
+                    if let Some(progress) = progress {
+                        progress.inc_disconnect_event();
+                    }
+                    return Ok(());
                 }
-                return Ok(());
             }
         }
     }
