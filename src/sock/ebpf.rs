@@ -61,10 +61,16 @@ pub async fn passthrough_now(
     let done = done?;
     let observed = observe_res.unwrap_or_default();
     log::debug!(
-        "eBPF loop stats: polls={} disconnects={} (done polls={} disconnects={})",
+        "eBPF loop stats: polls={} wakeups={} timeouts={} errors={} disconnects={} (done polls={} wakeups={} timeouts={} errors={} disconnects={})",
         observed.loop_polls,
+        observed.poll_wakeups,
+        observed.poll_timeouts,
+        observed.poll_errors,
         observed.disconnect_events,
         done.stats.loop_polls,
+        done.stats.poll_wakeups,
+        done.stats.poll_timeouts,
+        done.stats.poll_errors,
         done.stats.disconnect_events
     );
 
