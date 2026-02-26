@@ -3,7 +3,7 @@
 </p>
 
 <h1 align="center">Lure</h1>
-<p align="center"><em>The native Minecraft reverse proxy that works beyond L7.</em></p>
+<p align="center"><em>The native Minecraft reverse proxy that works.</em></p>
 
 ---
 
@@ -23,7 +23,7 @@
 
 ## What It Is
 
-Lure is a TCP proxy that speaks enough Minecraft to route, filter, and bridge connections without
+Lure is a TCP proxy that speaks enough Minecraft to proxy and filter<sub>(not yet)</sub> connections without
 turning the config into a second programming language.
 
 Its only purpose is to correctly delivers the correct Minecraft server to the client, however it
