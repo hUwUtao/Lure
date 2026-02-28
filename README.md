@@ -3,7 +3,7 @@
 </p>
 
 <h1 align="center">Lure</h1>
-<p align="center"><em>The native Minecraft reverse proxy that works beyond L7.</em></p>
+<p align="center"><em>The native Minecraft reverse proxy that works.</em></p>
 
 ---
 
@@ -18,12 +18,12 @@
 - [Tunneling (Beta)](#tunneling-beta)
 - [Env Vars](#env-vars)
 - [Compatibility / Quirks](#compatibility--quirks)
-- [Development](#dev)
+- [Development](#development)
 - [Credits](#credits)
 
 ## What It Is
 
-Lure is a TCP proxy that speaks enough Minecraft to route, filter, and bridge connections without
+Lure is a TCP proxy that speaks enough Minecraft to proxy and filter<sub>(not yet)</sub> connections without
 turning the config into a second programming language.
 
 Its only purpose is to correctly delivers the correct Minecraft server to the client, however it
@@ -37,8 +37,8 @@ control. If you really interested, you can be the early-adopter by contacting Di
 You can choose one of the connection backends that suits your use.
 
 - **tokio**: Stable, quite fast polling and scales on multiple cores.
-- **epoll**: Beta (Linux-only), the way HAProxy delivers million packets. Still have some scheduling issue that burns up a core.
-- **tokio-uring**: failed to 
+- **epoll**: Beta (Linux-only), the way HAProxy delivers million packets. Enable with `LURE_IO_EPOLL=1`
+- **tokio-uring**: failed to perform under real stress even seems stable. Enable with `LURE_IO_URING=1` (**deprecated**, please don't use)
 
 ## Features
 
@@ -146,6 +146,12 @@ tunnel_token = "8f1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f00112233445566778899aabb
 
 [route.flags]
 tunnel = true
+```
+
+Then run the agents (sign the secret to get token that contains public so it authenticates):
+
+```sh
+tunure agent endpoint:25565 -t a1b2c3d4e5f6:8f1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f00112233445566778899aabb
 ```
 
 ## Env Vars
