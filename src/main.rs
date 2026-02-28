@@ -26,7 +26,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let _ = dotenvy::dotenv();
-    console_subscriber::init();
+    if env_flag_enabled("LURE_ENABLE_TOKIO_CONSOLE") {
+        console_subscriber::init();
+    }
     #[cfg(debug_assertions)]
     env_logger::builder()
         .filter_level(log::LevelFilter::Debug)
@@ -201,4 +203,13 @@ fn apply_proxy_signing_key(config: &mut LureConfig) {
     }
     config.proxy_signing_key = Some(ProxySigningKey::from_bytes(seed.to_vec()));
     log::info!("generated ephemeral proxy signing key");
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    env::var(name).is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }

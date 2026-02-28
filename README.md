@@ -153,6 +153,7 @@ tunnel = true
 - `LURE_RPC`: RPC backend URL (optional)
 - `LURE_PROXY_SIGNING_KEY`: base64 Ed25519 private key for signing proxy headers (optional)
 - `OTEL_EXPORTER_OTLP_ENDPOINT`: enable OTEL export when set
+- `LURE_ENABLE_TOKIO_CONSOLE=1`: enable Tokio console tracing subscriber
 - `LURE_IO_EPOLL=1`: enable epoll backend (beta)
 - `LURE_IO_URING=1`: enable tokio-uring backend (not recommended; requires `--features uring`)
 

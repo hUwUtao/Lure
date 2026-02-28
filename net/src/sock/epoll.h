@@ -18,7 +18,6 @@ typedef struct {
     uint64_t s2c_chunks;
     int32_t result;
     uint32_t state_flags;
-    uint32_t abort_flag;
 } LureEpollShared;
 
 enum {
