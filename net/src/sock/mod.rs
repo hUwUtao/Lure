@@ -3,7 +3,12 @@ pub mod ebpf;
 pub mod tokio;
 #[cfg(not(all(target_os = "linux", feature = "ebpf")))]
 pub mod ebpf {
-    use std::{io, os::fd::RawFd, sync::Arc};
+    use std::{io, sync::Arc};
+
+    #[cfg(unix)]
+    use std::os::fd::RawFd;
+    #[cfg(not(unix))]
+    type RawFd = i32;
 
     #[derive(Debug, Default, Clone, Copy)]
     pub struct EbpfStats {

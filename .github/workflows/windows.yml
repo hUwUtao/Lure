@@ -18,7 +18,7 @@ jobs:
 
       - name: Install nightly toolchain
         run: |
-          rustup toolchain install ${{ env.TOOLCHAIN }} --profile minimal --component clippy rustfmt
+          rustup toolchain install ${{ env.TOOLCHAIN }} --profile minimal --component clippy --component rustfmt
           rustup default ${{ env.TOOLCHAIN }}
 
       - name: Build (release)

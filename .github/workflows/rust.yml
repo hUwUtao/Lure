@@ -69,7 +69,7 @@ jobs:
 
       - name: Install nightly toolchain
         run: |
-          rustup toolchain install ${{ env.TOOLCHAIN }} --profile minimal --component clippy rustfmt
+          rustup toolchain install ${{ env.TOOLCHAIN }} --profile minimal --component clippy --component rustfmt
 
       - name: Add musl target
         run: rustup target add ${{ env.TARGET }} --toolchain ${{ env.TOOLCHAIN }}
@@ -148,7 +148,7 @@ jobs:
 
       - name: Install nightly toolchain
         run: |
-          rustup toolchain install ${{ env.TOOLCHAIN }} --profile minimal --component clippy rustfmt
+          rustup toolchain install ${{ env.TOOLCHAIN }} --profile minimal --component clippy --component rustfmt
 
       - name: Add musl target
         run: rustup target add ${{ env.TARGET }} --toolchain ${{ env.TOOLCHAIN }}
