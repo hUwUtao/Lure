@@ -8,6 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  TOOLCHAIN: nightly-2026-02-06
 
 jobs:
   build:
@@ -17,13 +18,13 @@ jobs:
 
       - name: Install nightly toolchain
         run: |
-          rustup toolchain install nightly --profile minimal
-          rustup default nightly
+          rustup toolchain install ${{ env.TOOLCHAIN }} --profile minimal --component clippy rustfmt
+          rustup default ${{ env.TOOLCHAIN }}
 
       - name: Build (release)
         run: |
-          cargo +nightly build -p lure --bin lure --release --verbose
-          cargo +nightly build -p tun --bin tunure --release --verbose
+          cargo +${{ env.TOOLCHAIN }} build -p lure --bin lure --release --verbose
+          cargo +${{ env.TOOLCHAIN }} build -p tun --bin tunure --release --verbose
 
       - name: Prepare artifact
         shell: pwsh

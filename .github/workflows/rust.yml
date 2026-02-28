@@ -10,6 +10,7 @@ env:
   CARGO_TERM_COLOR: always
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  TOOLCHAIN: nightly-2026-02-06
 
 jobs:
   determine_stable:
@@ -62,25 +63,25 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             ${{ env.CARGO_TARGET_DIR }}
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-default
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}-${{ env.TOOLCHAIN }}-default
           restore-keys: |
-            ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-
+            ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}-${{ env.TOOLCHAIN }}-
 
       - name: Install nightly toolchain
         run: |
-          rustup toolchain install nightly --profile minimal
+          rustup toolchain install ${{ env.TOOLCHAIN }} --profile minimal --component clippy rustfmt
 
       - name: Add musl target
-        run: rustup target add ${{ env.TARGET }} --toolchain nightly
+        run: rustup target add ${{ env.TARGET }} --toolchain ${{ env.TOOLCHAIN }}
 
       - name: Build (default)
-        run: cargo +nightly build --release --target ${{ env.TARGET }} --verbose
+        run: cargo +${{ env.TOOLCHAIN }} build --release --target ${{ env.TARGET }} --verbose
 
       - name: Build tun agent (default)
-        run: cargo +nightly build -p tun --bin tunure --release --target ${{ env.TARGET }} --verbose
+        run: cargo +${{ env.TOOLCHAIN }} build -p tun --bin tunure --release --target ${{ env.TARGET }} --verbose
 
       - name: Test
-        run: cargo +nightly test --release --target ${{ env.TARGET }} --verbose
+        run: cargo +${{ env.TOOLCHAIN }} test --release --target ${{ env.TARGET }} --verbose
 
       - name: Prepare default artifact
         run: |
@@ -141,21 +142,21 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             ${{ env.CARGO_TARGET_DIR }}
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-stable
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}-${{ env.TOOLCHAIN }}-stable
           restore-keys: |
-            ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-
+            ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}-${{ env.TOOLCHAIN }}-
 
       - name: Install nightly toolchain
         run: |
-          rustup toolchain install nightly --profile minimal
+          rustup toolchain install ${{ env.TOOLCHAIN }} --profile minimal --component clippy rustfmt
 
       - name: Add musl target
-        run: rustup target add ${{ env.TARGET }} --toolchain nightly
+        run: rustup target add ${{ env.TARGET }} --toolchain ${{ env.TOOLCHAIN }}
 
       - name: Build [stable] variant
         run: |
-          cargo +nightly build --release --target ${{ env.TARGET }} --verbose
-          cargo +nightly build -p tun --bin tunure --release --target ${{ env.TARGET }} --verbose
+          cargo +${{ env.TOOLCHAIN }} build --release --target ${{ env.TARGET }} --verbose
+          cargo +${{ env.TOOLCHAIN }} build -p tun --bin tunure --release --target ${{ env.TARGET }} --verbose
           mkdir -p release-stable
           cp ${{ env.CARGO_TARGET_DIR }}/${{ env.TARGET }}/release/lure release-stable/lure
           chmod +x release-stable/lure
