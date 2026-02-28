@@ -96,6 +96,10 @@ pub struct LureConfig {
     #[serde(default)]
     pub cooldown: u64,
 
+    /// Per-IP connection rate limit (requests/sec). Set to 0 to disable limiting.
+    #[serde(default = "default_rate_limit_by_ip")]
+    pub rate_limit_by_ip: u32,
+
     /// Localized string map used for placeholder responses.
     #[serde(default)]
     pub strings: HashMap<Box<str>, Arc<str>>,
@@ -180,6 +184,10 @@ const fn default_max_conn() -> u32 {
     65535
 }
 
+const fn default_rate_limit_by_ip() -> u32 {
+    10
+}
+
 fn default_auth_mode() -> String {
     "protected".to_string()
 }
@@ -193,6 +201,7 @@ impl Default for LureConfig {
             proxy_signing_key: None,
             max_conn: default_max_conn(),
             cooldown: 3,
+            rate_limit_by_ip: default_rate_limit_by_ip(),
             strings: HashMap::new(),
             tunnel: TunnelConfig::default(),
             route: Vec::new(),

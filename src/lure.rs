@@ -160,6 +160,7 @@ impl Lure {
         let address: SocketAddr = listener_cfg.parse()?;
         let max_connections = config.max_conn as usize;
         let cooldown = Duration::from_secs(config.cooldown);
+        let rate_limit_by_ip = config.rate_limit_by_ip;
         let inst = config.inst.clone();
         drop(config);
 
@@ -220,7 +221,11 @@ impl Lure {
             let _ = tx.send(listener.local_addr()?);
         }
         let semaphore = Arc::new(Semaphore::new(max_connections));
-        let rate_limiter: RateLimiterController<IpAddr> = RateLimiterController::new(10, cooldown);
+        let rate_limiter: Option<RateLimiterController<IpAddr>> = if rate_limit_by_ip == 0 {
+            None
+        } else {
+            Some(RateLimiterController::new(rate_limit_by_ip, cooldown))
+        };
 
         loop {
             tokio::select! {
@@ -235,12 +240,13 @@ impl Lure {
 
                     // Apply IP-based rate limiting
                     let ip = addr.ip();
-                    if let crate::threat::ratelimit::RateLimitResult::Disallowed { retry_after: _ra } =
-                        rate_limiter.check(&ip)
+                    if let Some(rate_limiter) = &rate_limiter
+                        && let crate::threat::ratelimit::RateLimitResult::Disallowed { retry_after: _ra } =
+                            rate_limiter.check(&ip)
                     {
-                        LureLogger::rate_limited(&ip);
-                        drop(client);
-                        continue;
+                            LureLogger::rate_limited(&ip);
+                            drop(client);
+                            continue;
                     }
 
                     // Try to acquire semaphore (non-blocking)
@@ -287,6 +293,7 @@ impl Lure {
         let address: SocketAddr = listener_cfg.parse()?;
         let max_connections = config.max_conn as usize;
         let cooldown = Duration::from_secs(config.cooldown);
+        let rate_limit_by_ip = config.rate_limit_by_ip;
         let inst = config.inst.clone();
         drop(config);
 
@@ -344,7 +351,11 @@ impl Lure {
         // Start server.
         let listener = LureListener::bind(address).await?;
         let semaphore = Arc::new(Semaphore::new(max_connections));
-        let rate_limiter: RateLimiterController<IpAddr> = RateLimiterController::new(10, cooldown);
+        let rate_limiter: Option<RateLimiterController<IpAddr>> = if rate_limit_by_ip == 0 {
+            None
+        } else {
+            Some(RateLimiterController::new(rate_limit_by_ip, cooldown))
+        };
 
         loop {
             // Accept connection first
@@ -354,12 +365,13 @@ impl Lure {
 
             // Apply IP-based rate limiting
             let ip = addr.ip();
-            if let crate::threat::ratelimit::RateLimitResult::Disallowed { retry_after: _ra } =
-                rate_limiter.check(&ip)
+            if let Some(rate_limiter) = &rate_limiter
+                && let crate::threat::ratelimit::RateLimitResult::Disallowed { retry_after: _ra } =
+                    rate_limiter.check(&ip)
             {
-                LureLogger::rate_limited(&ip);
-                drop(client);
-                continue;
+                    LureLogger::rate_limited(&ip);
+                    drop(client);
+                    continue;
             }
 
             // Try to acquire semaphore (non-blocking)
