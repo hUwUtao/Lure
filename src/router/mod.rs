@@ -29,10 +29,12 @@ mod dest;
 mod endpoint;
 pub(crate) mod inspect;
 mod profile;
+pub mod query;
 pub use attr::RouteAttr;
 pub use dest::Destination;
 pub use endpoint::{Endpoint, TunnelOpt};
 pub use profile::Profile;
+pub use query::QueryCache;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Copy)]
 pub enum RouteFlags {
@@ -105,6 +107,18 @@ impl Route {
     #[must_use]
     pub fn tunnel(&self) -> bool {
         self.read_flag(RouteFlags::Tunnel)
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn cache_query(&self) -> bool {
+        self.read_flag(RouteFlags::CacheQuery)
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn override_query(&self) -> bool {
+        self.read_flag(RouteFlags::OverrideQuery)
     }
 }
 
@@ -212,6 +226,8 @@ pub struct RouterInstance {
     balancer_cursor: AtomicU64,
     /// Inspection registry and fast-path counters
     inspect: Arc<inspect::InspectRegistry>,
+    /// Query cache for Status responses (3s TTL)
+    query_cache: Arc<QueryCache>,
 }
 
 #[derive(Debug)]
@@ -245,11 +261,18 @@ impl RouterInstance {
             metrics_tx,
             balancer_cursor: AtomicU64::new(0),
             inspect: Arc::new(inspect::InspectRegistry::new()),
+            query_cache: Arc::new(QueryCache::new(Duration::from_secs(3))),
         }
     }
 
     pub fn set_instance_name(&self, inst: String) {
         self.inspect.set_instance_name(inst);
+    }
+
+    /// Get a reference to the query cache
+    #[must_use]
+    pub fn query_cache(&self) -> &QueryCache {
+        &self.query_cache
     }
 
     /// Apply or update a route configuration
@@ -384,6 +407,8 @@ impl RouterInstance {
         let mut routes = self.active_routes.write().await;
         for key in keys {
             self.remote_route_unlocked(&mut routes, key).await;
+            // Clean up cache entry for this route
+            self.query_cache.evict(key).await;
         }
         self.collect_routes_count_unlocked(&mut routes);
     }
@@ -394,6 +419,8 @@ impl RouterInstance {
         let mut routes = self.active_routes.write().await;
         self.remote_route_unlocked(&mut routes, route_id).await;
         self.collect_routes_count_unlocked(&mut routes);
+        // Clean up cache entry for this route
+        self.query_cache.evict(route_id).await;
     }
 
     /// Resolve hostname to endpoint and route pair

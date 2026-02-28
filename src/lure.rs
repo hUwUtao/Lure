@@ -504,6 +504,32 @@ impl Lure {
             return Ok(());
         };
 
+        let route = &resolved.route;
+        let route_id = route.id;
+
+        // Check OverrideQuery flag: serve placeholder without contacting backend
+        if route.override_query() {
+            debug!("OverrideQuery set for route {}, serving placeholder", route_id);
+            query::send_status_failure(&mut client, &config, "OVERRIDE_QUERY").await?;
+            query::handle_ping_pong_local(&mut client, self.threat).await?;
+            return Ok(());
+        }
+
+        // Check CacheQuery flag: try cache before backend
+        if route.cache_query() {
+            if let Some(cached_json) = self.router.query_cache().get(route_id).await {
+                debug!(
+                    "CacheQuery cache hit for route {}, serving from cache",
+                    route_id
+                );
+                query::send_status_response(&mut client, &cached_json).await?;
+                query::handle_ping_pong_local(&mut client, self.threat).await?;
+                return Ok(());
+            }
+            debug!("CacheQuery cache miss for route {}, querying backend", route_id);
+        }
+
+        // Live backend query path (used when cache_query is false, or on cache miss)
         let backend_addr = resolved.endpoint;
         let backend_label = backend_addr.to_string();
 
@@ -512,8 +538,8 @@ impl Lure {
             handshake,
             Some(resolved.endpoint_host.as_str()),
             backend_addr.port(),
-            resolved.route.preserve_host(),
-            resolved.route.proxied(),
+            route.preserve_host(),
+            route.proxied(),
             &config,
             client_addr,
         )
@@ -592,43 +618,59 @@ impl Lure {
                 return Ok(());
             }
         };
+
+        // If CacheQuery is set, intercept and cache the response JSON before sending to client
+        if route.cache_query() {
+            let json_bytes = response.json.as_bytes().to_vec();
+            self.router
+                .query_cache()
+                .set(route_id, json_bytes)
+                .await;
+            debug!("CacheQuery cached response for route {}", route_id);
+        }
+
         client.send(&response).await?;
 
-        let ping = match self
-            .threat
-            .nuisance(client.recv::<StatusPingC2s>(), INTENT)
-            .await
-        {
-            Ok(Ok(packet)) => packet,
-            Ok(Err(err)) => {
-                LureLogger::parser_failure(&client_addr, "client status ping", &err);
-                return Err(err);
-            }
-            Err(err) => {
-                if let Some(ClientFail::Timeout { intent, .. }) = err.downcast_ref::<ClientFail>() {
-                    LureLogger::deadline_missed(
-                        "client status ping",
-                        intent.duration,
-                        Some(&client_addr),
-                        None,
-                    );
-                } else {
+        // Handle ping/pong locally if CacheQuery is active, otherwise proxy to backend
+        if route.cache_query() {
+            query::handle_ping_pong_local(&mut client, self.threat).await?;
+        } else {
+            let ping = match self
+                .threat
+                .nuisance(client.recv::<StatusPingC2s>(), INTENT)
+                .await
+            {
+                Ok(Ok(packet)) => packet,
+                Ok(Err(err)) => {
                     LureLogger::parser_failure(&client_addr, "client status ping", &err);
+                    return Err(err);
                 }
-                return Err(err);
-            }
-        };
-        server.send(&ping).await?;
-        match server.recv::<StatusPongS2c>().await {
-            Ok(pong_packet) => client.send(&pong_packet).await?,
-            Err(err) => {
-                LureLogger::parser_failure(&client_addr, "backend status pong", &err);
-                self.metrics.record_failure("status");
-                client
-                    .send(&StatusPongS2c {
-                        payload: ping.payload,
-                    })
-                    .await?;
+                Err(err) => {
+                    if let Some(ClientFail::Timeout { intent, .. }) = err.downcast_ref::<ClientFail>() {
+                        LureLogger::deadline_missed(
+                            "client status ping",
+                            intent.duration,
+                            Some(&client_addr),
+                            None,
+                        );
+                    } else {
+                        LureLogger::parser_failure(&client_addr, "client status ping", &err);
+                    }
+                    return Err(err);
+                }
+            };
+            server.send(&ping).await?;
+            match server.recv::<StatusPongS2c>().await {
+                Ok(pong_packet) => client.send(&pong_packet).await?,
+                Err(err) => {
+                    LureLogger::parser_failure(&client_addr, "backend status pong", &err);
+                    self.metrics.record_failure("status");
+                    client
+                        .send(&StatusPongS2c {
+                            payload: ping.payload,
+                        })
+                        .await?;
+                }
             }
         }
         Ok(())

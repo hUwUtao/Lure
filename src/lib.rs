@@ -11,4 +11,5 @@ pub mod sock;
 pub mod telemetry;
 pub mod threat;
 pub mod tunnel;
+pub mod util;
 pub mod utils;
