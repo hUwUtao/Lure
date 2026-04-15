@@ -157,7 +157,7 @@ pub(super) fn run_update() -> anyhow::Result<()> {
     };
 
     let url =
-        format!("https://github.com/hUwUtao/Lure/releases/latest/download/minitun-{os}-{arch}");
+        format!("https://github.com/illnet/mach/releases/latest/download/minitun-{os}-{arch}");
     info!("downloading update from {url}");
 
     let client = reqwest::blocking::Client::builder()
